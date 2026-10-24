@@ -1077,6 +1077,7 @@ class Lowerer:
             return [Exit(mk_and([state.pc, unknown(f"unanalysed:{function.canonical_name}")]), state.store, ret)]
         for r in function.returns:
             state.env.setdefault(id(r), _zero(r.type))
+        state = _function_scoped_locals(function, state)
         for v in [*function.parameters, *function.returns]:
             # Memory parameters and return values handed a value (not an object): an object of their own from the
             # start, so every branch below writes into the same one.
@@ -1534,12 +1535,8 @@ class Lowerer:
                 yield target, st
             return
         declared = getattr(node, "variable_declaration", None)
-        if node.type == NodeType.VARIABLE and not node.irs and declared is not None and self._memory_var(declared):
-            # ``S memory s;``: a fresh zeroed object each time the declaration runs.
-            st = self._allocate(declared, _zero(declared.type), st)
-        elif node.type == NodeType.VARIABLE and not node.irs and declared is not None and _local_value(declared):
-            # ``uint256 j;``: zero each time the declaration runs (an inner loop's counter, entered again).
-            st = replace(st, env={**st.env, id(declared): _zero(declared.type)})
+        if node.type == NodeType.VARIABLE and not node.irs and declared is not None:
+            st = self._declare(function, declared, st)
         if node.type == NodeType.PLACEHOLDER and body is not None:
             # A modifier's ``_``: the rest of the function, then the modifier's own tail with its locals.
             for done in body(st):
@@ -1648,6 +1645,27 @@ class Lowerer:
             return
         yield from self._succeed(node, st, node.sons)
 
+    def _declare(self, function: Function, declared: Any, st: State) -> State:
+        """A local declared without a value. Since Solidity 0.5 locals are block-scoped: zero (a fresh zeroed object in
+        memory) each time the declaration runs, an inner loop's counter entered again. Before, they are function-scoped,
+        zeroed once at the function's entry (``_function_scoped_locals``), and the declaration emits no code: it keeps
+        what an earlier iteration, or an assignment written above it, left. Where the version can't be read, a local
+        already holding something other than zero is unknown by name."""
+        memory, value = self._memory_var(declared), _local_value(declared)
+        if not (memory or value):
+            return st
+        scoped = _block_scoped(function)
+        if scoped is False:
+            held = st.env.get(id(declared))
+            if memory and not _pointer(held) and not _reference(held):
+                return self._allocate(declared, _zero(declared.type), st)  # first touch: the object entry made
+            return st
+        if scoped is None and st.env.get(id(declared)) not in (None, _zero(declared.type)):
+            return replace(st, env={**st.env, id(declared): unknown("unsupported:declaration_scope")})
+        if memory:
+            return self._allocate(declared, _zero(declared.type), st)
+        return replace(st, env={**st.env, id(declared): _zero(declared.type)})
+
     def _arithmetic(self, ir: Binary, a: Term, b: Term) -> tuple[Term, list]:
         """An arithmetic operation in its operands' type: a narrower type wraps at its own width, a signed one
         divides, shifts and compares as signed; checked arithmetic (Solidity >= 0.8 outside ``unchecked``) reverts
@@ -1733,6 +1751,7 @@ class Lowerer:
             return self._run_from(function, rest, inner, depth)
 
         env = {id(p): self.val(a, st) for p, a in zip(modifier.parameters, ir.arguments)}
+        env = _function_scoped_locals(modifier, State(st.pc, env, st.store)).env
         if modifier.entry_point is None or depth > MAX_DEPTH:
             self.lost = True  # whatever the modifier writes goes unrecorded
             return body(State(mk_and([st.pc, unknown(f"unanalysed:{modifier.canonical_name}")]), {}, st.store))
@@ -3378,6 +3397,30 @@ def _integer(type_: Any) -> tuple[int, bool]:
     if found:
         return 8 * int(found.group(1)), False
     return 256, False
+
+
+def _solc_version(function: Any) -> list[int] | None:
+    """The compilation unit's solc version as [major, minor], or ``None`` where it can't be read."""
+    version = str(getattr(getattr(function, "compilation_unit", None), "solc_version", "") or "")
+    parts = [int(x) for x in version.split(".")[:2] if x.isdigit()]
+    return parts if len(parts) == 2 else None
+
+
+def _block_scoped(function: Any) -> bool | None:
+    """Whether the compiler scopes locals to their block (solc >= 0.5) or to the function (before); ``None`` unread."""
+    parts = _solc_version(function)
+    return None if parts is None else parts >= [0, 5]
+
+
+def _function_scoped_locals(function: Any, state: State) -> State:
+    """Before Solidity 0.5 every value-typed local is zero from the function's entry, whatever branch declares it."""
+    if _block_scoped(function) is not False:
+        return state
+    env = dict(state.env)
+    for var in getattr(function, "local_variables", None) or []:
+        if _local_value(var):
+            env.setdefault(id(var), _zero(var.type))
+    return replace(state, env=env)
 
 
 def _checked_version(contract: Any) -> bool:
