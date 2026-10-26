@@ -57,6 +57,16 @@ contract C {
     // Open after a deposit of each stranger's own.
     function deposit(uint256 a) external { require(a > 0); bal[msg.sender] += a; }
     function withdrawAll() external { uint256 b = bal[msg.sender]; require(b > 0); bal[msg.sender] = 0; total += b; }
+    // Every stranger's own account passes; a contract a stranger calls through never does.
+    function fromAccount(uint256 x) external { require(msg.sender == tx.origin); total += x; }
+    function fromAccountWide(uint256 x) external {
+        require(uint256(uint160(msg.sender)) == uint160(tx.origin));
+        total += x;
+    }
+}
+
+contract Relay {
+    function go(C c) external { c.fromAccount(1); }
 }
 """
 
@@ -65,6 +75,7 @@ def _setup(d):
     d.deploy("Reg")
     d.deploy("Sink")
     d.deploy("C", ("address", "address"), (d.at["Reg"], d.at["Sink"]))
+    d.deploy("Relay")
 
 
 PROBES = [
@@ -120,6 +131,16 @@ def test_a_gate_every_stranger_passes_by_its_arithmetic_is_only_witnessed(d, nam
     v = O.check(d, "C", name, O.verdict(d, "C", name), open_at={"x": 1}, open_proven=False)
     assert v.openness == "open" and v.allowed == "now" and v.witnessed, v
     assert openness_label(v) == "open_witnessed"
+
+
+@pytest.mark.parametrize("name", ["fromAccount", "fromAccountWide"])
+def test_the_caller_against_the_origin_is_never_alike_for_every_address(d, name):
+    # ``msg.sender == tx.origin`` holds for each stranger calling from its own account, never for a contract it
+    # calls through: an address that is a contract is refused. Before, an identity compared with any identity
+    # counted as alike for every address and the open was proven.
+    assert not O.passes(d, "Relay", O.function(d, "Relay", "go"), {"c": d.at["C"]}, sender=O.STRANGERS[0])
+    v = O.check(d, "C", name, O.verdict(d, "C", name), open_at={"x": 1}, open_proven=False)
+    assert v.openness != "open" or v.witnessed, v
 
 
 @pytest.mark.parametrize("name", ["free", "notBlocked", "notOwner", "pay"])

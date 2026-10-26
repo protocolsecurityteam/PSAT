@@ -3882,9 +3882,10 @@ def _kept_identity(t: Term) -> bool:
 
 def _alike_for_strangers(formula: Term, world: World) -> bool:
     """Whether every unconfigured address meets ``formula`` as ``FRESH`` does, by its form alone: the caller (origin,
-    signer) appears only as a mapping key, or as one side of an equality whose other side no identity reaches, each
-    through conversions that keep every address apart; no call, hash or encoding is handed it; no view call reaches
-    code reading ``tx.origin``; no unknown may single anyone out. An unconfigured address holds no entry and equals
+    signer) appears only as a mapping key, or as one side of an equality whose other side no identity reaches (or is
+    that same identity: never the origin against the caller), each through conversions that keep every address
+    apart; no call, hash or encoding is handed it; no view call reaches code reading ``tx.origin``; no unknown may
+    single anyone out. An unconfigured address holds no entry and equals
     no address the contract names, so each such reading is the same for every one of them. Anything else
     (``uint160(msg.sender) % 10 != 0``, an ordering of addresses, a callee handed the caller) is met at the five
     strangers only as a sample (``Verdict.witnessed``)."""
@@ -3917,8 +3918,13 @@ def _alike_for_strangers(formula: Term, world: World) -> bool:
         elif kind == "cmp" and t[1] == "eq":
             a, b = t[2], t[3]
             if _kept_identity(a) or _kept_identity(b):
-                other = b if _kept_identity(a) else a
-                answer = _kept_identity(other) or not contains(other, IDENTITY_KINDS)
+                mine, other = (a, b) if _kept_identity(a) else (b, a)
+                if _kept_identity(other):
+                    # ``msg.sender == msg.sender`` holds for everyone; ``msg.sender == tx.origin`` only for a
+                    # stranger calling from its own account, never a contract it calls through.
+                    answer = _strip_conv(mine) == _strip_conv(other)
+                else:
+                    answer = not contains(other, IDENTITY_KINDS)
             else:
                 answer = alike(a) and alike(b)
         else:
