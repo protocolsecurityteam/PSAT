@@ -5,14 +5,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
-from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol, derive_job_chain_id
+from db.models import AddressLabel, Artifact, Contract, Job, JobStage, JobStatus, Protocol, derive_job_chain_id
 from db.queue import store_artifact
-from schemas.api_requests import AnalyzeRequest
+from schemas.api_requests import AnalyzeRequest, BulkAnalyzeRequest
 from schemas.api_responses import (
     AnalyzeRemainingResponse,
+    BulkAnalyzeResponse,
+    BulkAnalyzeRowResult,
+    BulkLabelOutcome,
     CancelQueuedJobsResponse,
     DeleteCompanyAddressResponse,
     JobDict,
@@ -35,13 +39,71 @@ from utils.chains import (
 )
 
 from . import deps
+from .address_labels import create_label_if_absent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Admin auth is one shared key, so it's the only provable actor.
-W5_ADMIN_ACTOR = "admin_api_key"
+
+class AnalyzeRejected(Exception):
+    """Refused before any job is written; ``status_code``/``detail`` are what the single endpoint returns."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _check_submission_chain(request: AnalyzeRequest) -> None:
+    # Allowlist on the resolved chain, so chainless and company/dapp submissions are unaffected. An address
+    # submission naming a chain must name a registered one: the string is stored verbatim.
+    if request.address and request.chain and request.chain.strip():
+        try:
+            chain_by_name(request.chain)
+        except UnknownChainError as exc:
+            raise AnalyzeRejected(400, str(exc)) from exc
+    resolved_chain_id = derive_job_chain_id(request.chain, request.address)
+    if resolved_chain_id is not None:
+        try:
+            require_supported_chain(resolved_chain_id, context="/api/analyze")
+        except UnsupportedChainError as exc:
+            raise AnalyzeRejected(400, str(exc)) from exc
+
+
+def _company_protocol_id(session: Session, company: str) -> int:
+    # Lookup-only, so a typo 404s instead of minting a protocol.
+    protocol_row = session.execute(
+        select(Protocol).where(func.lower(Protocol.name) == company.lower()).limit(1)
+    ).scalar_one_or_none()
+    if protocol_row is None:
+        raise AnalyzeRejected(404, "Company not found")
+    return protocol_row.id
+
+
+def submit_analysis(session: Session, request: AnalyzeRequest, *, actor: str, protocol_id: int | None = None) -> Job:
+    """Queue one submission; raises :class:`AnalyzeRejected` before writing anything. ``protocol_id`` skips the company
+    lookup when the caller already resolved ``request.company``.
+    """
+    _check_submission_chain(request)
+    # ``rpc_url`` is honored only as a local-node override, so a hosted URL can't shadow eRPC. Sanitized on output.
+    req_dict = request.model_dump()
+    # The membership claim rides as an attributed W5 assertion for the gate, never a source tag.
+    if request.address and request.company:
+        req_dict["protocol_id"] = (
+            protocol_id if protocol_id is not None else _company_protocol_id(session, request.company)
+        )
+        req_dict[HUMAN_ASSERTION_REQUEST_KEY] = human_assertion_request_payload(
+            HumanAssertion(actor=actor, asserted_at=datetime.now(timezone.utc))
+        )
+    if request.dapp_urls:
+        job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
+    elif request.defillama_protocol:
+        job = deps.create_job(session, req_dict, initial_stage=JobStage.defillama_scan)
+    else:
+        job = deps.create_job(session, req_dict)
+    deps.log_admin_mutation("analyze_create", id=str(job.id), stage=job.stage.value)
+    return job
 
 
 @router.get("/api/jobs", dependencies=[Depends(deps.require_admin)], response_model=None)
@@ -53,43 +115,97 @@ def list_jobs() -> list[JobDict]:
 
 
 @router.post("/api/analyze", dependencies=[Depends(deps.require_admin)], response_model=None)
-def analyze_address(request: AnalyzeRequest) -> JobDict:
-    # Allowlist on the resolved chain, so chainless and company/dapp submissions are unaffected. An address
-    # submission naming a chain must name a registered one: the string is stored verbatim.
-    if request.address and request.chain and request.chain.strip():
-        try:
-            chain_by_name(request.chain)
-        except UnknownChainError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    resolved_chain_id = derive_job_chain_id(request.chain, request.address)
-    if resolved_chain_id is not None:
-        try:
-            require_supported_chain(resolved_chain_id, context="/api/analyze")
-        except UnsupportedChainError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+def analyze_address(request: AnalyzeRequest, actor: str = Depends(deps.admin_actor)) -> JobDict:
     with deps.SessionLocal() as session:
-        # ``rpc_url`` is honored only as a local-node override, so a hosted URL can't shadow eRPC. Sanitized on output.
-        req_dict = request.model_dump()
-        # Lookup-only, so a typo 404s instead of minting a protocol. The membership claim rides as an attributed W5
-        # assertion for the gate, never a source tag.
-        if request.address and request.company:
-            protocol_row = session.execute(
-                select(Protocol).where(func.lower(Protocol.name) == request.company.lower()).limit(1)
-            ).scalar_one_or_none()
-            if protocol_row is None:
-                raise HTTPException(status_code=404, detail="Company not found")
-            req_dict["protocol_id"] = protocol_row.id
-            req_dict[HUMAN_ASSERTION_REQUEST_KEY] = human_assertion_request_payload(
-                HumanAssertion(actor=W5_ADMIN_ACTOR, asserted_at=datetime.now(timezone.utc))
-            )
-        if request.dapp_urls:
-            job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
-        elif request.defillama_protocol:
-            job = deps.create_job(session, req_dict, initial_stage=JobStage.defillama_scan)
-        else:
-            job = deps.create_job(session, req_dict)
-        deps.log_admin_mutation("analyze_create", id=str(job.id), stage=job.stage.value)
+        try:
+            job = submit_analysis(session, request, actor=actor)
+        except AnalyzeRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return job.to_dict()
+
+
+_LABEL_NAME_MAX: int = AddressLabel.name.type.length
+
+
+def _label_from_name(session: Session, address: str, chain: str | None, name: str) -> BulkLabelOutcome:
+    # The job is already committed, so a label failure must not fail the row.
+    if len(name) > _LABEL_NAME_MAX:
+        return "skipped_too_long"
+    try:
+        label_chain = chain_by_name(chain).name if chain else "ethereum"
+        return "set" if create_label_if_absent(session, address, label_chain, name) else "kept_existing"
+    except Exception:
+        session.rollback()
+        logger.exception("bulk analyze: label write failed", extra={"address": address, "chain": chain})
+        return "not_set"
+
+
+def _bulk_row_key(address: str, chain: str | None) -> tuple[str, str]:
+    """Rows naming the same job collapse: blank means mainnet, aliases fold to the canonical name."""
+    if not chain:
+        return address.lower(), "ethereum"
+    try:
+        return address.lower(), chain_by_name(chain).name
+    except UnknownChainError:
+        return address.lower(), chain.lower()
+
+
+@router.post("/api/analyze/bulk", dependencies=[Depends(deps.require_admin)], response_model=None)
+def analyze_bulk(body: BulkAnalyzeRequest, actor: str = Depends(deps.admin_actor)) -> BulkAnalyzeResponse:
+    """Each row is exactly a single ``/api/analyze`` address+company submission; a refused row is that row's result."""
+    results: list[BulkAnalyzeRowResult] = []
+    first_row: dict[tuple[str, str], int] = {}
+    with deps.SessionLocal() as session:
+        try:
+            protocol_id = _company_protocol_id(session, body.company)
+        except AnalyzeRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        for index, row in enumerate(body.rows):
+            address = row.address.strip()
+            chain = (row.chain or "").strip() or None
+            name = (row.name or "").strip() or None
+            result: BulkAnalyzeRowResult = {
+                "row": index,
+                "address": address,
+                "chain": chain,
+                "status": "rejected",
+                "job_id": None,
+                "reason": None,
+                "duplicate_of": None,
+                "label": None,
+            }
+            results.append(result)
+            key = _bulk_row_key(address, chain)
+            if key in first_row:
+                result["status"] = "duplicate"
+                result["duplicate_of"] = first_row[key]
+                result["reason"] = "duplicate row in this request"
+                continue
+            try:
+                request = AnalyzeRequest(address=address, chain=chain, name=name, company=body.company)
+            except ValidationError:
+                result["reason"] = "address must be a 20-byte hex address"
+                continue
+            try:
+                job = submit_analysis(session, request, actor=actor, protocol_id=protocol_id)
+            except AnalyzeRejected as exc:
+                result["reason"] = exc.detail
+                continue
+            # Only a queued row claims its key, so a later copy of a refused row is still judged on its own.
+            first_row[key] = index
+            result["status"] = "queued"
+            result["job_id"] = str(job.id)
+            if name is not None and job.address:
+                result["label"] = _label_from_name(session, job.address, chain, name)
+    counts = {status: sum(r["status"] == status for r in results) for status in ("queued", "rejected", "duplicate")}
+    deps.log_admin_mutation("analyze_bulk", company=body.company, rows=len(results), **counts)
+    return {
+        "company": body.company,
+        "queued": counts["queued"],
+        "rejected": counts["rejected"],
+        "duplicate": counts["duplicate"],
+        "results": results,
+    }
 
 
 @router.post(

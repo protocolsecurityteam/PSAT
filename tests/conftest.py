@@ -329,15 +329,17 @@ def _scrub_storage_env(monkeypatch):
 def _bypass_admin_key():
     try:
         import api as _api
-        from routers.deps import require_admin
+        from routers.deps import ADMIN_KEY_ACTOR, admin_actor, require_admin
     except Exception:
         yield
         return
     _api.app.dependency_overrides[require_admin] = lambda: None
+    _api.app.dependency_overrides[admin_actor] = lambda: ADMIN_KEY_ACTOR
     try:
         yield
     finally:
         _api.app.dependency_overrides.pop(require_admin, None)
+        _api.app.dependency_overrides.pop(admin_actor, None)
 
 
 @pytest.fixture(autouse=True)

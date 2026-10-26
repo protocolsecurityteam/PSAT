@@ -8,7 +8,7 @@ Fields are typed only as precisely as the producer proves; dynamic interiors sta
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 # pydantic refuses typing.TypedDict below 3.12, and FastAPI feeds these to pydantic for docs.
 from typing_extensions import NotRequired, TypedDict
@@ -37,6 +37,29 @@ class JobDict(TypedDict):
 class QueuedJobRef(TypedDict):
     job_id: str
     address: str | None
+
+
+BulkLabelOutcome = Literal["set", "kept_existing", "skipped_too_long", "not_set"]
+
+
+class BulkAnalyzeRowResult(TypedDict):
+    row: int
+    address: str
+    chain: str | None
+    status: Literal["queued", "rejected", "duplicate"]
+    job_id: str | None
+    reason: str | None
+    duplicate_of: int | None
+    # ``None`` when no label was attempted (no name, or the row didn't queue).
+    label: BulkLabelOutcome | None
+
+
+class BulkAnalyzeResponse(TypedDict):
+    company: str
+    queued: int
+    rejected: int
+    duplicate: int
+    results: list[BulkAnalyzeRowResult]
 
 
 class AnalyzeRemainingResponse(TypedDict):
@@ -323,6 +346,13 @@ class FleetStatusResponse(TypedDict):
     jobs: dict[str, Any]
     daemons: list[dict[str, Any]]
     watchers: dict[str, Any]
+
+
+class AdminConfigResponse(TypedDict):
+    default_rpc_url: str
+    enabled_chains: list[str]
+    # Normalized (lowercase, runs of space/underscore/hyphen collapsed to one space) -> canonical chain name.
+    chain_spellings: dict[str, str]
 
 
 class PipelineStatsResponse(TypedDict):
