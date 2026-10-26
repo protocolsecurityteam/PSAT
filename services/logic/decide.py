@@ -186,6 +186,8 @@ class Chain:
         self.partial: dict[tuple[int, frozenset], bool] = {}
         # Single reads that failed, or weren't sent for the budget: a decision that met one can't drop what it read.
         self.failed = 0
+        # Of those, the ones not sent for the budget (``limit``).
+        self.refused = 0
 
     def cut(self, address: int, topics: frozenset[str]) -> bool:
         """Whether that history was read partial, or not read at all."""
@@ -255,6 +257,7 @@ class Chain:
         if key not in self._memo:
             if not self._affordable():
                 self.failed += 1
+                self.refused += 1
                 return UNK
             self.sent += 1
             try:
@@ -2222,6 +2225,7 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
     prior_runs = world.__dict__.pop("_prior_runs", None)
     if verdict.openness != "open" or verdict.allowed != "now" or verdict.requires:
         return verdict
+    refused = getattr(world.chain, "refused", 0)
     witness = verdict.witnesses.get(FRESH, {})
     if verdict.after:
         if prior_runs is not None and _after_runs(world, witness, *prior_runs):
@@ -2255,7 +2259,19 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
             if rests_on & {"assumed", "action"}
             else "open_unconfirmed"
         )
-    return replace(verdict, openness="not_determined", complete=False, gaps=(gap,))
+    return replace(verdict, openness="not_determined", complete=False, gaps=(gap, *_budget_gaps(world, refused)))
+
+
+def _budget_gaps(world: World, refused: int) -> tuple[str, ...]:
+    """The budgets an open left unconfirmed ran into: ``budget:reads`` where a read wasn't sent for the function's
+    read budget since ``refused`` reads had been refused, ``budget:confirm`` where the reads left for confirming a
+    callee's answer ran out. A confirmation they cut short shows nothing either way."""
+    out = []
+    if getattr(world.chain, "refused", 0) > refused:
+        out.append("budget:reads")
+    if world.__dict__.get("confirm_spent"):
+        out.append("budget:confirm")
+    return tuple(out)
 
 
 def _overrides(words: dict) -> dict | None:
@@ -2499,6 +2515,7 @@ def _arranged_later(formula: Term, world: World, verdict: Verdict) -> Verdict:
     states = world.__dict__.pop("_arranged_later", None)
     if states is None or verdict.openness != "open" or verdict.allowed == "now":
         return verdict
+    refused = getattr(world.chain, "refused", 0)
     world.__dict__.pop("_prior_runs", None)
     prior = world.prior(formula, owned=True, states=states)
     first, _ = world.__dict__.pop("_prior_runs", (None, None))
@@ -2510,7 +2527,8 @@ def _arranged_later(formula: Term, world: World, verdict: Verdict) -> Verdict:
         signature, before, arguments = prior
         world.sampled = True
         return replace(verdict, witnesses={FRESH: arguments}, after=((signature, before),))
-    return replace(verdict, openness="not_determined", complete=False, gaps=("open_arranged_later_unconfirmed",))
+    gaps = ("open_arranged_later_unconfirmed", *_budget_gaps(world, refused))
+    return replace(verdict, openness="not_determined", complete=False, gaps=gaps)
 
 
 def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict:

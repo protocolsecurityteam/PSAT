@@ -354,3 +354,41 @@ def test_a_gate_only_the_allowed_pass_is_never_open(arranged, monkeypatch, name,
     params = {p.name: 1 for p in O.function(arranged, "C", name).parameters}
     O.check(arranged, "C", name, v, open_at=False, samples=(params,), known=(MEMBER,))
     assert v.openness == "restricted" and not v.complete, v
+
+
+BUDGET = """
+pragma solidity 0.8.27;
+
+contract C {
+    mapping(address => bool) blocked;
+    uint256 total;
+    function ninety(uint256 x) external { require(uint160(msg.sender) % 10 != 0); total += x; }
+    function free(uint256 x) external { require(!blocked[msg.sender]); total += x; }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def budget(anvil):  # noqa: F811
+    d = O.deployment(*anvil, BUDGET)
+    d.deploy("C")
+    return d
+
+
+@pytest.mark.parametrize("reads", [1, 3, 5])
+@pytest.mark.parametrize("name", ["ninety", "free"])
+def test_a_confirmation_the_read_budget_cuts_short_says_so(budget, monkeypatch, name, reads):
+    # Every stranger passes on the chain; with the function's reads nearly spent, the confirmation's calls are never
+    # sent. That shows nothing about the open, and the budget is named for it. Before, the gap was only
+    # ``open_unconfirmed``, as if the chain had refused, and the corpus diff counted no budget.
+    import services.logic.verdict as verdict_module
+
+    assert O.strangers_passing(budget, "C", O.function(budget, "C", name), {"x": 1}) == {True}
+    full = O.verdict(budget, "C", name)
+    assert full.openness == "open", full
+    monkeypatch.setattr(verdict_module, "READS_PER_FUNCTION", reads)
+    v = O.verdict(budget, "C", name)
+    O.never_bolder(full, v)
+    if v.openness == "not_determined" and "open_unconfirmed" in v.gaps:
+        assert "budget:reads" in v.gaps, v
+    assert v.openness != "open" and any(g.startswith("budget") for g in v.gaps), v
