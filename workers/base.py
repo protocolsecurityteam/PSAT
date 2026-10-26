@@ -23,11 +23,13 @@ from db.queue import (
     LeaseLost,
     advance_job,
     claim_job,
+    defer_job,
     fail_job_terminal,
     get_artifact,
     heartbeat_job,
     reclaim_stuck_jobs,
     requeue_job,
+    static_restart_pending,
     store_artifact,
     update_job_detail,
 )
@@ -127,6 +129,16 @@ def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
 
 class JobHandledDirectly(Exception):
     pass
+
+
+class JobDeferred(Exception):
+    """The stage can't decide yet because another job hasn't settled a fact it reads; re-queue it after
+    ``delay_seconds`` without spending a retry."""
+
+    def __init__(self, detail: str, *, delay_seconds: int = 30) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.delay_seconds = delay_seconds
 
 
 class BaseWorker:
@@ -339,8 +351,10 @@ class BaseWorker:
                     if degraded_accumulator:
                         self._persist_stage_errors(job, degraded_accumulator)
                     # Satisfy dependents in the same transaction as the stage change so they become claimable
-                    # atomically.
-                    self._satisfy_dependencies(session, job, completed_stage=self.stage)
+                    # atomically, unless the exit sends the job back to static: this stage ran on a request the job
+                    # no longer has, and dependents wait for the re-run.
+                    if not static_restart_pending(session, job.id, lease_id=claim_lease_id):
+                        self._satisfy_dependencies(session, job, completed_stage=self.stage)
                     if self.next_stage == JobStage.done:
                         from db.queue import complete_job
 
@@ -388,6 +402,38 @@ class BaseWorker:
                             "duration_ms": int(elapsed * 1000),
                             "phase": "job",
                             "outcome": "handled_directly",
+                            **rss_span.finish(),
+                        },
+                    )
+                except JobDeferred as deferred:
+                    finish_memory_span()
+                    try:
+                        session.rollback()
+                        defer_job(
+                            session,
+                            job.id,
+                            detail=deferred.detail,
+                            delay_seconds=deferred.delay_seconds,
+                            lease_id=claim_lease_id,
+                        )
+                    except LeaseLost as lease_exc:
+                        logger.warning(
+                            "Worker %s: lease lost deferring job %s: %s",
+                            self.worker_id,
+                            job.id,
+                            lease_exc,
+                            extra={"phase": "job", "outcome": "lease_lost"},
+                        )
+                        return
+                    logger.info(
+                        "Worker %s: job %s deferred: %s",
+                        self.worker_id,
+                        job.id,
+                        deferred.detail,
+                        extra={
+                            "phase": "job",
+                            "outcome": "deferred",
+                            "delay_s": deferred.delay_seconds,
                             **rss_span.finish(),
                         },
                     )
