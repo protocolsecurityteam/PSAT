@@ -1847,6 +1847,7 @@ def function_verdict(
     world.confirm_left = CONFIRM_READS
     world.written = lowerer.written
     world.parameters = tuple(parameter(p, i) for i, p in enumerate(function.parameters))
+    world.payable = bool(getattr(function, "payable", False))
     if code_of is not None:
         world.code_of = code_of
     relations: dict[int, set] = {}

@@ -90,8 +90,10 @@ shown to fail like it (representative coverage, or a decisive conjunct), and whe
 own entries first is known (`world.arrange_unknown` false). Every open the decision reaches (a stranger passing,
 on the formula or on the chain, an arrangement, a call of its own first) comes before the skip and is untouched by
 it. The builder still runs: a list it shows empty is decided in full (nobody, ever, at no cost), never skipped.
-Before skipping, every stranger's own call (`_STRANGERS`) is run on the chain: one going through where the formula
-refuses all is the formula being wrong, not determined (`self_scoped`, `self_scoped_ran`). Else the row is
+Before skipping, every stranger's own call (`_STRANGERS`) is run on the chain at the engine's guesses (sending the
+ether a guess sends, and one wei to a payable function): one going through where the formula refuses all is the
+formula being wrong, not determined (`self_scoped`, `self_scoped_ran`), that call kept as its witness. A call the
+node doesn't answer refuses nobody: no skip, the row is decided in full. Else the row is
 restricted, never complete, with gap `self_scoped`, its gate and, when the list is shown whole, how many it names
 (`Verdict.members`). The pass script's `--scope-skip` says both runs skipped; it always prints how many new rows were
 skipped and each skipped row where a holder the harness replayed (prod's) goes through, so a wrong label shows in

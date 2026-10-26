@@ -1,7 +1,10 @@
 """The self-scope skip (``PSAT_LOGIC_SCOPE_SKIP=1``, ``decide.SKIP_SELF_SCOPED``) tested on its own, whatever the
 scope label says: the label is unverified (``SCOPE.md``), so the worst a wrong one may do is lose holders into a
 list never complete, saying ``self_scoped``. With skipping on, (a) a function the chain lets a stranger through is
-never reported restricted: every stranger's own call is run before skipping; (b) a skipped row is never complete
+never reported restricted: every stranger's own call is run before skipping, at the engine's guesses (sending ether
+where a guess does, or where the function is payable), and the call that goes through is kept as the witness of a
+row left not determined; a call the node doesn't answer refuses nobody, so no skip rests on it, and a guess that
+isn't among those run is not covered; (b) a skipped row is never complete
 and always says ``self_scoped`` and its gate; (c) an admin function the classifier is forced to call self-scoped
 comes out no more open and with no confident list than with skipping off (``_oracle.never_bolder``); the fail-safe
 sweep runs the whole registry with skipping on, and with every function forced self-scoped, as two more faults
@@ -44,6 +47,7 @@ contract C {
     // Anyone: ``reg.ok`` answers true for every caller.
     function poke(uint256 a) external { require(reg.ok(msg.sender)); bal[msg.sender] += a; }
     function deposit(uint256 a) external { bal[msg.sender] += a; }
+    function pay() external payable { require(msg.value > 0); bal[msg.sender] += msg.value; }
 }
 """
 
@@ -72,14 +76,14 @@ def _forget(d):
             del contract.__dict__[key]
 
 
-def _decided(d, name, *others, skip=False, self_scoped=False, monkeypatch=None):
+def _decided(d, name, *others, skip=False, self_scoped=False, monkeypatch=None, chain=None):
     with monkeypatch.context() as patch:
         patch.setattr(decide, "SKIP_SELF_SCOPED", skip)
         if self_scoped:
             patch.setattr(verdict_module, "classify", lambda *a, **k: Scope("self"))
         _forget(d)
         try:
-            return O.verdict(d, "C", name, *others)
+            return O.verdict(d, "C", name, *others, chain=chain)
         finally:
             _forget(d)
 
@@ -117,21 +121,57 @@ def test_a_function_strangers_pass_is_never_skipped_into_restricted(d, monkeypat
         assert v.openness == "open" and not _skipped(v), v
 
 
-def test_a_formula_refusing_strangers_the_chain_lets_through_is_never_skipped_into_restricted(d, monkeypatch):
-    # ``deposit`` mis-lowered as an admin check (``msg.sender == ADMIN`` added): the formula refuses every stranger,
-    # the holders' builder names the admin, and the label says self-scoped. The chain lets every stranger through,
-    # so skipping, which would answer restricted on the formula alone, runs their calls first.
+def _admin_only(monkeypatch, name):
+    # ``name`` mis-lowered as an admin check (``msg.sender == ADMIN`` added).
     success = Lowerer.success
 
     def admin_only(self, fn):
         formula = success(self, fn)
-        return mk_and([formula, mk_cmp("eq", CALLER, const(ADMIN, "address"))]) if fn.name == "deposit" else formula
+        return mk_and([formula, mk_cmp("eq", CALLER, const(ADMIN, "address"))]) if fn.name == name else formula
 
     monkeypatch.setattr(Lowerer, "success", admin_only)
-    v = _decided(d, "deposit", skip=True, self_scoped=True, monkeypatch=monkeypatch)
-    assert O.strangers_passing(d, "C", O.function(d, "C", "deposit"), {"a": 1}) == {True}
+
+
+@pytest.mark.parametrize("name", ["deposit", "pay"])
+def test_a_formula_refusing_strangers_the_chain_lets_through_is_never_skipped_into_restricted(d, monkeypatch, name):
+    # The formula refuses every stranger, the holders' builder names the admin, and the label says self-scoped. The
+    # chain lets every stranger through, so skipping, which would answer restricted on the formula alone, runs their
+    # calls first, sending ether to the payable one; the call that went through is kept. Before, a payable function
+    # was never run sending ether (skipped into restricted), and the passing call was thrown away.
+    _admin_only(monkeypatch, name)
+    v = _decided(d, name, skip=True, self_scoped=True, monkeypatch=monkeypatch)
+    fn = O.function(d, "C", name)
+    if name == "deposit":
+        assert O.strangers_passing(d, "C", fn, {"a": 1}) == {True}
     assert v.openness != "restricted" and not v.complete, v
     assert v.gaps == ("self_scoped", "self_scoped_ran"), v
+    [(who, args)] = v.witnesses.items()
+    assert who in O.STRANGERS, v
+    value = args.get("msg.value", 0)
+    assert O.passes(d, "C", fn, {k: x for k, x in args.items() if k != "msg.value"}, sender=who, value=value), v
+
+
+def test_a_strangers_call_the_node_does_not_answer_refuses_nobody(d, monkeypatch):
+    # Every stranger's own call to ``deposit`` fails at the node: no refusal, so no skip rests on it. Before, a failed
+    # read counted as a refusal and the row was skipped into restricted.
+    _admin_only(monkeypatch, "deposit")
+    target, deposit = d.at["C"], O.selector("deposit(uint256)")
+
+    def strangers_deposit(method, params):
+        call = params[0]
+        return (
+            int(call["to"], 16) == target
+            and int(call["from"], 16) in O.STRANGERS
+            and int(call.get("data", call.get("input", "0x00000000"))[2:10], 16) == deposit
+        )
+
+    faulty = O.Faulty(d, calls=strangers_deposit)
+    clean = _decided(d, "deposit", self_scoped=True, monkeypatch=monkeypatch, chain=faulty)
+    v = _decided(
+        d, "deposit", skip=True, self_scoped=True, monkeypatch=monkeypatch, chain=O.Faulty(d, calls=strangers_deposit)
+    )
+    assert not _skipped(v), v
+    O.never_bolder(clean, v)
 
 
 def test_skipping_stays_off_by_default():

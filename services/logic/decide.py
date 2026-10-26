@@ -998,6 +998,7 @@ class World:
     solver_record: dict = field(default_factory=dict)
     # The function's arguments in order, as terms: what its own ``msg.data`` encodes after the selector.
     parameters: tuple = ()
+    payable: bool = False  # whether the function accepts ether: a stranger's call is also run sending some
     # Conditions on a caller's own entries that any caller can bring about through code open to it (a position a
     # ``supply`` opens, an allowance an ``approve`` sets): chosen like arguments by whoever is asked about, where the
     # entry is theirs (the condition each maps to holds), read from state elsewhere.
@@ -2661,17 +2662,29 @@ def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict
             members, proven, _ = _built(formula, world)
             # A list shown empty (nobody, ever) costs nothing to decide in full below: no skip.
             if members or not proven:
-                if any(_executes(formula, world, who, set()) is not None for who in (FRESH, *_OTHER_STRANGERS)):
-                    # The chain lets a stranger through where the formula refuses every one: the formula is wrong.
-                    return Verdict("not_determined", frozenset(), False, gaps=("self_scoped", "self_scoped_ran"))
-                return Verdict(
-                    "restricted",
-                    frozenset(),
-                    False,
-                    gaps=("self_scoped",),
-                    gate=gate_of(formula),
-                    members=len(members) if proven else None,
-                )
+                unanswered: list = []
+                for who in (FRESH, *_OTHER_STRANGERS):
+                    ran = _executes(formula, world, who, set(), unanswered=unanswered)
+                    if ran is not None:
+                        # The chain lets a stranger through where the formula refuses every one: the formula is
+                        # wrong. The call that went through is kept, as data.
+                        return Verdict(
+                            "not_determined",
+                            frozenset(),
+                            False,
+                            witnesses={who: ran},
+                            gaps=("self_scoped", "self_scoped_ran"),
+                        )
+                if not unanswered:
+                    return Verdict(
+                        "restricted",
+                        frozenset(),
+                        False,
+                        gaps=("self_scoped",),
+                        gate=gate_of(formula),
+                        members=len(members) if proven else None,
+                    )
+                # A call the node didn't answer refused nobody: no skip on it, decided in full below.
     # Precompiles and sentinels (``address(1)``) never send a transaction.
     # Who may be singled out, built from the identity checks (``holders``): a list shown to hold everyone, one
     # drawn from what the chain shows without that proof, or none, each with why.
@@ -3411,11 +3424,18 @@ _EXECUTED_CANDIDATES = 8  # undecided candidates per function whose call is run 
 
 
 def _executes(
-    formula: Term, world: World, candidate: int, candidates: set, tries: int | None = None
+    formula: Term,
+    world: World,
+    candidate: int,
+    candidates: set,
+    tries: int | None = None,
+    unanswered: list | None = None,
 ) -> dict[str, Any] | None:
     """The arguments with which a call from ``candidate`` returns when the chain runs it (``eth_call``), else
     ``None``: guesses from the search with the conditions the engine can't settle left free, then all zero; the
-    first ``tries`` of them only, when given."""
+    first ``tries`` of them only, when given. A guess sending ether is sent it (``Chain.call_value``), and a payable
+    function is also tried sending one wei. Each call the node didn't answer (a failed read, refused overrides,
+    unknown arguments) is appended to ``unanswered``: no refusal."""
     identity = {"caller": candidate, "signer": FRESH}
     found: dict[Term, Any] = {}
     # Plausible values besides: an amount of one, a flag set, the candidate's own address, a short name.
@@ -3440,9 +3460,15 @@ def _executes(
     guesses = [{}, plausible]
     if _outcome(formula, world, identity, candidates, relaxed=True, witness=found) is True and found:
         guesses.insert(0, {**plausible, **found})
-    for guess in guesses[:tries]:
-        if any(t[0] == "callvalue" and v for t, v in guess.items()):
-            continue  # a call sending value the candidate may not hold: not run
+    guesses = guesses[:tries]
+    if world.payable and not any(t[0] == "callvalue" and v for g in guesses for t, v in g.items()):
+        guesses.append({**plausible, mk("callvalue"): 1})
+    for guess in guesses:
+        value = next((v for t, v in guess.items() if t[0] == "callvalue"), 0)
+        if not isinstance(value, int) or isinstance(value, bool):
+            if unanswered is not None:
+                unanswered.append(guess)
+            continue
         assignment = dict(guess)
         for parameter in world.parameters:
             if parameter not in assignment and parameter[0] == "arg":
@@ -3458,10 +3484,18 @@ def _executes(
                 )
         data = Evaluator(world, identity, assignment)._calldata()
         if not isinstance(data, bytes):
+            if unanswered is not None:
+                unanswered.append(guess)
             continue
-        answer = world.chain.call(world.this, data, candidate)
+        if value:
+            send = getattr(world.chain, "call_value", None)
+            answer = send(world.this, data, candidate, value) if send is not None else UNK
+        else:
+            answer = world.chain.call(world.this, data, candidate)
         if isinstance(answer, bytes):
             return _argument_values(guess)
+        if answer is not REVERTED and unanswered is not None:
+            unanswered.append(guess)
     return None
 
 
