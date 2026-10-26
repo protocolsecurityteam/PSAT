@@ -4,7 +4,10 @@
 chain run can say whose positions a write touches in every state), so nothing tests it and nothing may rest on it:
 its label tests were deleted on 2026-10-24. The classifier stays in code, off by default (`PSAT_LOGIC_SCOPE_SKIP`
 unset); a verdict's `scope` field is informational only. The one test left (`test_scope_review`) checks only that
-facts a budget cut off are cached as "everything checked", the conservative side.
+facts a budget cut off are cached as "everything checked", the conservative side. The skip path itself is tested
+without trusting the label (`test_scope_skip`, and two fault columns of `test_failsafe`: skipping on with the
+classifier's labels, and with every function labelled `self`): the worst a wrong label can do is lose holders into
+a list never complete that says `self_scoped`.
 
 Principle: the rule is conservative. A function is `self` only when every write it can make is shown, from the
 lowering alone, either to stay in an entry the caller holds or to move value out of one with the total conserved;
@@ -84,8 +87,14 @@ conditions that read nothing the caller sends) are reported for a `self` functio
 as for any function. With `PSAT_LOGIC_SCOPE_SKIP=1` (`decide.SKIP_SELF_SCOPED`), a `self` function skips testing
 holders one by one, and only when the stranger fails in every state of the `when` conditions, unseen addresses are
 shown to fail like it (representative coverage, or a decisive conjunct), and whether a stranger could arrange its
-own entries first is known (`world.arrange_unknown` false). The builder still runs: a list it shows empty gives
-restricted, complete, nobody; else the row is restricted with gap `self_scoped`, its gate and, when the list is
-shown whole, how many it names (`Verdict.members`). The pass script's `--scope-skip` says both runs skipped.
+own entries first is known (`world.arrange_unknown` false). Every open the decision reaches (a stranger passing,
+on the formula or on the chain, an arrangement, a call of its own first) comes before the skip and is untouched by
+it. The builder still runs: a list it shows empty is decided in full (nobody, ever, at no cost), never skipped.
+Before skipping, every stranger's own call (`_STRANGERS`) is run on the chain: one going through where the formula
+refuses all is the formula being wrong, not determined (`self_scoped`, `self_scoped_ran`). Else the row is
+restricted, never complete, with gap `self_scoped`, its gate and, when the list is shown whole, how many it names
+(`Verdict.members`). The pass script's `--scope-skip` says both runs skipped; it always prints how many new rows were
+skipped and each skipped row where a holder the harness replayed (prod's) goes through, so a wrong label shows in
+the corpus diff.
 
 Python lines in the engine and its tests, and this note's lines, are at most 120 columns (the repo's ruff setting).

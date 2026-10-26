@@ -6,7 +6,8 @@ its own address, an "open now" at a witness of its own passes for all five stran
 
 The faults: every followed callee mis-lowered (as "nobody", always reverting; as "false", returning false; as
 "everyone", returning true), every storage read failing, every ``eth_call`` failing, every log history cut in half,
-and each budget constant at a tight value. The budgets the decision has always been swept on run over every probe
+the self-scope skip on (with the classifier's labels, and with every function labelled self-scoped), and each budget
+constant at a tight value. The budgets the decision has always been swept on run over every probe
 (``BUDGETS``); the rest of the module constants that bound work run over a seeded sample of probes, with one probe
 known to be cut by each among them (``SAMPLED``). A fault that only reorders, batches or steers work must leave every
 verdict exactly as it was (``INVARIANT``); any other must change some verdict somewhere in the registry, or it tests
@@ -175,11 +176,15 @@ UNREACHED = {
 }
 # A followed callee's lowering replaced by (success condition, the value it returns).
 CALLEE_FAULTS = {"callee_nobody": (FALSE, FALSE), "callee_false": (TRUE, FALSE), "callee_everyone": (TRUE, TRUE)}
+# The self-scope skip on (``decide.SKIP_SELF_SCOPED``), with the classifier's own labels and with every function
+# labelled self-scoped: the label is unverified, so a wrong one may only lose holders (``test_scope_skip``).
+SCOPE_FAULTS = ("scope_skip", "scope_skip_all_self")
 FAULTS = [
     *CALLEE_FAULTS,
     "storage",
     "calls",
     "logs",
+    *SCOPE_FAULTS,
     *(f"{name}={value}" for name, (_, values) in BUDGETS.items() for value in values),
 ]
 SAMPLED_FAULTS = [f"{name}={value}" for name, (_, value) in SAMPLED.items()]
@@ -244,6 +249,13 @@ def _inject(fault: str, monkeypatch, d, contract: str):
             return called(self, function, args, view)
 
         monkeypatch.setattr(Lowerer, "called", misread)
+        return None
+    if fault in SCOPE_FAULTS:
+        monkeypatch.setattr(D, "SKIP_SELF_SCOPED", True)
+        if fault == "scope_skip_all_self":
+            from services.logic.scope import Scope
+
+            monkeypatch.setattr(V, "classify", lambda *a, **k: Scope("self"))
         return None
     if fault in ("storage", "calls", "logs"):
         return O.Faulty(d, **{fault: True})

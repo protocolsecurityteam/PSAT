@@ -27,7 +27,9 @@ without the field (a run from before it) says nothing either way.
 A row that appears twice within the old files, or within the new ones, stops the comparison with an error.
 
 Always printed, not a failure by itself: every row whose scope changed (or turned self-scoped, where the old run
-recorded none), with how many replay-confirmed holders it stopped listing.
+recorded none), with how many replay-confirmed holders it stopped listing; how many new rows skipped enumerating
+holders as self-scoped (``self_scoped`` among ``lego_gaps``), and each of those where a holder the harness replayed
+(prod's, ``checks[p] is True``) goes through, so a function wrongly labelled self-scoped shows in the diff.
 """
 
 from __future__ import annotations
@@ -157,6 +159,22 @@ def scope_flips(old: dict[tuple, dict], new: dict[tuple, dict]) -> list[str]:
     return out
 
 
+def skipped(row: dict) -> bool:
+    """Whether the row skipped enumerating holders as self-scoped (``PSAT_LOGIC_SCOPE_SKIP=1``)."""
+    return "self_scoped" in (row.get("lego_gaps") or [])
+
+
+def skipped_passing(new: dict[tuple, dict]) -> list[str]:
+    """Skipped rows where a replayed holder's own call went through: holders the skip left unlisted."""
+    out = []
+    for key in sorted(new):
+        row = new[key]
+        passing = sorted(p for p, ok in (row.get("checks") or {}).items() if ok is True and p != "anyone")
+        if skipped(row) and passing:
+            out.append(f"{key[0]} {row.get('contract')}.{key[2]} @ {key[1]}: {', '.join(passing[:4])}")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--old", nargs="+", required=True, help="previous run's jsonl files (globs allowed)")
@@ -174,6 +192,11 @@ def main(argv: list[str] | None = None) -> int:
     flips = scope_flips(old, new)
     print(f"scope changes: {len(flips)}")
     for line in flips:
+        print("  " + line)
+    print(f"skipped self-scoped rows: {sum(skipped(row) for row in new.values())}")
+    passing = skipped_passing(new)
+    print(f"skipped rows a prod holder's replay passes: {len(passing)}")
+    for line in passing:
         print("  " + line)
     moves = confidence_moves(old, new)
     print(f"confidence-only moves: {len(moves)}")

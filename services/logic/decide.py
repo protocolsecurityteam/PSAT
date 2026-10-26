@@ -2614,21 +2614,24 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if SKIP_SELF_SCOPED and world.scope is not None and world.scope.kind == "self" and not world.arrange_unknown:
         # Its effects stay in the caller's own positions: the gate is the answer, not who holds it. A stranger
         # failing in every state, with unseen addresses failing alike, is all "restricted" needs; anything less
-        # is decided in full below.
+        # is decided in full below. The label is unverified (``SCOPE.md``): skipping only loses holders, into a
+        # list never complete that says ``self_scoped``, and never stands where a stranger's own call goes through.
         fresh = [_outcome(formula, world, anyone, set(), fixed=state) for state in states]
         if all(f is False for f in fresh) and (coverage.representative or _decisive(formula, world)):
-            # Who holds the gate is still built (not tested one by one): a list shown empty means nobody, ever.
             members, proven, _ = _built(formula, world)
-            if proven and not members:
-                return Verdict("restricted", frozenset(), True)
-            return Verdict(
-                "restricted",
-                frozenset(),
-                False,
-                gaps=("self_scoped",),
-                gate=gate_of(formula),
-                members=len(members) if proven else None,
-            )
+            # A list shown empty (nobody, ever) costs nothing to decide in full below: no skip.
+            if members or not proven:
+                if any(_executes(formula, world, who, set()) is not None for who in (FRESH, *_OTHER_STRANGERS)):
+                    # The chain lets a stranger through where the formula refuses every one: the formula is wrong.
+                    return Verdict("not_determined", frozenset(), False, gaps=("self_scoped", "self_scoped_ran"))
+                return Verdict(
+                    "restricted",
+                    frozenset(),
+                    False,
+                    gaps=("self_scoped",),
+                    gate=gate_of(formula),
+                    members=len(members) if proven else None,
+                )
     # Precompiles and sentinels (``address(1)``) never send a transaction.
     # Who may be singled out, built from the identity checks (``holders``): a list shown to hold everyone, one
     # drawn from what the chain shows without that proof, or none, each with why.
