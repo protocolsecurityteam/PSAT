@@ -1552,17 +1552,22 @@ def _runtime_reach(code: bytes) -> str | None:
 def _opcodes(code: bytes) -> set[int]:
     """The opcodes runtime code may run: those of every instruction reachable from offset 0 (``_reachable_code``),
     the compiler's trailing metadata stripped. Data the code never jumps into (a revert string, another contract's
-    code it deploys, a ``bzzr0`` hash) is not read as code."""
+    code it deploys, a ``bzzr0`` hash) is not read as code. The code is decoded whole, as the EVM's own ``JUMPDEST``
+    analysis decodes it, so a constant jump into the trailer is followed there; only the fallback that makes every
+    ``JUMPDEST`` a target leaves out those inside a whole metadata map."""
+    data_from = len(code)
     if len(code) >= 2:
         size = int.from_bytes(code[-2:], "big")
         meta = code[-size - 2 : -2] if size + 2 <= len(code) else b""
         if _metadata_map(meta):
-            code = code[: -size - 2]  # the compiler's CBOR metadata: data, never run
+            data_from = len(code) - size - 2  # the compiler's CBOR metadata: data no compiled jump lands in
     instructions = _instructions(code)
-    return {instructions[at][0] for at in _reachable_code(instructions)}
+    return {instructions[at][0] for at in _reachable_code(instructions, data_from)}
 
 
-# Stack effects (taken, pushed) of the opcodes the walk doesn't single out; any other opcode halts.
+# Stack effects (taken, pushed) of the opcodes the walk doesn't single out: every opcode of the current EVM (Osaka).
+# Any other opcode may be one a later fork defines, so it is never read as a halt: reaching one makes every
+# ``JUMPDEST`` a target and the code after it reachable.
 _EFFECTS = {
     **dict.fromkeys(range(0x01, 0x08), (2, 1)),
     0x08: (3, 1),
@@ -1574,6 +1579,7 @@ _EFFECTS = {
     **dict.fromkeys(range(0x16, 0x19), (2, 1)),
     0x19: (1, 1),
     **dict.fromkeys(range(0x1A, 0x1E), (2, 1)),
+    0x1E: (1, 1),  # CLZ (Osaka)
     0x20: (2, 1),
     0x30: (0, 1),
     0x31: (1, 1),
@@ -1628,12 +1634,14 @@ def _instructions(code: bytes) -> dict[int, tuple[int, int | None, int]]:
     return out
 
 
-def _reachable_code(instructions: dict[int, tuple[int, int | None, int]]) -> set[int]:
+def _reachable_code(instructions: dict[int, tuple[int, int | None, int]], data_from: int | None = None) -> set[int]:
     """The offsets of the instructions a run can reach from offset 0. Each stack entry is followed as the
     ``JUMPDEST`` a ``PUSH`` (or ``PC``) put there, moved by ``DUP``/``SWAP``/``POP``, in each stack a block is entered
     with (one per way in: an internal function returns to each caller's own label); a jump goes where its target
-    holds. A jump to anything else (a target computed, or loaded from memory or storage), or a walk past ``_WALK``
-    steps, makes every ``JUMPDEST`` a target: a sound over-approximation, never missing reachable code."""
+    holds. A jump to anything else (a target computed, or loaded from memory or storage), a walk past ``_WALK``
+    steps, or an opcode the table doesn't know, makes every ``JUMPDEST`` before ``data_from`` (where the compiler's
+    metadata map starts) a target, and the walk goes on past an unknown opcode: a sound over-approximation, never
+    missing reachable code."""
     dests = {at for at, (op, _, _) in instructions.items() if op == 0x5B}
     queue: list[tuple[int, tuple]] = [(0, ())]
     entered: set[tuple[int, tuple]] = set()
@@ -1681,17 +1689,18 @@ def _reachable_code(instructions: dict[int, tuple[int, int | None, int]]) -> set
                 taken, pushed_count = _EFFECTS[op]
                 stack = ((_TOP,) * pushed_count + stack[taken:])[:1024]
             else:
-                break  # an undefined opcode halts
+                anywhere = True  # an opcode the table doesn't know: what it does to the stack can't be followed
+                break
             at = nxt
     if anywhere:
         # Every JUMPDEST a target: from 0 and from each, every instruction up to one that halts or jumps.
         reached = set()
-        for start in (0, *sorted(dests)):
+        for start in (0, *sorted(at for at in dests if data_from is None or at < data_from)):
             at = start
             while at in instructions and at not in reached:
                 reached.add(at)
                 op, _, nxt = instructions[at]
-                if op in _HALTS or op == 0x56 or not (op in _EFFECTS or op == 0x57 or 0x58 <= op <= 0x9F):
+                if op in _HALTS or op == 0x56:
                     break
                 at = nxt
     return reached

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.logic.verdict import _opcodes, _runtime_code
+from services.logic.verdict import _delegate_ops, _opcodes, _runtime_code, _runtime_reach
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
 
@@ -78,6 +78,38 @@ def test_only_a_whole_metadata_map_is_stripped():
     assert ORIGIN not in _opcodes(body + meta + len(meta).to_bytes(2, "big"))
     for bad in (meta + b"\x00", meta[:-1], b"\xa2" + meta[1:], meta.replace(b"bzzr0", b"bzzr9")):
         assert ORIGIN in _opcodes(body + bad + len(bad).to_bytes(2, "big")), bad.hex()
+
+
+@pytest.mark.parametrize("op", [0x1E, 0x0C, 0x21, 0x4B, 0xA5, 0xF6, 0xFC])
+def test_code_after_an_opcode_the_walk_does_not_single_out_is_read(op):
+    # CLZ (0x1E, Osaka) is in the table; the others are undefined today but may be defined by a later fork, so none
+    # is read as a halt. Before, any opcode missing from the table halted the walk: the ORIGIN, CALL or
+    # DELEGATECALL after it was never read, so a callee reading the origin or delegating counted as neither.
+    PUSH0, CALL, DELEGATECALL = 0x5F, 0xF1, 0xF4
+    assert ORIGIN in _opcodes(code(PUSH1, 1, op, POP, ORIGIN, POP, STOP))
+    assert _runtime_reach(code(PUSH1, 1, op, POP, ORIGIN, POP, STOP)) == "origin"
+    assert _runtime_reach(code(PUSH1, 1, op, POP, *([PUSH0] * 7), CALL, STOP)) == "unfollowed"
+    assert _delegate_ops(code(PUSH1, 1, op, POP, *([PUSH0] * 6), DELEGATECALL, STOP))
+
+
+def test_an_unknown_opcode_makes_every_jumpdest_a_target():
+    # What an unknown opcode does to the stack can't be followed, so code past a later halt is reachable through
+    # any JUMPDEST.
+    assert ORIGIN in _opcodes(code(PUSH1, 1, 0x0C, STOP, JUMPDEST, ORIGIN, STOP))
+    assert ORIGIN not in _opcodes(code(PUSH1, 1, POP, STOP, JUMPDEST, ORIGIN, STOP))
+
+
+def test_a_constant_jump_into_the_metadata_trailer_is_followed():
+    # The EVM finds jump targets over the whole code, the trailer too: a constant jump to a JUMPDEST inside a whole
+    # metadata map lands there and runs the ORIGIN after it. Before, the trailer was stripped before targets were
+    # found and the jump read as one to nowhere.
+    meta = bytes.fromhex("a1646970667358") + b"\x22" + code(JUMPDEST, ORIGIN, POP, STOP) + b"\x00" * 30
+    meta += len(meta).to_bytes(2, "big")
+    target = 4 + 8  # past PUSH2 and JUMP; the JUMPDEST is the payload's first byte
+    jumping = code(0x61, *target.to_bytes(2, "big"), JUMP)
+    assert ORIGIN in _opcodes(jumping + meta)
+    # Not jumped to: still data.
+    assert ORIGIN not in _opcodes(code(PUSH1, 1, POP, STOP) + meta)
 
 
 SOURCE = """
