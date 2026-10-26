@@ -194,6 +194,14 @@ def test_g1_extended_an_owner_or_a_changeable_callee_answer_is_never_a_complete_
     assert not (v.openness == "restricted" and v.complete), v
 
 
+@FOLLOWED
+def test_g1_extended_the_verdict_holds_as_the_chain_stands(d, followed):
+    # The xfail above asks for more than the chain as it stands; what the verdict claims now must hold now.
+    v = O.verdict(d, "Tagged", "e10", *(("Blocklist",) if followed else ()))
+    O.check(d, "Tagged", "e10", v, samples=({"v": 7},), open_at=False)
+    assert O.strangers_passing(d, "Tagged", O.function(d, "Tagged", "e10"), {"v": 7}) == {False}, v
+
+
 def test_g3_an_early_return_before_the_gate_is_open_as_the_call_does_not_revert(d):
     # What "open" means today (D3): every stranger's call with v = 0 goes through, writing nothing.
     v = O.check(d, "Early", "f1", O.verdict(d, "Early", "f1", "Origin"), open_at={"v": 0})

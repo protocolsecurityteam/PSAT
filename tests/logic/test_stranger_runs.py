@@ -100,7 +100,7 @@ def _passing(d, name) -> set[bool]:
 @pytest.mark.parametrize("name", ["originBit", "callerBit"])
 def test_strangers_the_chain_treats_differently_never_make_it_open(d, name, others):
     assert _passing(d, name) == {True, False}
-    verdict = _verdict(d, name, *others)
+    verdict = O.check(d, "C", name, O.verdict(d, "C", name, *others), samples=({"v": 1},), open_at=False)
     assert verdict.openness != "open" and not verdict.complete, verdict
     if verdict.openness == "not_determined":
         assert verdict.gaps, verdict
@@ -118,7 +118,7 @@ def test_a_pass_only_some_strangers_get_is_named(d, name, others):
 @pytest.mark.parametrize("name", ["originAll", "callerAll"])
 def test_a_pass_every_stranger_gets_is_open(d, name, others):
     assert _passing(d, name) == {True}
-    verdict = _verdict(d, name, *others)
+    verdict = O.check(d, "C", name, O.verdict(d, "C", name, *others), open_at={"v": 1})
     assert verdict.openness == "open" and verdict.allowed == "now", verdict
 
 

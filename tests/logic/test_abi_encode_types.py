@@ -12,8 +12,6 @@ from types import SimpleNamespace
 import pytest
 from eth_utils import keccak
 
-from services.logic.terms import reset_terms
-from services.logic.verdict import function_verdict
 from tests.logic import _oracle as O
 from tests.logic._anvil import Deployment, anvil  # noqa: F401
 from tests.support.anvil import rpc
@@ -108,13 +106,6 @@ def d(anvil):  # noqa: F811
     return d
 
 
-def _verdict(d, name, *others):
-    reset_terms()
-    c = d.slither["C"]
-    fn = next(f for f in c.functions_entry_points if f.name == name)
-    return function_verdict(c, fn, d.at["C"], d.chain(), d.contracts("C", *others))[0]
-
-
 def _passes(d, name) -> bool:
     data = "0x" + keccak(text=f"{name}()")[:4].hex()
     try:
@@ -132,8 +123,11 @@ def test_the_probe_s_chain_truth(d):
 @pytest.mark.parametrize("others", [("G",), ()], ids=["followed", "unfollowed"])
 @pytest.mark.parametrize("name", ONE_WORD)
 def test_a_one_word_item_is_encoded_as_its_declared_type(d, name, others):
-    verdict = _verdict(d, name, *others)
-    if _passes(d, name):
+    verdict = O.verdict(d, "C", name, *others)
+    passing = _passes(d, name)
+    # Against the chain as it stands: every stranger at the witness where it is open, nobody outside a complete list.
+    O.check(d, "C", name, verdict, open_at={} if passing else False)
+    if passing:
         assert verdict.openness == "open" and verdict.allowed == "now", verdict
     else:
         # G's answer is a condition the engine reads as adjustable ("open once it allows"): never "open now".
@@ -144,7 +138,7 @@ def test_a_one_word_item_is_encoded_as_its_declared_type(d, name, others):
 def test_a_dynamic_item_is_refused_never_guessed(d, others):
     # A string read from storage: its encoding isn't laid out by the lowering. Every stranger's own call goes
     # through on the chain, which may settle it "open"; otherwise it is undetermined, the refusal named.
-    v = O.check(d, "C", "dynamic", _verdict(d, "dynamic", *others), open_at={})
+    v = O.check(d, "C", "dynamic", O.verdict(d, "C", "dynamic", *others), open_at={})
     if v.openness != "open":
         assert "unknown:unsupported:abi_item:string" in v.gaps, v
 

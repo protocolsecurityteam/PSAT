@@ -672,6 +672,12 @@ def test_a_lone_owner_anyone_may_still_claim_is_each_strangers_to_take(nfts):
             assert O.passes(nfts, "Unclaimed", O.function(nfts, "Unclaimed", "ownerOnly"), sender=who)
 
 
+def test_a_lone_owner_verdict_holds_as_the_chain_stands(nfts):
+    # The G4 xfail above asks for more than "nobody now"; whatever the verdict says must still hold now.
+    v = O.check(nfts, "Unclaimed", "ownerOnly", O.verdict(nfts, "Unclaimed", "ownerOnly"), open_at=False)
+    assert O.strangers_passing(nfts, "Unclaimed", O.function(nfts, "Unclaimed", "ownerOnly")) == {False}, v
+
+
 def test_an_initializer_whose_flag_cannot_be_read_is_never_open(c):
     clean = O.verdict(c, "C", "initialize")
     faulted = O.verdict(c, "C", "initialize", chain=O.Faulty(c, storage=True))
