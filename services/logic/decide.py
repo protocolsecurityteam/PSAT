@@ -60,6 +60,9 @@ REVERTED = type("Reverted", (), {"__repr__": lambda self: "REVERTED"})()
 ASSUMED = type("Assumed", (), {"__repr__": lambda self: "ASSUMED"})()
 # A log query the node refused for its size: more logs in that range alone than any list of holders.
 CROWDED = type("Crowded", (), {"__repr__": lambda self: "CROWDED"})()
+# A batch slot nobody answered because the whole request failed (a dropped connection, a timeout, an HTTP error): not
+# the read's answer, so it is asked again (``BATCH_RETRIES``) before it reads as failed.
+TRANSIENT = type("Transient", (), {"__repr__": lambda self: "TRANSIENT"})()
 _CROWDED_ERRORS = re.compile(r"more than (\d+) (?:logs|results)|response size exceeded|too many (?:logs|results)", re.I)
 FRESH = int.from_bytes(keccak(text="psat.logic.fresh")[:20], "big")
 ANY_KEY = type("AnyKey", (), {"__repr__": lambda self: "ANY_KEY"})()  # an entry key the history leaves unread
@@ -97,6 +100,12 @@ LOG_CALLS = 400
 LOG_SECONDS = 20.0
 LOG_TOTAL_SECONDS = 90.0
 LOG_BATCH = 50
+# Retries of the reads a batch left unanswered wholesale (``TRANSIENT``), the first after ``BATCH_RETRY_WAIT``
+# seconds and each later one after twice the wait before it: the first sends them as they were, later ones in halves,
+# so one slow read can't take its whole chunk down again. Retries are reads like any other (``limit``); what is still
+# unanswered after the last reads as failed, never as an answer.
+BATCH_RETRIES = 3
+BATCH_RETRY_WAIT = 0.5
 SNAPSHOT_SLOTS = 400_000  # storage dumped whole, at most (Maker's Vat holds about 135k slots)
 SNAPSHOT_PAGE = 10_000
 CREATION_PROBES = 16  # ``eth_getCode`` probes, in one batch, that place a contract's creation before a window scan
@@ -161,8 +170,8 @@ class Chain:
         self.history = history or rpc
         self.unreadable: set[int] = set()
         self.block = block
-        # One round trip for many reads. Each result is the answer, REVERTED (a call that reverted), or ``None`` (any
-        # other error), which is left for the single read to classify.
+        # One round trip for many reads. Each result is the answer, REVERTED (a call that reverted), TRANSIENT (the
+        # request failed as a whole: asked again), or ``None`` (any other error), left for the single read to classify.
         self.batch = batch
         self._memo: dict = {}
         # While set, an unanswered read is recorded here and reads as unknown instead of costing a round trip.
@@ -219,15 +228,32 @@ class Chain:
         if not pending or self.batch is None or self.offline:
             return
         self.sent += len(pending)
+        requests = list(pending.values())
+        results = self._batch_once(requests)
+        for attempt in range(BATCH_RETRIES):
+            todo = [i for i, result in enumerate(results) if result is TRANSIENT]
+            if not todo or not self._affordable(len(todo)):
+                break
+            time.sleep(BATCH_RETRY_WAIT * 2**attempt)
+            self.sent += len(todo)
+            parts = [todo] if attempt == 0 or len(todo) < 2 else [todo[: len(todo) // 2], todo[len(todo) // 2 :]]
+            for part in parts:
+                for i, result in zip(part, self._batch_once([requests[i] for i in part])):
+                    results[i] = result
+        for key, result in zip(pending, results):
+            if result is not None and result is not TRANSIENT:
+                self._memo[key] = result  # REVERTED included: a batch reports reverts as the single read would
+
+    def _batch_once(self, requests: list[tuple[str, list]]) -> list[Any]:
+        """One batch round trip; every slot ``TRANSIENT`` when the request as a whole failed."""
+        assert self.batch is not None
         try:
-            results = self.batch(list(pending.values()))
+            results = list(self.batch(requests))
         except TimeoutError:
             raise
         except Exception:
-            return
-        for key, result in zip(pending, results):
-            if result is not None:
-                self._memo[key] = result  # REVERTED included: a batch reports reverts as the single read would
+            return [TRANSIENT] * len(requests)
+        return results + [TRANSIENT] * (len(requests) - len(results))
 
     def storage_request(self, address: int, slot: int) -> tuple[tuple, str, list]:
         return ("s", address, slot), "eth_getStorageAt", [_hex20(address), hex(slot), hex(self.block)]
@@ -713,7 +739,8 @@ def _frame_words(calls: dict) -> frozenset[int]:
 
 def batch_results(classified: list[tuple[Any, str]]) -> list[Any]:
     """``rpc_batch_request_classified(..., keep_errors=True)`` slots as ``Chain`` takes them: the answer, REVERTED for
-    an execution error, ``None`` for anything else (a node or transport error stays unknown)."""
+    an execution error, TRANSIENT for a slot the request left unanswered as a whole (asked again), ``None`` for any
+    other error (a node's error for that read stays unknown)."""
     out = []
     for result, status in classified:
         if status == "ok":
@@ -722,6 +749,8 @@ def batch_results(classified: list[tuple[Any, str]]) -> list[Any]:
             out.append(REVERTED)
         elif status == "error" and isinstance(result, dict) and _crowded(str(result.get("message", ""))):
             out.append(CROWDED)
+        elif status == "transport":
+            out.append(TRANSIENT)
         else:
             out.append(None)
     return out

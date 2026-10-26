@@ -69,6 +69,8 @@ SAMPLED = {
     "LOG_SECONDS": ((D, V), 0.0),  # read by name into ``verdict``: set where it is read
     "LOG_TOTAL_SECONDS": ((D, V), 0.0),
     "LOG_BATCH": ((D,), 1),
+    "BATCH_RETRIES": ((D,), 0),  # anvil drops no batch: only a node that does is read again
+    "BATCH_RETRY_WAIT": ((D,), 0.0),
     "SNAPSHOT_SLOTS": ((D,), 1),
     "SNAPSHOT_PAGE": ((D,), 1),
     "CREATION_PROBES": ((D,), 1),
@@ -144,6 +146,8 @@ INVARIANT = {
     "_BINDINGS=1",
     "LOG_WINDOW=16",
     "LOG_BATCH=1",
+    "BATCH_RETRIES=0",
+    "BATCH_RETRY_WAIT=0.0",
     "SNAPSHOT_PAGE=1",
     "CREATION_PROBES=1",
     "_LOCATED=1",
