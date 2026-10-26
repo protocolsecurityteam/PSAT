@@ -409,6 +409,26 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   ``verdict.inverse`` now answers only where every write's event names the value it leaves (as ``latest`` asks);
   the managers are listed from storage, key by key (``holders.stored``).
 
+* **G11. "Open" resting on five strangers read as proven for every address** (2026-10-25, user decision). FIXED in
+  vocabulary. Every "open now" stands on the chain (G7), but five strangers' calls going through is a sample: a gate
+  admitting nine addresses in ten (``uint160(msg.sender) % 10 != 0``) passes all five (``FRESH ^ 1, 2, 4, 8``, none a
+  multiple of ten), and was "open" like a function anyone calls. Now ``Verdict.witnessed`` marks an open resting on
+  samples, reported ``open_witnessed`` (``report.openness_label``, ``deployment_verdicts``' ``witnessed`` and
+  ``label``, ``corpus_parity``'s ``lego_witnessed``); "open" unqualified only where the formula proves it for every
+  unconfigured address (``decide._alike_for_strangers``: the caller, origin or signer only as a mapping key or one side
+  of an equality whose other side no identity reaches, through conversions keeping addresses apart; no call, hash or
+  encoding handed it; no view call that may reach ``tx.origin``, a callee unfollowed counting as one; no unknown
+  that may single anyone out) and nothing sampled reached it (``World.sampled``: ``strangers_run`` or ``runs``
+  settling an unknown stranger, a callee's code saying it reads everyone alike, an inlined callee's proposal, a call
+  of the stranger's own first (``after``), an action assumed or handed the caller, entries arranged; the chain
+  merely confirming a proof keeps it proven). ``complete`` is unchanged. The machinery is not: the parity gate
+  (``% 2 == 0``, the strangers' low bits differ) stays not determined, the mint/USDT/A52 probes too. The oracle checks
+  a proven open at 24 further addresses the engine never samples (``_oracle.UNSEEN``) and takes ``open_proven``; the
+  sweep ranks proven above witnessed (``never_bolder``); ``scripts/logic_run_passes.py`` fails a witnessed open turning
+  proven under ``--faulty`` or ``--budget-only`` and prints the reverse as a confidence-only move
+  (``test_witnessed``). Cost: an open on a callee's answer, an action (``sink.poke()``) or an ordering of addresses is
+  witnessed even where it holds for everyone.
+
 ### Stated assumptions (not constructs)
 
 * An external call does not re-enter this contract's state-changing code before it returns (reentrancy is not

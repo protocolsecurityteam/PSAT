@@ -1046,6 +1046,10 @@ class World:
     # caller's own entries here, brought about first).
     rests_on: set = field(default_factory=set)
     brought: list = field(default_factory=list)
+    # Whether an "open" this decision reached rests on strangers' calls run on the chain (``strangers_run``,
+    # ``runs``) where the formula alone left the stranger unsettled or rested on a callee's code: what five addresses
+    # showed, a sample (``Verdict.witnessed``).
+    sampled: bool = False
     # Conditions on records the caller names (``decide``), and whether questions leave them free (all but "now").
     records: frozenset = frozenset()
     records_free: bool = True
@@ -2100,6 +2104,12 @@ class Verdict:
     allowed: str = "now"
     # Calls a stranger makes first for an open function to let it through: (signature, arguments) each.
     after: tuple[tuple[str, dict], ...] = ()
+    # For an open function: ``True`` when the open rests on samples, what five strangers' calls showed on the chain or
+    # the formula evaluated at those five addresses where its form doesn't make every unconfigured address alike
+    # (``uint160(msg.sender) % 10 != 0`` lets nine in ten through), never on a proof that any unconfigured address
+    # passes; ``False`` for an open proved for every one (``decide._alike_for_strangers``). Reported as
+    # ``open_witnessed`` (``report.openness_label``); always ``False`` for a verdict that isn't "open".
+    witnessed: bool = False
     # Callers singled out by who they are, kept apart from ``principals``: their call was shown to pass only with
     # some conditions freed, by what was freed: ``business`` (every condition not about who calls), ``arguments``
     # (what the arguments decide), ``holdings`` (and the amounts in their own entries). A complete list is these
@@ -2122,6 +2132,8 @@ class Verdict:
     def __post_init__(self) -> None:
         # Several parts can name the same reason (one callee asked three times): each once, in order.
         self.gaps = tuple(dict.fromkeys(self.gaps))
+        if self.openness != "open":
+            self.witnessed = False
         if self.openness == "not_determined" and not self.gaps:
             if os.environ.get("PSAT_LOGIC_STRICT_GAPS") == "1":
                 raise ValueError("a not_determined verdict must say why")
@@ -2158,6 +2170,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # proves nothing (other arguments, another state) and changes nothing.
         found = _executes(formula, world, FRESH, set(), tries=1)
         if found is not None and strangers_run(formula, world, found, tries=1):
+            world.sampled = True
             verdict = Verdict("open", frozenset(), True, witnesses={FRESH: found})
         elif found is not None and verdict.openness == "not_determined":
             verdict = replace(verdict, gaps=(*verdict.gaps, "strangers_differ"))
@@ -2181,6 +2194,13 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if world.__dict__.get("confirm_spent") and not verdict.complete:
         verdict = replace(verdict, gaps=verdict.gaps + ("budget:confirm",))
     verdict = _confirmed_open(formula, world, verdict)
+    if verdict.openness == "open":
+        # Proved only where nothing sampled it: no stranger's run settled it, no assumption or arrangement it rests on,
+        # no call of its own first, and a formula whose form makes every unconfigured address meet it as ``FRESH`` did.
+        witnessed = (
+            world.sampled or bool(world.rests_on) or bool(verdict.after) or not _alike_for_strangers(formula, world)
+        )
+        verdict = replace(verdict, witnessed=witnessed)
     chosen = tuple(("arguments", name) for name in _quantified(core))
     return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
 
@@ -2204,6 +2224,7 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
     witness = verdict.witnesses.get(FRESH, {})
     if verdict.after:
         if prior_runs is not None and _after_runs(world, witness, *prior_runs):
+            world.sampled = True
             return verdict
         gap = "open_arranged_unconfirmed"
     else:
@@ -2213,8 +2234,10 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
         elif not witness.get("msg.value"):
             found = _executes(formula, world, FRESH, set(), tries=2)
             if found is not None and strangers_run(formula, world, found):
+                world.sampled = True
                 return replace(verdict, witnesses={**verdict.witnesses, FRESH: found})
         if "action" in rests_on and brought and _brought_runs(world, witness, brought):
+            world.sampled = True
             return verdict
         if "action" in rests_on and any(c in world.requirements for c in subterms(formula, "call")):
             # An action taking what the caller holds (``transferFrom(msg.sender, ...)`` of a balance holders move to
@@ -2457,6 +2480,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     """
     world.rests_on = set()
     world.brought = []
+    world.sampled = False
     world.__dict__.pop("_prior_runs", None)
     if formula == FALSE:
         return Verdict("restricted", frozenset(), True)  # always reverts: nobody, ever
@@ -2524,6 +2548,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             if coded and not (runs(world, FRESH, witness) is True and strangers_run(formula, world, witness)):
                 # Every stranger alike only on a callee's code: open only where each one's own call goes through.
                 return Verdict("not_determined", frozenset(), False, gaps=(*unsingled, "strangers_differ"))
+            world.sampled = world.sampled or bool(coded)
             return Verdict("open", frozenset(), True, witnesses={FRESH: witness})
         if coded:
             # Open once the conditions allow, for every stranger alike only on a callee's code: no call shows it.
@@ -2543,6 +2568,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # it before every candidate is asked about.
         ran = _executes(formula, world, FRESH, set(), tries=2)
         if ran is not None and strangers_run(formula, world, ran, tries=2):
+            world.sampled = True
             return Verdict("open", frozenset(), True, witnesses={FRESH: ran})
     arranged = world.arrange(formula)
     arranged_open: Verdict | None = None
@@ -2621,6 +2647,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if limited:
         ran = _executes(formula, world, FRESH, set(), tries=2)
         if ran is not None and strangers_run(formula, world, ran, tries=2):
+            world.sampled = True
             return Verdict("open", frozenset(), True, witnesses={FRESH: ran})
     if not proven:
         _prefetch(formula, world, set(_ranked(candidates, world)[: UNPROVEN_BATCH if limited else _CANDIDATE_BATCH]))
@@ -3833,6 +3860,88 @@ def _strangers_pass(formula: Term, world: World, witness: dict[Term, Any]) -> bo
         _outcome(formula, world, {"caller": other, "signer": other}, set(), fixed={}) is True
         for other in _OTHER_STRANGERS
     )
+
+
+# Conversions that keep every address apart (to an address, a word of 160 bits or more, 20 bytes or more).
+_KEEPS_ADDRESSES = re.compile(r"address( payable)?|u?int(16\d|1[7-9]\d|2[0-4]\d|25[0-6])|bytes(2\d|3[0-2])")
+# Kinds whose answer, handed an identity, isn't read off the formula: code that runs, an encoding, a hash.
+_IDENTITY_OPAQUE = frozenset({"call", "delegate", "hash", "enc", "opaque", "unknown", "assumed"})
+
+
+def _kept_identity(t: Term) -> bool:
+    """Whether ``t`` is the caller (origin, signer) itself, through conversions that keep every address apart."""
+    while isinstance(t, tuple) and t and t[0] == "conv":
+        if not (isinstance(t[1], str) and _KEEPS_ADDRESSES.fullmatch(t[1])):
+            return False
+        t = t[2]
+    return isinstance(t, tuple) and bool(t) and t[0] in IDENTITY_KINDS
+
+
+def _alike_for_strangers(formula: Term, world: World) -> bool:
+    """Whether every unconfigured address meets ``formula`` as ``FRESH`` does, by its form alone: the caller (origin,
+    signer) appears only as a mapping key, or as one side of an equality whose other side no identity reaches, each
+    through conversions that keep every address apart; no call, hash or encoding is handed it; no view call reaches
+    code reading ``tx.origin``; no unknown may single anyone out. An unconfigured address holds no entry and equals
+    no address the contract names, so each such reading is the same for every one of them. Anything else
+    (``uint160(msg.sender) % 10 != 0``, an ordering of addresses, a callee handed the caller) is met at the five
+    strangers only as a sample (``Verdict.witnessed``)."""
+    if any(not singles_out_nobody(u) for u in subterms(formula, "unknown")) or subterms(formula, "delegate"):
+        return False
+    memo: dict[int, bool] = {}
+
+    def items(t: Any) -> list:
+        # A term's operands, through the plain tuples and sets that hold several (a lookup's path, a call's arguments).
+        out: list = []
+        for x in t[1:]:
+            if isinstance(x, frozenset) or (isinstance(x, tuple) and x and not isinstance(x[0], str)):
+                out.extend(y for y in x if isinstance(y, tuple))
+            elif isinstance(x, tuple) and x:
+                out.append(x)
+        return out
+
+    def alike(t: Any) -> bool:
+        if not isinstance(t, tuple) or not t or not isinstance(t[0], str) or not contains(t, IDENTITY_KINDS):
+            return True
+        if id(t) in memo:
+            return memo[id(t)]
+        kind = t[0]
+        if kind in IDENTITY_KINDS or kind in _IDENTITY_OPAQUE:
+            answer = False  # an identity's value itself, or handed to what isn't read off the formula
+        elif kind == "load":
+            answer = not contains(t[1], IDENTITY_KINDS) and all(
+                _kept_identity(step) or alike(step) for _, step in t[3] if isinstance(step, tuple)
+            )
+        elif kind == "cmp" and t[1] == "eq":
+            a, b = t[2], t[3]
+            if _kept_identity(a) or _kept_identity(b):
+                other = b if _kept_identity(a) else a
+                answer = _kept_identity(other) or not contains(other, IDENTITY_KINDS)
+            else:
+                answer = alike(a) and alike(b)
+        else:
+            answer = all(not _kept_identity(x) and alike(x) for x in items(t))
+        memo[id(t)] = answer
+        return answer
+
+    return alike(formula) and _origin_unread(formula, world, 0)
+
+
+def _origin_unread(term: Term, world: World, depth: int) -> bool:
+    """Whether no view call in ``term`` that no identity is handed to may reach code reading ``tx.origin``, shown:
+    ``World.caller_bound`` where supplied, else each callee lowered and read, a few contracts deep. A callee not
+    followed, or past that depth, may read it."""
+    if world.caller_bound is not None:
+        return not _reads_origin(term, world, depth)
+    for call in subterms(term, "call"):
+        if not call[4] or any(contains(a, IDENTITY_KINDS) for a in call[3]):
+            continue
+        lowered = world.callee(call) if depth < IDENTITY_DEPTH else None
+        if lowered is None:
+            return False
+        parts = [p for p in (lowered[0], *lowered[1]) if isinstance(p, tuple)]
+        if any(contains(p, frozenset({"origin"})) or not _origin_unread(p, world, depth + 1) for p in parts):
+            return False
+    return True
 
 
 def _prefetch(formula: Term, world: World, candidates: set[int]) -> None:

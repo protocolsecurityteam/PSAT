@@ -1761,7 +1761,9 @@ def _inlined_verdict(
     witness = proposed.witnesses.get(FRESH)
     if proposed.openness == "open" and proposed.allowed == "now" and witness is not None:
         if runs(world, FRESH, witness) is True and strangers_run(formula, world, witness):
-            return proposed  # every stranger's own call goes through on the chain
+            # Every stranger's own call goes through on the chain: what five addresses show, on code trusted for
+            # nothing, is a sample.
+            return replace(proposed, witnessed=True)
     offered = sorted((proposed.principals | set(proposed.conditions)) - base.principals)
     confirmed = {}
     for who in offered[:_EXECUTED_CANDIDATES]:

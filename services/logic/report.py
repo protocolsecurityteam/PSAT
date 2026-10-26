@@ -5,6 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 
+def openness_label(verdict: Any) -> str:
+    """A verdict's openness in words: ``open`` only for an open proved for every unconfigured address,
+    ``open_witnessed`` for one resting on what sampled strangers showed (``Verdict.witnessed``: never read as the
+    proof), else ``restricted`` or ``not_determined``."""
+    if verdict.openness == "open" and getattr(verdict, "witnessed", False):
+        return "open_witnessed"
+    return verdict.openness
+
+
 def render(t: Any, depth: int = 0) -> str:
     """A short reading of a term, for reporting a gate."""
     if not isinstance(t, tuple) or not t:

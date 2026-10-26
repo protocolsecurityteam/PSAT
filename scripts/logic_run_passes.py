@@ -20,6 +20,10 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
     formula is identically false (``lego_formula_false``: WBTC's ``renounceOwnership``, which always reverts), where
     getting further than a stranger is no way through.
 (m) Rows the old run has and the new one lacks fail too, unless ``--only-new`` (a subset run) is given.
+Witnessed and proven opens (``lego_witnessed``: an open resting on what sampled strangers showed, never a proof for
+every unconfigured address) are two claims: under (a) and (c) a witnessed open turning proven is a change, failed
+like any other gain; a proven open turning witnessed is a confidence-only move, printed, never a failure. A row
+without the field (a run from before it) says nothing either way.
 A row that appears twice within the old files, or within the new ones, stops the comparison with an error.
 
 Always printed, not a failure by itself: every row whose scope changed (or turned self-scoped, where the old run
@@ -68,6 +72,28 @@ def verdict(row: dict) -> str | None:
     return row.get("lego")
 
 
+def witnessed(row: dict) -> bool | None:
+    """Whether an open row rests on sampled strangers (``True``) or a proof (``False``); ``None`` when the row isn't
+    open or its run didn't record it."""
+    if verdict(row) != "open" or "lego_witnessed" not in row:
+        return None
+    return bool(row["lego_witnessed"])
+
+
+def proven_from_witnessed(a: dict, b: dict) -> bool:
+    """Whether an open the old row only witnessed is proven in the new one: the sample promoted to the proof."""
+    return witnessed(a) is True and witnessed(b) is False
+
+
+def confidence_moves(old: dict[tuple, dict], new: dict[tuple, dict]) -> list[str]:
+    """Rows whose open went from proven to witnessed: confidence lost, never more open."""
+    return [
+        f"{key[0]} {old[key].get('contract')}.{key[2]} @ {key[1]}: open proven -> witnessed"
+        for key in sorted(old.keys() & new.keys())
+        if witnessed(old[key]) is False and witnessed(new[key]) is True
+    ]
+
+
 def _confirmed_lost(a: dict, b: dict) -> list[str]:
     confirmed = {p for p, ok in (a.get("checks") or {}).items() if ok is True and p != "anyone"}
     return sorted((confirmed & listed(a)) - listed(b))
@@ -83,6 +109,8 @@ def failures(
         if faulty:
             if verdict(a) != "open" and verdict(b) == "open":
                 out.append(f"(a) {verdict(a)} -> open under failing reads: {where}")
+            if proven_from_witnessed(a, b):
+                out.append(f"(a) witnessed open -> proven open under failing reads: {where}")
             if b.get("lego_complete") and not a.get("lego_complete") and verdict(b) != "open":
                 out.append(f"(a) gained completeness under failing reads: {where}")
             if a.get("lego_complete") and b.get("lego_complete") and listed(a) != listed(b):
@@ -96,6 +124,8 @@ def failures(
             out.append(
                 f"(c) budget changed the answer: {where} {verdict(a)}/{len(listed(a))} -> {verdict(b)}/{len(listed(b))}"
             )
+        elif budget_only and proven_from_witnessed(a, b):
+            out.append(f"(c) budget turned a witnessed open proven: {where}")
     for key in sorted(new):
         refuted = new[key].get("nobody_refuted") or []
         where = f"{key[0]} {new[key].get('contract')}.{key[2]} @ {key[1]}"
@@ -144,6 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     flips = scope_flips(old, new)
     print(f"scope changes: {len(flips)}")
     for line in flips:
+        print("  " + line)
+    moves = confidence_moves(old, new)
+    print(f"confidence-only moves: {len(moves)}")
+    for line in moves:
         print("  " + line)
     for line in found:
         print(line)

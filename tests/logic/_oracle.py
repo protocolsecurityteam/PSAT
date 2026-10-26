@@ -3,7 +3,9 @@
 * Semantics (``chain_says`` / ``engine_says``): a function's lowered success formula, evaluated by the decision's own
   evaluator at concrete arguments, against ``eth_call`` of the same call.
 * Verdict (``check``): every holder a verdict lists passes ``eth_call`` from its own address (``tx.origin`` too) with
-  its witness arguments; "open now" only when each of the five strangers (``decide._STRANGERS``) passes; "open later"
+  its witness arguments; "open now" only when each of the five strangers (``decide._STRANGERS``) passes, and an
+  open proved for every unconfigured address (not ``witnessed``) only when a further ``UNSEEN`` addresses, none of
+  them the engine's, pass too; "open later"
   only where the probe says how a state comes about in which they all do; "restricted" only when no stranger passes
   at the arguments the probe's author knows matter; a list said to be complete leaves
   out no address the probe knows of that passes; "nobody" is refuted by nobody.
@@ -41,6 +43,9 @@ ACCOUNTS = (
     0x90F79BF6EB2C4F870365E785982E1F101E93B906,
 )
 OPENNESS = {"not_determined": 0, "restricted": 1, "open": 2}
+# Addresses no probe configures and the engine never samples: an open proved for every unconfigured address (not
+# ``witnessed``) must let each of them through too.
+UNSEEN = tuple(int.from_bytes(keccak(text=f"psat.oracle.unseen.{i}")[:20], "big") for i in range(24))
 ALLOWED = {"later_conditional": 0, "conditional": 0, "later": 1, "now": 2}
 
 
@@ -300,7 +305,8 @@ def nobody(v: Any) -> bool:
 
 def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None = None, samples=({},),
           known: Iterable[int] = (), open_at: Any = None, arrange: Callable | None = None,
-          holders_after: Callable | None = None, later: Callable | None = None) -> Any:  # fmt: skip
+          holders_after: Callable | None = None, later: Callable | None = None,
+          open_proven: bool | None = None) -> Any:  # fmt: skip
     """``v`` against the chain as it stands (see the module's docstring).
 
     ``samples``: argument sets (by name) at which a refused caller must fail; ``known``: addresses beyond the strangers
@@ -313,9 +319,21 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
     each stranger's call at each of ``samples`` until one passes for all. An "open now" verdict is checked at its own
     witness unless ``open_at`` is given. ``holders_after(d)``: what has to happen first for the listed holders to
     pass where the verdict lists them on a condition closed now (the owner turning it on, code coming to be at an
-    address), run before their calls."""
+    address), run before their calls. ``open_proven``: ``True`` where the probe knows every unconfigured address passes
+    and the engine can show it from the formula alone (the verdict must be "open" and not ``witnessed``), ``False``
+    where only a sample can show it (open, if at all, only ``witnessed``)."""
     fn = function(d, contract, name)
     where = at if at is not None else d.at[contract]
+    if open_proven is not None:
+        assert v.openness == "open" or not open_proven, (name, "open, proved", v)
+        assert v.openness != "open" or v.witnessed != open_proven, (name, "witnessed" if open_proven else "proved", v)
+    proved = v.openness == "open" and v.allowed == "now" and not v.witnessed
+    if proved and arrange is None and not v.after and not v.requires:
+        # Proved for every unconfigured address: addresses the engine never sampled pass as well.
+        args = open_at if isinstance(open_at, dict) else v.witnesses.get(FRESH, {})
+        for who in UNSEEN:
+            own = {k: who if x == FRESH else x for k, x in args.items()}
+            assert passes(d, where, fn, own, sender=who), (name, "proved open, unseen fails", hex(who), v)
     with snapshot(d):
         if holders_after is not None:
             holders_after(d)
@@ -405,13 +423,19 @@ def sound(v: Any, truth: set[int] | None = None, *, anyone: bool = False) -> Non
 
 def never_bolder(clean: Any, faulted: Any) -> None:
     """The fail-safe property: a fault never makes a verdict more open, never shrinks a complete list, never makes
-    complete what the clean run was not."""
-    rank = (OPENNESS[faulted.openness], ALLOWED.get(faulted.allowed, 0) if faulted.openness == "open" else 0)
-    clean_rank = (OPENNESS[clean.openness], ALLOWED.get(clean.allowed, 0) if clean.openness == "open" else 0)
+    complete what the clean run was not, and never proves an open the clean run only witnessed (proven-open ranks
+    above witnessed-open, above not determined)."""
+    rank, clean_rank = _rank(faulted), _rank(clean)
     assert rank <= clean_rank, (clean, faulted)
     if faulted.complete:
         assert clean.complete, (clean, faulted)
         assert listed(faulted) >= listed(clean), (clean, faulted)
+
+
+def _rank(v: Any) -> tuple[int, int, int]:
+    if v.openness != "open":
+        return (OPENNESS[v.openness], 0, 0)
+    return (OPENNESS["open"], ALLOWED.get(v.allowed, 0), 0 if v.witnessed else 1)
 
 
 def listed(v: Any) -> set[int]:

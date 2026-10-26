@@ -15,6 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .decide import LOG_ROWS, Chain, batch_results
+from .report import openness_label
 from .terms import reset_terms
 from .verdict import function_verdict
 
@@ -293,6 +294,9 @@ def deployment_verdicts(
                 continue
             out[fn.solidity_signature] = {
                 "openness": verdict.openness,
+                # An open resting on what five strangers' calls showed, not a proof for every unconfigured address.
+                "witnessed": verdict.witnessed,
+                "label": openness_label(verdict),
                 "principals": sorted(_hex20(p) for p in verdict.principals),
                 # Singled out by who they are; their call shown to pass only with these conditions freed.
                 "conditional": {_hex20(p): freed for p, freed in sorted(verdict.conditions.items())},
