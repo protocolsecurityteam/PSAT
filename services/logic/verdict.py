@@ -1362,8 +1362,39 @@ _ORIGIN = frozenset({"origin"})
 _CHOSEN = frozenset({"arg", "len", "elem", "callvalue", "calldatasize"})
 _ORIGIN_OP = 0x32
 _CALL_OPS = frozenset({0xF1, 0xF2, 0xF4, 0xFA})  # CALL, CALLCODE, DELEGATECALL, STATICCALL
-# The keys a compiler's metadata map holds, as CBOR text strings: only a trailer naming one is skipped.
-_METADATA_KEYS = (b"\x64ipfs", b"\x65bzzr0", b"\x65bzzr1", b"\x64solc")
+# The keys a compiler's metadata map holds: only a trailer that is such a map, whole, is skipped.
+_METADATA_KEYS = frozenset({b"ipfs", b"bzzr0", b"bzzr1", b"solc", b"experimental"})
+
+
+def _metadata_map(meta: bytes) -> bool:
+    """Whether ``meta`` is, byte for byte, a compiler's CBOR metadata map: a definite map of the known keys (text
+    strings) to byte strings, text strings or booleans, ending where the trailer says it does."""
+    if not meta or not 0xA1 <= meta[0] <= 0xB7:
+        return False
+    i = 1
+
+    def string(major: int) -> bytes | None:
+        nonlocal i
+        if i >= len(meta) or meta[i] >> 5 != major:
+            return None
+        size, i = meta[i] & 0x1F, i + 1
+        if size == 24:
+            if i >= len(meta):
+                return None
+            size, i = meta[i], i + 1
+        elif size > 23:
+            return None
+        out, i = meta[i : i + size], i + size
+        return out if len(out) == size else None
+
+    for _ in range(meta[0] - 0xA0):
+        if string(3) not in _METADATA_KEYS:
+            return False
+        if i < len(meta) and meta[i] in (0xF4, 0xF5):
+            i += 1
+        elif i >= len(meta) or string(meta[i] >> 5 if meta[i] >> 5 in (2, 3) else -1) is None:
+            return False
+    return i == len(meta)
 
 
 def _runtime_reach(code: bytes) -> str | None:
@@ -1374,19 +1405,151 @@ def _runtime_reach(code: bytes) -> str | None:
 
 
 def _opcodes(code: bytes) -> set[int]:
-    """The opcodes runtime code holds: a walk over them, skipping push data and the trailing metadata."""
+    """The opcodes runtime code may run: those of every instruction reachable from offset 0 (``_reachable_code``),
+    the compiler's trailing metadata stripped. Data the code never jumps into (a revert string, another contract's
+    code it deploys, a ``bzzr0`` hash) is not read as code."""
     if len(code) >= 2:
         size = int.from_bytes(code[-2:], "big")
         meta = code[-size - 2 : -2] if size + 2 <= len(code) else b""
-        if meta and 0xA0 <= meta[0] <= 0xBF and any(key in meta for key in _METADATA_KEYS):
+        if _metadata_map(meta):
             code = code[: -size - 2]  # the compiler's CBOR metadata: data, never run
-    seen: set[int] = set()
+    instructions = _instructions(code)
+    return {instructions[at][0] for at in _reachable_code(instructions)}
+
+
+# Stack effects (taken, pushed) of the opcodes the walk doesn't single out; any other opcode halts.
+_EFFECTS = {
+    **dict.fromkeys(range(0x01, 0x08), (2, 1)),
+    0x08: (3, 1),
+    0x09: (3, 1),
+    0x0A: (2, 1),
+    0x0B: (2, 1),
+    **dict.fromkeys(range(0x10, 0x15), (2, 1)),
+    0x15: (1, 1),
+    **dict.fromkeys(range(0x16, 0x19), (2, 1)),
+    0x19: (1, 1),
+    **dict.fromkeys(range(0x1A, 0x1E), (2, 1)),
+    0x20: (2, 1),
+    0x30: (0, 1),
+    0x31: (1, 1),
+    **dict.fromkeys((0x32, 0x33, 0x34, 0x36, 0x38, 0x3A, 0x3D), (0, 1)),
+    0x35: (1, 1),
+    0x37: (3, 0),
+    0x39: (3, 0),
+    0x3B: (1, 1),
+    0x3C: (4, 0),
+    0x3E: (3, 0),
+    0x3F: (1, 1),
+    0x40: (1, 1),
+    **dict.fromkeys(range(0x41, 0x49), (0, 1)),
+    0x49: (1, 1),
+    0x4A: (0, 1),
+    0x50: (1, 0),
+    0x51: (1, 1),
+    0x52: (2, 0),
+    0x53: (2, 0),
+    0x54: (1, 1),
+    0x55: (2, 0),
+    0x59: (0, 1),
+    0x5A: (0, 1),
+    0x5B: (0, 0),
+    0x5C: (1, 1),
+    0x5D: (2, 0),
+    0x5E: (3, 0),
+    **{0xA0 + n: (2 + n, 0) for n in range(5)},
+    0xF0: (3, 1),
+    0xF1: (7, 1),
+    0xF2: (7, 1),
+    0xF4: (6, 1),
+    0xF5: (4, 1),
+    0xFA: (6, 1),
+}
+_HALTS = frozenset({0x00, 0xF3, 0xFD, 0xFE, 0xFF})  # STOP, RETURN, REVERT, INVALID, SELFDESTRUCT
+_WALK = 400_000  # instructions the reachability walk may step through before every jump target counts
+_TOP = None  # a stack entry that may be anything
+
+
+def _instructions(code: bytes) -> dict[int, tuple[int, int | None, int]]:
+    """Offset -> (opcode, the constant it pushes or ``None``, next offset), by the EVM's own linear decoding (the one
+    its ``JUMPDEST`` analysis makes)."""
+    out: dict[int, tuple[int, int | None, int]] = {}
     i = 0
     while i < len(code):
         op = code[i]
-        seen.add(op)
-        i += 1 + (op - 0x5F if 0x60 <= op <= 0x7F else 0)
-    return seen
+        width = op - 0x5F if 0x60 <= op <= 0x7F else 0
+        value = int.from_bytes(code[i + 1 : i + 1 + width].ljust(width, b"\0"), "big") if width else None
+        out[i] = (op, 0 if op == 0x5F else value, i + 1 + width)
+        i += 1 + width
+    return out
+
+
+def _reachable_code(instructions: dict[int, tuple[int, int | None, int]]) -> set[int]:
+    """The offsets of the instructions a run can reach from offset 0. Each stack entry is followed as the
+    ``JUMPDEST`` a ``PUSH`` (or ``PC``) put there, moved by ``DUP``/``SWAP``/``POP``, in each stack a block is entered
+    with (one per way in: an internal function returns to each caller's own label); a jump goes where its target
+    holds. A jump to anything else (a target computed, or loaded from memory or storage), or a walk past ``_WALK``
+    steps, makes every ``JUMPDEST`` a target: a sound over-approximation, never missing reachable code."""
+    dests = {at for at, (op, _, _) in instructions.items() if op == 0x5B}
+    queue: list[tuple[int, tuple]] = [(0, ())]
+    entered: set[tuple[int, tuple]] = set()
+    reached: set[int] = set()
+    steps = 0
+    anywhere = False
+    while queue and not anywhere:
+        at, stack = queue.pop()
+        if (at, stack) in entered:
+            continue
+        entered.add((at, stack))
+        while at in instructions:
+            steps += 1
+            if steps > _WALK:
+                anywhere = True
+                break
+            reached.add(at)
+            op, value, nxt = instructions[at]
+            if op in _HALTS:
+                break
+            if 0x5F <= op <= 0x7F or op == 0x58:
+                # Only a ``JUMPDEST`` is worth following: a jump to any other constant fails.
+                pushed = at if op == 0x58 else value
+                stack = (pushed if pushed in dests else -1, *stack)[:1024]
+            elif 0x80 <= op <= 0x8F:
+                n = op - 0x80
+                stack = (stack[n] if n < len(stack) else _TOP, *stack)[:1024]
+            elif 0x90 <= op <= 0x9F:
+                n = op - 0x8F
+                padded = list(stack) + [_TOP] * (n + 1 - len(stack))
+                padded[0], padded[n] = padded[n], padded[0]
+                stack = tuple(padded)
+            elif op in (0x56, 0x57):
+                target = stack[0] if stack else _TOP
+                stack = stack[2 if op == 0x57 else 1 :]
+                if target is _TOP:
+                    anywhere = True
+                    break
+                if target in dests:
+                    queue.append((target, stack))
+                if op == 0x57:
+                    queue.append((nxt, stack))
+                break
+            elif op in _EFFECTS:
+                taken, pushed_count = _EFFECTS[op]
+                stack = ((_TOP,) * pushed_count + stack[taken:])[:1024]
+            else:
+                break  # an undefined opcode halts
+            at = nxt
+    if anywhere:
+        # Every JUMPDEST a target: from 0 and from each, every instruction up to one that halts or jumps.
+        reached = set()
+        for start in (0, *sorted(dests)):
+            at = start
+            while at in instructions and at not in reached:
+                reached.add(at)
+                op, _, nxt = instructions[at]
+                if op in _HALTS or op == 0x56 or not (op in _EFFECTS or op == 0x57 or 0x58 <= op <= 0x9F):
+                    break
+                at = nxt
+    return reached
 
 
 def _hidden_calls(term: Term) -> bool:

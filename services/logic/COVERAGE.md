@@ -320,9 +320,19 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
     twice and named in assembly, lowered ``unknown:shadowed:o``) made ``require(guard.ok())`` "open later, complete"
     where only the admin passes. Now its runtime code, deployed (and at the address whose code runs there) and as
     compiled, must hold no ``ORIGIN`` opcode too (``hidden`` where it does, ``unfollowed`` where it can't be read);
-    ``_reads_origin`` reuses ``caller_bound``. Cost: a callee contract reading the origin in any function is never
-    read as the same for every caller (``test_core_soundness``, ``test_origin_shapes`` keep their origin-free callees
-    in contracts of their own). Probes p9, p9e, p9r, q4, a10 (both), a11, mo, originBit.
+    ``_reads_origin`` reuses ``caller_bound``. The opcodes are those of the instructions a run can reach from offset 0
+    (``verdict._reachable_code``: the ``JUMPDEST``s each stack entry holds from a ``PUSH``, moved by ``DUP``/``SWAP``,
+    followed per way into a block; a target computed or loaded, or more than ``_WALK`` steps, makes every
+    ``JUMPDEST`` a target), the trailer stripped only where it is, byte for byte, a compiler's CBOR metadata map of
+    the known keys (``verdict._metadata_map``; else its bytes are code, a ``JUMPDEST`` among them a target): bytes
+    that are data (a revert string's ``2``, the creation code of a contract it deploys, a child's ``bzzr0`` hash after
+    ``INVALID``) no longer read as ``ORIGIN`` (nor as ``DELEGATECALL``, ``_delegating``). Before (review 7, F4), 87 of
+    the 1,452 corpus contracts with code were flagged, 70 with no source reading ``tx.origin``; now 17, each with one
+    (``scratchpad/probe_audit7/q4_origin_scan.py``, source grep only), none flagged before with a source lost
+    (``test_origin_scan``).
+    Cost: a callee contract reading the origin in any function it can reach is never read as the same for every
+    caller (``test_core_soundness``, ``test_origin_shapes`` keep their origin-free callees in contracts of their own).
+    Probes p9, p9e, p9r, q4, a10 (both), a11, mo, originBit.
   * **M2, a callee's code alone saying it reads the caller alike** (``decide._decide``, the branch where nobody is
     singled out). ``_singles_out`` records those calls (``coded``), but only "restricted" used it: one stranger passing
     made it "open now", a state letting one through "open later". Now "open now" there needs ``runs(FRESH)`` and

@@ -92,6 +92,7 @@ SAMPLED = {
     "_FREE_SAT_MS": ((D,), 1),
     "_STORED_BYTES": ((D,), 1),
     "_MAX_LATCH_STATES": ((V,), 1),
+    "_WALK": ((V,), 1),  # every JUMPDEST a jump target: more code read as reachable
     "_REACH_ROUNDS": ((V,), 1),
     "_ARRANGE_DEPTH": ((V,), 0),
     "_ARRANGE_ATOMS": ((V,), 1),
@@ -130,6 +131,7 @@ KNOWN_CUT = {
     "MAX_DEPTH": ("test_pool_shapes", 0, "GPv2Answering", "supply"),
     "MAX_UNROLL": ("test_review_probes", 3, "C", "floop"),
     "MAX_ARRAY_ITEMS": ("test_pool_shapes", 0, "Router", "transferIn"),
+    "_WALK": ("test_origin_scan", 0, "C", "adminOr"),
 }
 # Faults that only reorder, batch, page, remember or steer work: every verdict must come out exactly as it was.
 INVARIANT = {
