@@ -217,6 +217,11 @@ def _signed(amount, nonce=0):
     }  # fmt: skip
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="cost of confirming every open on the chain (review 7, F2): no stranger's own call runs a signed deposit "
+    "as the chain stands (it has no signer's key, and the signer no tokens), so it is not determined",
+)
 def test_a_signed_deposit_pulling_chosen_amounts_is_open_to_any_signer(d):
     # The token pull is an action the signer arranges (an approval): a search that pins what it can't model must
     # still let it return. Any relayer submits the signer's deposit.
@@ -226,3 +231,10 @@ def test_a_signed_deposit_pulling_chosen_amounts_is_open_to_any_signer(d):
 
     v = O.check(d, "Vault", "depositSigned", _vault(d, "depositSigned"), arrange=signer_ready, open_at=_signed(5))
     assert v.openness == "open"
+
+
+def test_a_signed_deposit_no_stranger_can_run_is_not_determined(d):
+    # What the xfail above costs: the open rests on an action assumed (the token pull), which the chain can't confirm
+    # for any stranger, so it is a proposal, never "open".
+    v = O.check(d, "Vault", "depositSigned", _vault(d, "depositSigned"), open_at=False)
+    assert v.openness == "not_determined" and v.gaps == ("open_assumed_action_unconfirmed",), v

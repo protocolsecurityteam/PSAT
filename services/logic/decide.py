@@ -276,6 +276,15 @@ class Chain:
         raw = self._get(*self.call_request(address, data, sender, overrides))
         return bytes.fromhex(raw[2:]) if isinstance(raw, str) else raw
 
+    def call_value(self, address: int, data: bytes, sender: int, value: int, overrides: dict | None = None) -> Any:
+        """``call`` sending ``value`` wei, the sender's balance set to what it sends by a state override (a stranger
+        holds none of its own on the node). A node that refuses the override answers with an error: unknown."""
+        key, method, params = self.call_request(address, data, sender, overrides)
+        params = [{**params[0], "value": hex(value)}, params[1], {**(params[2] if len(params) > 2 else {})}]
+        params[2][_hex20(sender)] = {**params[2].get(_hex20(sender), {}), "balance": hex(value)}
+        raw = self._get((*key, ("value", value)), method, params)
+        return bytes.fromhex(raw[2:]) if isinstance(raw, str) else raw
+
     def block_field(self, name: str) -> int | Any:
         header = self._get(("b",), "eth_getBlockByNumber", [hex(self.block), False])
         if not isinstance(header, dict):
@@ -1028,6 +1037,15 @@ class World:
     # action taking from the caller (``transferFrom(msg.sender, ...)``) -> (its target, the balances it moves).
     requirements: dict = field(default_factory=dict)
     held_actions: dict = field(default_factory=dict)
+    # The entry points that bring the caller's own entries about (``verdict._arrangeable``): entry shape -> (the
+    # function, the arguments it passed with), for the chain to run as each stranger.
+    arrangers: dict = field(default_factory=dict)
+    # What an "open now" this decision reached rests on beyond the stranger's own call as the chain stands
+    # (``_confirmed_open``): ``assumed`` (an action not handed the caller), ``action`` (an action handed it, refusing
+    # only on entries the caller brings about: each (call, entries, arrangers) in ``brought``), ``arranged`` (the
+    # caller's own entries here, brought about first).
+    rests_on: set = field(default_factory=set)
+    brought: list = field(default_factory=list)
     # Conditions on records the caller names (``decide``), and whether questions leave them free (all but "now").
     records: frozenset = frozenset()
     records_free: bool = True
@@ -1044,7 +1062,7 @@ class World:
     confirm_left: float = float("inf")
     # The stranger's own calls that, made first, let it through (see ``verdict.after_own_call``): the function's
     # signature and the arguments of each, or ``None``.
-    prior: Callable[[Term], Any] = lambda formula: None
+    prior: Callable[..., Any] = lambda formula, owned=False: None
     # The success formula narrowed to calls with an effect (a write that changes storage, a call out); ``None``
     # when unknown, as for a callee.
     effective: Term | None = None
@@ -1709,7 +1727,7 @@ class Evaluator:
         where a decision rests on it). A callee not followed leaves it unknown: only every stranger's own call, run
         on the chain, shows it passes (``decide``)."""
         if not any(contains(a, IDENTITY_KINDS) for a in t[3]):
-            self.world.__dict__["_arranged_open"] = True  # assumed: whatever it needs, the caller arranges first
+            self.world.rests_on.add("assumed")  # assumed: whatever it needs, the caller arranges first
             return ASSUMED
         if self.eval(t[1]) is UNK:
             return UNK  # handed the caller by a contract whose address went unread: whose check it is is unknown
@@ -1732,7 +1750,7 @@ class Evaluator:
         # caller must hold (``requires``), asked as it stands with or without callee code answering.
         opened = self.world.action_open(t, lowered[0])
         if opened is not False:
-            self.world.__dict__["_arranged_open"] = True  # a pass on entries the caller brings about first
+            self.world.rests_on.add("action")  # a pass on entries the caller brings about first
         if isinstance(opened, frozenset):
             # Some of the entries it reads the caller can bring about, not all (a balance, not a blacklist): an action
             # the caller arranges if those alone, set as needed, let it through, the rest as they stand.
@@ -2168,26 +2186,106 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
 
 
 def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
-    """``verdict``, unless it is plainly "open now" (nothing to hold first, no call of its own first, no ether sent,
-    no entry of its own to arrange first) and the chain doesn't confirm it: every stranger's own call, run as the
-    chain stands (``runs`` with the witness, else a search of its own, then ``strangers_run``), must go through.
+    """``verdict``, unless it is "open now" with nothing to hold first (no ``requires``) and the chain doesn't confirm
+    it: every stranger's own call must go through as the chain stands (``runs`` with the witness, else a search of its
+    own, then ``strangers_run``), with the ether its witness sends (its balance set to that by a state override).
+    Where the open rests on calls of the stranger's own first (``after``), each stranger's first call must go through
+    as the chain stands and then this one on the words that call leaves, handed to the node as state overrides; where
+    it rests on an action handed the caller that refuses only on entries the caller brings about there, the calls
+    that bring them about must go through as each stranger, and this one with those entries set by state overrides.
     Otherwise whatever the lowering said, a callee's code or a mis-lowered construct of the contract's own, is not
-    determined, ``open_unconfirmed``."""
-    if verdict.openness != "open" or verdict.allowed != "now" or verdict.requires or verdict.after:
+    determined: ``open_value_unconfirmed`` (ether sent), ``open_arranged_unconfirmed`` (the stranger's own entries
+    arranged first), ``open_assumed_action_unconfirmed`` (an action assumed or handed the caller), else
+    ``open_unconfirmed``; the proposal stays, as data."""
+    rests_on, brought = world.rests_on, world.brought
+    prior_runs = world.__dict__.pop("_prior_runs", None)
+    if verdict.openness != "open" or verdict.allowed != "now" or verdict.requires:
         return verdict
-    if world.__dict__.pop("_arranged_open", False):
-        return verdict  # open once each stranger arranges its own entries (an approval, a deposit): checked that way
     witness = verdict.witnesses.get(FRESH, {})
-    if witness.get("msg.value"):
-        return verdict
-    if runs(world, FRESH, witness) is True:
-        if strangers_run(formula, world, witness):
+    if verdict.after:
+        if prior_runs is not None and _after_runs(world, witness, *prior_runs):
             return verdict
+        gap = "open_arranged_unconfirmed"
     else:
-        found = _executes(formula, world, FRESH, set(), tries=2)
-        if found is not None and strangers_run(formula, world, found):
-            return replace(verdict, witnesses={**verdict.witnesses, FRESH: found})
-    return Verdict("not_determined", frozenset(), False, gaps=("open_unconfirmed",))
+        if runs(world, FRESH, witness) is True:
+            if strangers_run(formula, world, witness):
+                return verdict
+        elif not witness.get("msg.value"):
+            found = _executes(formula, world, FRESH, set(), tries=2)
+            if found is not None and strangers_run(formula, world, found):
+                return replace(verdict, witnesses={**verdict.witnesses, FRESH: found})
+        if "action" in rests_on and brought and _brought_runs(world, witness, brought):
+            return verdict
+        if "action" in rests_on and any(c in world.requirements for c in subterms(formula, "call")):
+            # An action taking what the caller holds (``transferFrom(msg.sender, ...)`` of a balance holders move to
+            # anyone), no stranger holding it: open to whoever holds it, which ``requires`` names.
+            requires = _requirements(formula, world)
+            if requires and all(isinstance(need, str) and need != "unknown" for _, _, need in requires):
+                return replace(verdict, requires=requires)
+        gap = (
+            "open_value_unconfirmed"
+            if witness.get("msg.value")
+            else "open_arranged_unconfirmed"
+            if "arranged" in rests_on
+            else "open_assumed_action_unconfirmed"
+            if rests_on & {"assumed", "action"}
+            else "open_unconfirmed"
+        )
+    return replace(verdict, openness="not_determined", complete=False, gaps=(gap,))
+
+
+def _overrides(words: dict) -> dict | None:
+    """Storage words, (address, slot) -> word, as state overrides per address; ``None`` where one is unknown."""
+    out: dict[int, list] = {}
+    for (address, slot), word in sorted(words.items()):
+        if not isinstance(word, int) or isinstance(word, bool):
+            return None
+        out.setdefault(address, []).append((slot, word))
+    return out
+
+
+def _after_runs(world: World, witness: dict[str, Any], first: bytes | None, made_by: dict[int, dict]) -> bool:
+    """Whether, for each stranger, its first call (``first``) goes through as the chain stands, and this call with
+    ``witness`` then goes through on the words that call leaves (``made_by``), handed to the node as overrides."""
+    if first is None:
+        return False
+    for who in (FRESH, *_OTHER_STRANGERS):
+        words = made_by.get(who)
+        overrides = _overrides(words) if words is not None else None
+        if overrides is None or not isinstance(world.chain.call(world.this, first, who), bytes):
+            return False
+        own = {k: who if v == FRESH else v for k, v in witness.items()}
+        if runs(world, who, own, overrides) is not True:
+            return False
+    return True
+
+
+def _brought_runs(world: World, witness: dict[str, Any], brought: list) -> bool:
+    """Whether, for each stranger, every call that brings its entries about in an action's callee (``brought``: each
+    action's call, and (target, the entries, the calls that bring them about)) goes through as the chain stands, and
+    this call with ``witness`` then goes through on the words those calls leave there (worked out from their lowering,
+    ``verdict.writer_words``), handed to the node as state overrides."""
+    from .verdict import call_data, writer_words
+
+    if any(makers is None for _, (_, _, makers) in brought):
+        return False
+    for who in (FRESH, *_OTHER_STRANGERS):
+        words: dict = {}
+        for _, (target, _entries, makers) in brought:
+            for function, arguments in makers:
+                own = {k: who if v == FRESH else v for k, v in arguments.items()}
+                data = call_data(function, own)
+                if data is None or not isinstance(world.chain.call(target, data, who), bytes):
+                    return False
+                made = writer_words(world, target, function, own, who)
+                if made is None:
+                    return False
+                words.update(made)
+        overrides = _overrides(words)
+        own = {k: who if v == FRESH else v for k, v in witness.items()}
+        if not overrides or runs(world, who, own, overrides) is not True:
+            return False
+    return True
 
 
 def _handed_actions(t: Term) -> list[Term]:
@@ -2357,7 +2455,9 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     address doesn't, so a paused owner-only function still names its owner. Open means an unconfigured address passes
     now, or would once the ``when`` conditions allow while nobody known passes now either (a paused public function).
     """
-    world.__dict__.pop("_arranged_open", None)
+    world.rests_on = set()
+    world.brought = []
+    world.__dict__.pop("_prior_runs", None)
     if formula == FALSE:
         return Verdict("restricted", frozenset(), True)  # always reverts: nobody, ever
     world.deadline = time.monotonic() + DECISION_SECONDS
@@ -2445,16 +2545,16 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         if ran is not None and strangers_run(formula, world, ran, tries=2):
             return Verdict("open", frozenset(), True, witnesses={FRESH: ran})
     arranged = world.arrange(formula)
+    arranged_open: Verdict | None = None
     if arranged:
         # What failed it may be the stranger's own entries, which open code lets anyone fill (a position to withdraw
         # from): chosen from here on, for strangers and candidates alike.
+        before_arranged = world.arranged
         world.arranged = {**world.arranged, **arranged}
         found_early.clear()
         allowed = _strangers_allowed(formula, world, found_early)
         if allowed is not None:
-            # Open on entries each stranger brings about first: no call of its own as the chain stands shows it, so
-            # ``_confirmed_open`` leaves it to what the stranger must hold or arrange.
-            world.__dict__["_arranged_open"] = True
+            world.rests_on.add("arranged")
             requires = _requirements(formula, world)
             if any(need == "unknown" for _, _, need in requires):
                 return Verdict("not_determined", frozenset(), False, gaps=("holding_unread",), requires=requires)
@@ -2462,7 +2562,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 # Anyone holding enough passes, and holding enough is what decides: a gate on holdings, whose
                 # holders no list names.
                 return Verdict("restricted", frozenset(), False, gaps=("holders",), requires=requires)
-            return Verdict(
+            proposed = Verdict(
                 "open",
                 frozenset(),
                 True,
@@ -2470,12 +2570,21 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 requires=requires,
                 allowed=allowed,
             )
+            if requires or allowed != "now":
+                return proposed
+            # Open on entries each stranger brings about here first: only a call of its own that brings them about,
+            # run on the chain before this one (below), shows it. The entries are no longer chosen for that.
+            world.arranged = before_arranged
+            arranged_open = proposed
     # What failed it may be entries of the stranger's own that one of its calls here writes first (a delegate it
     # assigns before it can unassign one): run that call's writes, then this one.
-    prior = world.prior(formula)
+    prior = world.prior(formula, owned=True) if arranged_open is not None else world.prior(formula)
     if prior is not None:
         signature, before, arguments = prior
         return Verdict("open", frozenset(), True, witnesses={FRESH: arguments}, after=((signature, before),))
+    if arranged_open is not None:
+        # No call of the stranger's own shown to bring them about: the proposal stays, as data.
+        return replace(arranged_open, openness="not_determined", complete=False, gaps=("open_arranged_unconfirmed",))
     if SKIP_SELF_SCOPED and world.scope is not None and world.scope.kind == "self" and not world.arrange_unknown:
         # Its effects stay in the caller's own positions: the gate is the answer, not who holds it. A stranger
         # failing in every state, with unseen addresses failing alike, is all "restricted" needs; anything less
@@ -3298,11 +3407,14 @@ def strangers_run(formula: Term, world: World, witness: dict[str, Any], tries: i
     return True
 
 
-def runs(world: World, who: int, arguments: dict[str, Any]) -> bool | None:
+def runs(world: World, who: int, arguments: dict[str, Any], overrides: dict | None = None) -> bool | None:
     """Whether this function, called by ``who`` with ``arguments`` (by name, as a verdict's witnesses give them; zero
-    for the rest) as the chain stands, goes through: an ``eth_call`` of the whole call. ``None`` where that can't be
-    asked (ether sent, an argument that can't be encoded, a failed read)."""
-    if arguments.get("msg.value"):
+    for the rest) as the chain stands, goes through: an ``eth_call`` of the whole call, with the ether the arguments
+    send (``msg.value``, its sender's balance set to it) and storage as ``overrides`` set it (address -> [(slot,
+    word)]). ``None`` where that can't be asked (an argument that can't be encoded, a failed read, a node that
+    refuses the overrides)."""
+    value = arguments.get("msg.value") or 0
+    if not isinstance(value, int) or isinstance(value, bool):
         return None
     assignment: dict[Term, Any] = {}
     for parameter in world.parameters:
@@ -3320,7 +3432,15 @@ def runs(world: World, who: int, arguments: dict[str, Any]) -> bool | None:
     data = Evaluator(world, {"caller": who, "signer": FRESH}, assignment)._calldata()
     if not isinstance(data, bytes):
         return None
-    answer = world.chain.call(world.this, data, who)
+    if value:
+        send = getattr(world.chain, "call_value", None)
+        if send is None:
+            return None
+        answer = send(world.this, data, who, value, overrides)
+    elif overrides:
+        answer = world.chain.call(world.this, data, who, overrides)
+    else:
+        answer = world.chain.call(world.this, data, who)
     if isinstance(answer, bytes):
         return True
     return False if answer is REVERTED else None

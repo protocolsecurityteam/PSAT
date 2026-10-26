@@ -188,8 +188,16 @@ def _written_values(contract: Any, loads: list[Term]) -> dict[tuple, list | None
                 else:
                     continue
                 leaves = _value_leaves(value, old)
-                out.setdefault(slot, []).append((pc, frozenset(leaves) if leaves is not None else None, value))
+                write = _Write((pc, frozenset(leaves) if leaves is not None else None, value))
+                write.function = fn
+                out.setdefault(slot, []).append(write)
     return out
+
+
+class _Write(tuple):
+    """A write ``_written_values`` lists, (path condition, constants, value), knowing the entry point that makes it."""
+
+    function: Any = None
 
 
 def _by_reference(fn: Any) -> set[str]:
@@ -912,7 +920,7 @@ def _arrangeable(world: World, contract: Any, load: Term, depth: int, valued: bo
     """Whether some entry point writes ``load``'s entry under its own caller's key, with something besides zero,
     past a guard a stranger passes (business conditions left free). ``valued``: a value the caller supplies, not only
     constants (a constant never equals the hash the entry is compared with)."""
-    from .decide import _is_identity, _outcome
+    from .decide import _argument_values, _is_identity, _outcome
     from .terms import const, mk_cmp, mk_not
 
     writes = _written_values(contract, [load])
@@ -936,7 +944,8 @@ def _arrangeable(world: World, contract: Any, load: Term, depth: int, valued: bo
             elif not (written == read or written[0] == "arg"):
                 break
         else:
-            for condition, leaves, value in entries:
+            for entry in entries:
+                condition, leaves, value = entry
                 if leaves is not None and not any(v not in (0, False) for v in leaves):
                     continue  # writes only zero: takes away, never grants
                 if valued and leaves is not None:
@@ -949,9 +958,21 @@ def _arrangeable(world: World, contract: Any, load: Term, depth: int, valued: bo
                 saved = world.arranged
                 if depth < _ARRANGE_DEPTH:
                     world.arranged = {**saved, **arranged_atoms(guard, world, contract, depth + 1)}
+                # A writer needing this very entry first (a transfer to oneself, a balance held to be moved) never
+                # brings it about: conditions on it, arranged or held elsewhere, are read as they stand here.
+                world.arranged = {
+                    atom: given
+                    for atom, given in world.arranged.items()
+                    if not any(t[1] == THIS and t[2] == load[2] for t in _loads_in(atom))
+                }
+                found: dict = {}
                 try:
-                    passed = _outcome(guard, world, stranger, set(), relaxed="arguments")
+                    passed = _outcome(guard, world, stranger, set(), relaxed="arguments", witness=found)
                     if passed is True:
+                        # The call that does it, for the chain to run as each stranger (``decide._confirmed_open``).
+                        writer = getattr(entry, "function", None)
+                        if writer is not None:
+                            world.arrangers.setdefault(_load_shape(load, valued), (writer, _argument_values(found)))
                         return True
                     unsure = unsure or passed is not False
                 finally:
@@ -1052,19 +1073,32 @@ def _loads_in(term: Term) -> list[Term]:
 _PRIOR_WRITERS = 6  # entry points tried as the stranger's own first call, per function
 
 
-def after_own_call(formula: Term, world: World, contract: Any) -> tuple | None:
+def after_own_call(formula: Term, world: World, contract: Any, owned: bool = False) -> tuple | None:
     """A call a stranger makes first, to an entry point here that writes the entries this function reads under the
     caller's key, after which it gets through (``assignDelegate`` before ``unassignDelegate``): that function's
     signature, the arguments of that call and of this one; ``None`` when none does. Each write is worked out on
-    the chain as it stands and read back in its place, so the pair is a run of two calls, not a rule."""
-    from .decide import _argument_values, _outcome
-    from .terms import contains, subterms
+    the chain as it stands and read back in its place, so the pair is a run of two calls, not a rule. ``owned``: also
+    entries the caller makes its own another way (``arranged_atoms``), keyed by an address it passes
+    (``balances[account]``) or naming it at a key it picks (``owners[id] == msg.sender``)."""
+    from .decide import _atoms_of, _outcome
+    from .terms import const, contains, mk_cmp, mk_not, subterms
 
     names = {
         t[2]
         for t in subterms(formula, "load")
         if t[1] == THIS and isinstance(t[2], str) and any(k == "k" and contains(x, IDENTITY_KINDS) for k, x in t[3])
     }
+    if owned:
+        names |= {
+            t[2]
+            for t in subterms(formula, "load")
+            if t[1] == THIS and isinstance(t[2], str) and any(_owner_key(k, x) for k, x in t[3])
+        }
+        names |= {
+            held[2]
+            for atom in _atoms_of(formula)
+            if (held := _held_by_caller(atom)) is not None and isinstance(held[2], str)
+        }
     # An entry compared with a hash of what the caller sends (``stored[me] == keccak256(message)``) passes only
     # with a preimage of what is stored; whatever the stranger writes there itself, it has none.
     hashed = {
@@ -1117,39 +1151,150 @@ def after_own_call(formula: Term, world: World, contract: Any) -> tuple | None:
                     continue
             if first is False:
                 continue
-            saved = world.overlay
-            witness: dict = {}
-            try:
-                # Each stranger alone: its own call first, on the chain as it stands, then this one. Whether the first
-                # call runs may be unknown (a read failed): a stranger still failing after it shows it doesn't help.
-                for index, who in enumerate((FRESH, *_OTHER_STRANGERS)):
-                    world.overlay = saved
-                    identity = {"caller": who, "signer": who}
-                    probe = Evaluator(world, identity, found)
-                    made = probe.truth(pc)
-                    changed = {
-                        loc: v
-                        for loc, v in store.items()
-                        if not _clears_own(probe, loc, v) and (read is None or loc[0] != THIS or loc[1] in read)
-                    }
-                    writes = _concrete_writes(probe, changed, world.this) if made is not False else None
-                    if not writes:
-                        # Where it writes unknown (``None``): no proof it doesn't help.
-                        unsure = unsure or (made is not False and writes is None)
-                        break
-                    world.overlay = {**saved, **writes}
-                    then = _outcome(formula, world, identity, set(), fixed={}, witness=witness if not index else None)
-                    # A word written unknown reads as unknown: failing with it is failing whatever it holds.
-                    if then is not True or made is not True:
-                        unsure = unsure or then is not False
-                        break
-                else:
-                    return fn.solidity_signature, _argument_values(found), _argument_values(witness)
-            finally:
-                world.overlay = saved
+            guesses = [found]
+            for loc, value in sorted(store.items(), key=repr):
+                if loc[0] != THIS or loc[1] not in names or value[0] == "struct":
+                    continue
+                # Arguments that leave an entry it writes nonzero (``burn(1)`` wrapping a balance), where the first
+                # ones found leave nothing (``burn(0)``).
+                nonzero: dict = {}
+                wants = mk_and([pc, mk_not(mk_cmp("eq", value, const(0)))])
+                if _outcome(wants, world, {"caller": FRESH, "signer": FRESH}, set(), fixed={}, witness=nonzero) is True:
+                    if nonzero not in guesses:
+                        guesses.append(nonzero)
+            for found in guesses:
+                ran = _first_then(formula, world, fn, pc, store, found, read)
+                if ran is None:
+                    unsure = True
+                elif ran:
+                    return ran
     if unsure:
         world.arrange_unknown = True
     return None
+
+
+def _first_then(formula: Term, world: World, fn: Any, pc: Term, store: dict, found: dict, read: Any) -> Any:
+    """``fn``'s call with ``found`` made first by each stranger alone, on the chain as it stands, then this one on the
+    words it leaves: (signature, its arguments, this call's) when every stranger passes; ``()`` when one doesn't;
+    ``None`` when that is unknown (a read failed, a word written unknown)."""
+    from .decide import _argument_values, _outcome
+
+    # The arguments the first call is sent with: those found, zero (empty, false) for the rest, as ``call_data``.
+    found = dict(found)
+    for param in (parameter(p, i) for i, p in enumerate(fn.parameters)):
+        if param not in found:
+            found[param] = _zero_of(param[2])
+    saved = world.overlay
+    witness: dict = {}
+    made_by: dict[int, dict] = {}
+    try:
+        # Whether the first call runs may be unknown (a read failed): a stranger still failing after it shows it
+        # doesn't help.
+        for index, who in enumerate((FRESH, *_OTHER_STRANGERS)):
+            world.overlay = saved
+            identity = {"caller": who, "signer": who}
+            probe = Evaluator(world, identity, found)
+            made = probe.truth(pc)
+            changed = {
+                loc: v
+                for loc, v in store.items()
+                if not _clears_own(probe, loc, v) and (read is None or loc[0] != THIS or loc[1] in read)
+            }
+            writes = _concrete_writes(probe, changed, world.this) if made is not False else None
+            if not writes:
+                # Where it writes unknown (``None``): no proof it doesn't help.
+                return None if made is not False and writes is None else ()
+            world.overlay = {**saved, **writes}
+            found_then: dict = {}
+            then = _outcome(formula, world, identity, set(), fixed={}, witness=found_then)
+            binding = _written_keys(formula, probe, changed) if then is not True else {}
+            if binding:
+                # The entry the first call made, at a key it chose (a request's new id): this call names that key.
+                found_then = {}
+                then = _outcome(formula, world, identity, set(), fixed={}, witness=found_then, bound=(binding,))
+            if not index:
+                witness = found_then
+            # A word written unknown reads as unknown: failing with it is failing whatever it holds.
+            if then is not True or made is not True:
+                return () if then is False else None
+            made_by[who] = writes
+    finally:
+        world.overlay = saved
+    # What the chain runs to confirm it (``decide._confirmed_open``): each stranger's first call as the chain stands,
+    # then this one on the words it leaves.
+    world.__dict__["_prior_runs"] = (call_data(fn, _argument_values(found)), made_by)
+    return fn.solidity_signature, _argument_values(found), _argument_values(witness)
+
+
+def _written_keys(formula: Term, probe: Evaluator, store: dict) -> dict:
+    """Argument -> the key a write in ``store`` landed at, for each argument ``formula`` keys the same entry with
+    (``tickets[id]`` after ``tickets[++last] = ...``), each key worked out by ``probe``."""
+    from .terms import subterms
+
+    out: dict = {}
+    for loc in store:
+        if loc[0] != THIS:
+            continue
+        for t in subterms(formula, "load"):
+            if t[1] != THIS or t[2] != loc[1] or len(t[3]) < len(loc[2]):
+                continue
+            for (kind, written), (read_kind, read) in zip(loc[2], t[3]):
+                if kind != "k" or read_kind != "k" or read[0] != "arg":
+                    continue
+                key = probe.eval(written)
+                if isinstance(key, int) and not isinstance(key, bool) and read not in out:
+                    out[read] = key
+    return out
+
+
+def writer_words(world: World, target: int, fn: Any, arguments: dict[str, Any], who: int) -> dict | None:
+    """The storage words ``fn``'s call at ``target`` with ``arguments`` (by name, zero for the rest), made by ``who`` as
+    the chain stands, leaves there, (address, slot) -> word, worked out from its lowering; ``None`` when that is
+    unknown (no exit shown taken, a word written unknown)."""
+    contract = world.contracts.get(target)
+    if contract is None:
+        return None
+    there = World(world.chain, target, 0, world.contracts, {}, _address_literals(contract))
+    there.deadline, there.work_limit = world.deadline, ARRANGE_WORK
+    exits = _stores(contract, fn, contract.__dict__.setdefault("_psat_stores", {}))
+    params = [parameter(p, i) for i, p in enumerate(fn.parameters)]
+    probe = Evaluator(there, {"caller": who, "signer": who}, {t: arguments.get(t[1], _zero_of(t[2])) for t in params})
+    for pc, store in exits or ():
+        if probe.truth(pc) is True:
+            words = _concrete_writes(probe, store, target)
+            if not words or any(not isinstance(w, int) or isinstance(w, bool) for w in words.values()):
+                return None
+            return words
+    return None
+
+
+def _zero_of(type_: str) -> Any:
+    """An argument's zero, as call data carries it when none is chosen."""
+    return False if type_ == "bool" else b"" if type_ in ("bytes", "string") else [] if "[" in type_ else 0
+
+
+def call_data(fn: Any, arguments: dict[str, Any]) -> bytes | None:
+    """The call data of ``fn`` with ``arguments`` (by name, zero for the rest); ``None`` where one can't be encoded."""
+    from eth_abi import encode
+
+    from .decide import _abi_value
+
+    params = [parameter(p, i) for i, p in enumerate(fn.parameters)]
+    types, values = [], []
+    for param in params:
+        type_ = param[2]
+        value = arguments.get(param[1], _zero_of(type_))
+        if not isinstance(value, (int, bool, bytes, list)):
+            return None
+        types.append(type_)
+        values.append(_abi_value(value, type_))
+    try:
+        body = encode(types, values)
+    except Exception as exc:  # a type eth_abi can't encode (a struct); never the decision's own timeout
+        if isinstance(exc, TimeoutError):
+            raise
+        return None
+    return keccak(text=fn.solidity_signature)[:4] + body
 
 
 def _clears_own(probe: Evaluator, loc: tuple, value: Term) -> bool:
@@ -2136,6 +2281,7 @@ def function_verdict(
         return UNK if value is None else value
 
     opened: dict[tuple, bool] = {}
+    bringing: dict[tuple, tuple] = {}
 
     def action_open(call: Term, refused: Term) -> bool | frozenset:
         """Whether the callee refuses only on the caller's own entries in its storage, keyed by the caller handed to
@@ -2174,8 +2320,17 @@ def function_verdict(
             opened[key] = True if len(brought) == len(own) else frozenset(brought) if brought else False
             if opened[key] is not False and given_here:
                 world.held_actions[key] = (target, sorted({str(load[2]) for load in given_here}))
+            # What the caller brings about there, and the calls that do it, for the chain to confirm the pass.
+            makers = [there.arrangers.get(_load_shape(load, False)) for load in brought if load not in given_here]
+            bringing[key] = (
+                target,
+                tuple(read[load] for load in brought),
+                tuple(m for m in makers if m is not None) if all(m is not None for m in makers) else None,
+            )
         if opened[key] is not False and key in world.held_actions:
             world.requirements[call] = world.held_actions[key]
+        if opened[key] is not False and (call, bringing[key]) not in world.brought:
+            world.brought.append((call, bringing[key]))
         found_here = opened[key]
         return frozenset(read[load] for load in found_here) if isinstance(found_here, frozenset) else found_here
 
@@ -2415,7 +2570,7 @@ def function_verdict(
     world.latched = latched_atoms(formula, world, contracts.get(address, contract))
     world.cover = lambda term: coverage(term, keyed, lower_call, listed, settled, valued)
     world.arrange = lambda term: arranged_within_budget(term, world, contracts.get(address, contract))
-    world.prior = lambda term: after_own_call(term, world, contracts.get(address, contract))
+    world.prior = lambda term, owned=False: after_own_call(term, world, contracts.get(address, contract), owned)
     world.scope = classify(lowerer.exits, lowerer.lost, function, contract_facts(contract))
     if stripped is None:
         verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))

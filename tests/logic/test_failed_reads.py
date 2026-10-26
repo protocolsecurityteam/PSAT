@@ -207,7 +207,9 @@ def test_a_stranger_its_own_first_call_listed_isnt_refused_when_where_was_unread
     fn = next(f for f in contract.functions_entry_points if f.name == "unassign")
     reset_terms()
     clean, _ = function_verdict(contract, fn, AT, _Unreadable(False), {AT: contract})
-    assert clean.openness == "open"
+    # The pair (``assign`` first) is found; with no node to run it, it stays a proposal, never confirmed.
+    assert clean.openness == "not_determined" and clean.gaps == ("open_arranged_unconfirmed",), clean
+    assert [signature for signature, _ in clean.after] == ["assign(address)"], clean
     reset_terms()
     faulted, _ = function_verdict(contract, fn, AT, _Unreadable(True), {AT: contract})
     assert faulted.openness != "restricted"

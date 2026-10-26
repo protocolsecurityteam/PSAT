@@ -161,8 +161,9 @@ def test_an_owner_credited_balance_is_no_strangers_to_arrange(d, contract, name)
 
 def test_an_unchecked_decrement_wraps_into_a_balance_anyone_can_make(d):
     v = O.verdict(d, "WrapOpen", "withdraw")
-    # Never "nobody, ever", nor a complete list: every stranger burning first passes.
-    assert not (v.openness == "restricted" and v.complete), v
+    O.check(d, "WrapOpen", "withdraw", v, samples=_samples(d, "WrapOpen", "withdraw"))
+    # Every stranger burning first passes: open, after that call of its own.
+    assert v.openness == "open" and [s for s, _ in v.after] == ["burn(uint256)"], v
     with O.snapshot(d):
         fn = O.function(d, "WrapOpen", "burn")
         for who in O.STRANGERS:
@@ -178,4 +179,5 @@ def test_before_0_8_a_guarded_decrement_is_no_grant(old):
 
 def test_before_0_8_an_unguarded_decrement_wraps_into_a_grant(old):
     v = O.verdict(old, "OldBurn", "withdraw")
-    assert not (v.openness == "restricted" and v.complete), v
+    O.check(old, "OldBurn", "withdraw", v, samples=({"a": 1},))
+    assert v.openness == "open" and [s for s, _ in v.after] == ["burn(uint256)"], v

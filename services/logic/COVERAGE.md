@@ -346,17 +346,44 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
     (``_handed_actions``); candidates left undecided where the stranger is unknown are confirmed by their own call.
     An action's return-data size is its callee's declaration (``World.declared_size``), never its lowering. Probes
     Minter.mint, PullerListing.deposit, GPv2Listing.supply.
-  * **Backstop** (``decide._confirmed_open``): a plain "open now" (no ``requires``, no ``after``, no ether, no entry of
-    the stranger's own to arrange first, no action assumed) stands only once every stranger's own call goes through
-    on the chain (``runs`` with its witness or a search of its own, then ``strangers_run``: five calls run);
-    otherwise not determined, ``open_unconfirmed`` (natural: the contract's own Yul call into always-reverting code,
-    A52, ``selfCall``). "Open later" never rests on a callee's answer (see G6).
-  * **Residue.** Opens resting on what the stranger arranges are not run as they stand (the stranger lacks the
-    holding): an action not handed the caller (assumed, stated below) and a refusal the callee's code makes only on
-    entries the caller can bring about (``requires`` or an arranged approval) are checked by the oracle's arrangement,
-    not by the engine, so a callee mis-lowered into a refusal on balances where it refuses on a blacklist could still
-    say "open on holding". "Restricted" and lists are untouched by the backstop (lists already never rest on callee
-    code; ``callee_code_list``).
+  * **Backstop** (``decide._confirmed_open``): every "open now" with nothing to hold first (no ``requires``) stands
+    only on the chain; review 7 (F2/F3) removed its two exemptions, an open resting on what the stranger arranges and
+    one sending ether. Every stranger's own call must go through as the chain stands (``runs`` with the witness or a
+    search of its own, then ``strangers_run``: five calls run), sending the witness's ether with its balance set to it
+    by a state override (``Chain.call_value``). An open on the stranger's own entries here (``arranged_atoms``) needs a
+    call of its own that brings them about (``after_own_call``, also over entries keyed by an address it passes or
+    naming it at a key it picks, its first call's arguments made concrete, then those that leave an entry nonzero,
+    the key the first call wrote named by this one): each stranger's first call runs as the chain stands, then this
+    one on the words it leaves (state overrides), and the verdict names that call (``after``). An open on an action
+    handed the caller that its callee refuses only on entries the caller brings about there runs, as each stranger,
+    the calls that bring them about (``verdict._arrangeable`` records them), then this call with those entries set by
+    state overrides (``_brought_runs``); the words those calls leave are worked out from their lowering
+    (``verdict.writer_words``), so an entry a stranger can only bring to 1 where 2 is wanted is never confirmed
+    (``climb``). An action taking what the caller holds (a balance holders move to anyone) that no stranger holds is
+    open on that holding (``requires``). A writer needing the very entry it would grant (a transfer to oneself) never
+    counts as bringing it about (``_arrangeable``). Otherwise not determined, the proposal kept as data:
+    ``open_value_unconfirmed`` (ether), ``open_arranged_unconfirmed`` (own entries arranged first),
+    ``open_assumed_action_unconfirmed`` (an action assumed, or handed the caller), else ``open_unconfirmed`` (natural:
+    the contract's own Yul call into always-reverting code, A52, ``selfCall``; probes ``q2_arranged``, ``q2c``,
+    ``q5_declared``, ``q2d_value``: ``test_open_confirmed``). A node that refuses state overrides answers with an
+    error, read as unknown: not determined, never open. "Open later" never rests on a callee's answer (see G6).
+  * **Residue.** An open on holdings (``requires``: a balance holders move to anyone, a holding in another contract)
+    is not run, the stranger lacking the holding: it is checked by the oracle's arrangement, not by the engine. And
+    what no stranger can run is never confirmed, whatever its truth: a deposit relaying a holder's signature
+    (``test_actions::test_a_signed_deposit_pulling_chosen_amounts_is_open_to_any_signer``, a strict xfail: the cost)
+    is not determined. "Restricted" and lists are untouched by the backstop (lists already never rest on callee code;
+    ``callee_code_list``).
+* **G10. Balances only an owner credits read as the stranger's to arrange** (review 7, F1, pre-existing). FIXED
+  2026-10-24. ``credit(w, a) onlyOwner { bal[w] += a }`` beside ``withdraw(a) { require(bal[msg.sender] >= a && a >
+  0); bal[msg.sender] -= a; }`` was "open now, complete" (witness ``a = 1``) while no stranger passes: (1)
+  ``verdict._arrangeable`` counted the decrement as a write that can leave the caller's entry nonzero; (2) asking
+  whether a stranger gets past that writer's guard, ``a > 0`` was set aside as a free condition while ``bal >= a`` was
+  met with ``a = 0``. Now (1) a write the constants of which aren't known counts as a grant only where it can turn
+  the stranger's entry, zero now, nonzero: a checked decrement reverts below zero or leaves zero, an unchecked one
+  (an ``unchecked`` block, solc before 0.8) wraps into a grant; and (2) in every relaxed question a condition on a
+  value the caller chooses is set aside only jointly with every other condition reading the same value
+  (``decide._jointly_freed``). ``test_self_credit`` (SRC1/2/3, strict and non-strict, the vesting ``claim``, an
+  unchecked block and solc 0.7, both ways).
 * **G6. "Open later" on a callee no transaction can make pass** (review 5, ``probe_audit5/q7.py``). FIXED 2026-10-24
   for callees: "open later" never rests on a callee's answer changing (``decide._acts_once_allowed``): a state that
   lets the stranger through only with a condition reading a call answering otherwise than it does now (asked of the
@@ -387,7 +414,8 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
 * An external call does not re-enter this contract's state-changing code before it returns (reentrancy is not
   modelled); gas is the caller's to supply (out-of-gas is not a condition).
 * A non-view external call not shown to hand the callee the caller's identity is an action the caller arranges
-  (``assumed``, ``decide._action``), whatever value it forwards. One shown to hand it the caller is never assumed: its
+  (``assumed``, ``decide._action``), whatever value it forwards; an "open now" resting on one stands only once every
+  stranger's own call goes through on the chain (G7, backstop). One shown to hand it the caller is never assumed: its
   callee unfollowed, it is unknown; followed, a pass its code shows is marked as resting on that code (unknown with no
   callee code answering), and a refusal there only on entries the caller can bring about is what the caller must
   hold (``requires``). Either way a stranger is let through only once every stranger's own call goes through on the
