@@ -315,13 +315,14 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
     that stranger's call; ``open_at``: arguments at which, so arranged, every stranger passes (the verdict must then
     be "open"; checked whatever the verdict), or ``False`` where none can now. With ``open_at=False`` the verdict is
     never "open later" either unless ``later(d)`` says how a state comes about in which every stranger passes (the
-    owner unpausing): "open later" claims such a state is reachable, so it is checked there,
-    each stranger's call at each of ``samples`` until one passes for all. An "open now" verdict is checked at its own
-    witness unless ``open_at`` is given. ``holders_after(d)``: what has to happen first for the listed holders to
-    pass where the verdict lists them on a condition closed now (the owner turning it on, code coming to be at an
-    address), run before their calls. ``open_proven``: ``True`` where the probe knows every unconfigured address passes
-    and the engine can show it from the formula alone (the verdict must be "open" and not ``witnessed``), ``False``
-    where only a sample can show it (open, if at all, only ``witnessed``)."""
+    owner unpausing): "open later" claims such a state is reachable, so it is checked there, each stranger's call at
+    each of ``samples`` until one passes for all (its own ``after`` calls made first, then at its witness or a sample).
+    An "open now" verdict is checked at its own witness unless ``open_at`` is given. ``holders_after(d)``: what has to
+    happen first for the listed holders to pass where the verdict lists them on a condition closed now (the owner
+    turning it on, code coming to be at an address), run before their calls. ``open_proven``: ``True`` where the
+    probe knows every unconfigured address passes and the engine can show it from the formula alone (the verdict
+    must be "open" and not ``witnessed``), ``False`` where only a sample can show it (open, if at all, only
+    ``witnessed``)."""
     fn = function(d, contract, name)
     where = at if at is not None else d.at[contract]
     if open_proven is not None:
@@ -362,7 +363,22 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
         if claimed and later is not None:
             with snapshot(d):
                 later(d)
-                assert any(strangers_passing(d, where, fn, args) == {True} for args in samples), (name, "later", v)
+                if v.after:
+                    # Each stranger makes its own first calls, then its call: at its witness, else at a sample.
+                    for who in STRANGERS:
+                        with snapshot(d):
+                            for signature, args in v.after:
+                                first = next(f for f in d.slither[contract].functions_entry_points
+                                             if f.solidity_signature == signature)  # fmt: skip
+                                own = {k: who if x == FRESH else x for k, x in args.items()}
+                                assert transact_data(d, where, calldata(first, own), who), (name, signature, own)
+                            tries = [v.witnesses.get(FRESH, {}), *samples]
+                            assert any(
+                                passes(d, where, fn, {k: who if x == FRESH else x for k, x in a.items()}, sender=who)
+                                for a in tries
+                            ), (name, "later, after its own calls", hex(who), v)
+                else:
+                    assert any(strangers_passing(d, where, fn, args) == {True} for args in samples), (name, "later", v)
     elif open_at is not None:
         assert v.openness == "open", (name, "every stranger passes", open_at, v)
     if v.openness == "restricted":

@@ -578,6 +578,64 @@ PROBES = [
 ]
 
 
+PAUSED = """
+pragma solidity 0.8.27;
+
+contract P {
+    address owner;
+    bool paused = true;
+    mapping(address => uint256) bal1;
+    mapping(address => bool) locked1;
+    mapping(address => uint256) bal2;
+    mapping(address => uint256) bal3;
+    mapping(address => bool) locked3;
+    uint256 total;
+    constructor() { owner = msg.sender; }
+    function unpause() external { require(msg.sender == owner); paused = false; }
+    modifier lockAfter() { _; locked1[msg.sender] = true; }
+    // The deposit locks the entry it fills (in a modifier, or in its body): nobody ever withdraws.
+    function deposit1(uint256 a) external lockAfter { require(a > 0); bal1[msg.sender] += a; }
+    function withdraw1() external { require(!paused && bal1[msg.sender] > 0 && !locked1[msg.sender]); total += 1; }
+    function deposit3(uint256 a) external { require(a > 0); bal3[msg.sender] += a; locked3[msg.sender] = true; }
+    function withdraw3() external { require(!paused && bal3[msg.sender] > 0 && !locked3[msg.sender]); total += 1; }
+    // Control: a deposit of each stranger's own lets it withdraw once unpaused.
+    function deposit2(uint256 a) external { require(a > 0); bal2[msg.sender] += a; }
+    function withdraw2() external { require(!paused && bal2[msg.sender] > 0); bal2[msg.sender] = 0; total += 1; }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def paused(anvil):  # noqa: F811
+    d = O.deployment(*anvil, PAUSED)
+    d.deploy("P")
+    return d
+
+
+def _unpause_p(d):
+    assert O.transact(d, "P", "unpause()", sender=OWNER)
+
+
+@pytest.mark.parametrize(("name", "deposit"), [("withdraw1", "deposit1"), ("withdraw3", "deposit3")])
+def test_an_open_once_unpaused_on_entries_no_own_call_brings_about_is_never_claimed(paused, name, deposit):
+    # Unpaused, a stranger that deposits still fails: the deposit locks what it fills. Before, the entries arranged
+    # for the question stayed arranged once "now" failed, and the verdict was open later, proven, on them alone.
+    with O.snapshot(paused):
+        _unpause_p(paused)
+        for who in O.STRANGERS:
+            assert O.transact(paused, "P", f"{deposit}(uint256)", ("uint256",), (5,), sender=who)
+            assert not O.passes(paused, "P", O.function(paused, "P", name), {}, sender=who)
+    v = O.check(paused, "P", name, O.verdict(paused, "P", name), open_at=False, later=_unpause_p)
+    assert v.openness != "open", v
+    assert "open_arranged_later_unconfirmed" in v.gaps, v
+
+
+def test_an_open_once_unpaused_after_a_deposit_of_ones_own_names_the_deposit(paused):
+    v = O.check(paused, "P", "withdraw2", O.verdict(paused, "P", "withdraw2"), open_at=False, later=_unpause_p)
+    assert v.openness == "open" and v.allowed == "later" and v.witnessed, v
+    assert [s for s, _ in v.after] == ["deposit2(uint256)"], v
+
+
 @pytest.fixture(scope="module")
 def c(anvil):  # noqa: F811
     d = O.deployment(*anvil, SOURCE)

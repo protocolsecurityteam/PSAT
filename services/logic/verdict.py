@@ -1073,13 +1073,17 @@ def _loads_in(term: Term) -> list[Term]:
 _PRIOR_WRITERS = 6  # entry points tried as the stranger's own first call, per function
 
 
-def after_own_call(formula: Term, world: World, contract: Any, owned: bool = False) -> tuple | None:
+def after_own_call(
+    formula: Term, world: World, contract: Any, owned: bool = False, states: list | None = None
+) -> tuple | None:
     """A call a stranger makes first, to an entry point here that writes the entries this function reads under the
     caller's key, after which it gets through (``assignDelegate`` before ``unassignDelegate``): that function's
     signature, the arguments of that call and of this one; ``None`` when none does. Each write is worked out on
     the chain as it stands and read back in its place, so the pair is a run of two calls, not a rule. ``owned``: also
     entries the caller makes its own another way (``arranged_atoms``), keyed by an address it passes
-    (``balances[account]``) or naming it at a key it picks (``owners[id] == msg.sender``)."""
+    (``balances[account]``) or naming it at a key it picks (``owners[id] == msg.sender``). ``states``: this call
+    then passes in one of these states of the conditions every caller faces (an open once they allow), not as they
+    stand."""
     from .decide import _atoms_of, _outcome
     from .terms import const, contains, mk_cmp, mk_not, subterms
 
@@ -1163,7 +1167,7 @@ def after_own_call(formula: Term, world: World, contract: Any, owned: bool = Fal
                     if nonzero not in guesses:
                         guesses.append(nonzero)
             for found in guesses:
-                ran = _first_then(formula, world, fn, pc, store, found, read)
+                ran = _first_then(formula, world, fn, pc, store, found, read, states)
                 if ran is None:
                     unsure = True
                 elif ran:
@@ -1173,11 +1177,13 @@ def after_own_call(formula: Term, world: World, contract: Any, owned: bool = Fal
     return None
 
 
-def _first_then(formula: Term, world: World, fn: Any, pc: Term, store: dict, found: dict, read: Any) -> Any:
+def _first_then(
+    formula: Term, world: World, fn: Any, pc: Term, store: dict, found: dict, read: Any, states: list | None = None
+) -> Any:
     """``fn``'s call with ``found`` made first by each stranger alone, on the chain as it stands, then this one on the
     words it leaves: (signature, its arguments, this call's) when every stranger passes; ``()`` when one doesn't;
     ``None`` when that is unknown (a read failed, a word written unknown)."""
-    from .decide import _argument_values, _outcome
+    from .decide import _argument_values
 
     # The arguments the first call is sent with: those found, zero (empty, false) for the rest, as ``call_data``.
     found = dict(found)
@@ -1205,13 +1211,11 @@ def _first_then(formula: Term, world: World, fn: Any, pc: Term, store: dict, fou
                 # Where it writes unknown (``None``): no proof it doesn't help.
                 return None if made is not False and writes is None else ()
             world.overlay = {**saved, **writes}
-            found_then: dict = {}
-            then = _outcome(formula, world, identity, set(), fixed={}, witness=found_then)
+            then, found_then = _then_passes(formula, world, identity, states, ())
             binding = _written_keys(formula, probe, changed) if then is not True else {}
             if binding:
                 # The entry the first call made, at a key it chose (a request's new id): this call names that key.
-                found_then = {}
-                then = _outcome(formula, world, identity, set(), fixed={}, witness=found_then, bound=(binding,))
+                then, found_then = _then_passes(formula, world, identity, states, (binding,))
             if not index:
                 witness = found_then
             # A word written unknown reads as unknown: failing with it is failing whatever it holds.
@@ -1224,6 +1228,22 @@ def _first_then(formula: Term, world: World, fn: Any, pc: Term, store: dict, fou
     # then this one on the words it leaves.
     world.__dict__["_prior_runs"] = (call_data(fn, _argument_values(found)), made_by)
     return fn.solidity_signature, _argument_values(found), _argument_values(witness)
+
+
+def _then_passes(formula: Term, world: World, identity: dict, states: list | None, bound: tuple) -> tuple[Any, dict]:
+    """Whether ``formula`` passes for ``identity`` as the conditions stand (``states`` ``None``), else in one of
+    ``states``: ``True`` with the witness found, ``False`` when it fails in every one, else unknown."""
+    from .decide import _outcome
+
+    answers = []
+    for state in [{}] if states is None else states:
+        found: dict = {}
+        kwargs = {"bound": bound} if bound else {}
+        answer = _outcome(formula, world, identity, set(), fixed=state, witness=found, **kwargs)
+        if answer is True:
+            return True, found
+        answers.append(answer)
+    return (False if all(a is False for a in answers) else UNK), {}
 
 
 def _written_keys(formula: Term, probe: Evaluator, store: dict) -> dict:
@@ -2581,7 +2601,9 @@ def function_verdict(
     world.latched = latched_atoms(formula, world, contracts.get(address, contract))
     world.cover = lambda term: coverage(term, keyed, lower_call, listed, settled, valued)
     world.arrange = lambda term: arranged_within_budget(term, world, contracts.get(address, contract))
-    world.prior = lambda term, owned=False: after_own_call(term, world, contracts.get(address, contract), owned)
+    world.prior = lambda term, owned=False, states=None: after_own_call(
+        term, world, contracts.get(address, contract), owned, states
+    )
     world.scope = classify(lowerer.exits, lowerer.lost, function, contract_facts(contract))
     if stripped is None:
         verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))

@@ -1066,7 +1066,7 @@ class World:
     confirm_left: float = float("inf")
     # The stranger's own calls that, made first, let it through (see ``verdict.after_own_call``): the function's
     # signature and the arguments of each, or ``None``.
-    prior: Callable[..., Any] = lambda formula, owned=False: None
+    prior: Callable[..., Any] = lambda formula, owned=False, states=None: None
     # The success formula narrowed to calls with an effect (a write that changes storage, a call out); ``None``
     # when unknown, as for a callee.
     effective: Term | None = None
@@ -2477,7 +2477,42 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     Principals are identities singled out: in some state of the ``when`` conditions they pass where an unconfigured
     address doesn't, so a paused owner-only function still names its owner. Open means an unconfigured address passes
     now, or would once the ``when`` conditions allow while nobody known passes now either (a paused public function).
+    The stranger's own entries arranged for the question are put back before it returns, and an open once the
+    conditions allow that rests on them is confirmed (``_arranged_later``).
     """
+    arranged = world.arranged
+    world.__dict__.pop("_arranged_later", None)
+    try:
+        verdict = _decide_arranged(formula, world, coverage)
+    finally:
+        world.arranged = arranged
+    return _arranged_later(formula, world, verdict)
+
+
+def _arranged_later(formula: Term, world: World, verdict: Verdict) -> Verdict:
+    """``verdict``, unless it is an open once the conditions allow (or only with some set aside) that rests on the
+    stranger's own entries arranged first, and no call of its own brings them about: each stranger's call that
+    writes them must go through on the chain as it stands, and this one then pass on the words it leaves in a state
+    of the conditions that lets a stranger through (``World.prior`` with those states). Then it is open after that
+    call, witnessed; otherwise not determined, ``open_arranged_later_unconfirmed``, the proposal kept as data."""
+    states = world.__dict__.pop("_arranged_later", None)
+    if states is None or verdict.openness != "open" or verdict.allowed == "now":
+        return verdict
+    world.__dict__.pop("_prior_runs", None)
+    prior = world.prior(formula, owned=True, states=states)
+    first, _ = world.__dict__.pop("_prior_runs", (None, None))
+    if (
+        prior is not None
+        and first is not None
+        and all(isinstance(world.chain.call(world.this, first, who), bytes) for who in (FRESH, *_OTHER_STRANGERS))
+    ):
+        signature, before, arguments = prior
+        world.sampled = True
+        return replace(verdict, witnesses={FRESH: arguments}, after=((signature, before),))
+    return replace(verdict, openness="not_determined", complete=False, gaps=("open_arranged_later_unconfirmed",))
+
+
+def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict:
     world.rests_on = set()
     world.brought = []
     world.sampled = False
@@ -2577,10 +2612,14 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # from): chosen from here on, for strangers and candidates alike.
         before_arranged = world.arranged
         world.arranged = {**world.arranged, **arranged}
+        # Whatever this reaches from here rests on them: an open now is confirmed on the chain (``_confirmed_open``),
+        # an open once the conditions allow by a call of the stranger's own that brings them about
+        # (``_arranged_later``).
+        world.rests_on.add("arranged")
+        world.__dict__["_arranged_later"] = states
         found_early.clear()
         allowed = _strangers_allowed(formula, world, found_early)
         if allowed is not None:
-            world.rests_on.add("arranged")
             requires = _requirements(formula, world)
             if any(need == "unknown" for _, _, need in requires):
                 return Verdict("not_determined", frozenset(), False, gaps=("holding_unread",), requires=requires)
@@ -2601,6 +2640,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             # Open on entries each stranger brings about here first: only a call of its own that brings them about,
             # run on the chain before this one (below), shows it. The entries are no longer chosen for that.
             world.arranged = before_arranged
+            world.__dict__.pop("_arranged_later", None)
             arranged_open = proposed
     # What failed it may be entries of the stranger's own that one of its calls here writes first (a delegate it
     # assigns before it can unassign one): run that call's writes, then this one.

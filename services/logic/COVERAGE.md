@@ -367,6 +367,15 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
     the contract's own Yul call into always-reverting code, A52, ``selfCall``; probes ``q2_arranged``, ``q2c``,
     ``q5_declared``, ``q2d_value``: ``test_open_confirmed``). A node that refuses state overrides answers with an
     error, read as unknown: not determined, never open. "Open later" never rests on a callee's answer (see G6).
+    An open once the conditions allow (or only with some set aside) on the stranger's own entries arranged
+    (``decide._arranged_later``, review 8, F1) needs the same call of its own that brings them about: each
+    stranger's first call runs on the chain as it stands, and this one passes on the words it leaves in a state of
+    the conditions that lets a stranger through (``after_own_call`` with those states); the verdict is then witnessed
+    and names that call (``after``), else not determined, ``open_arranged_later_unconfirmed``. Before, the entries
+    arranged for the question stayed arranged once the stranger failed now, and a paused withdraw whose deposit locks
+    what it fills was "open later, complete", proven, though nobody can ever pass (``probe_audit8/q3d_later.py`` w1,
+    w3; ``test_arranged::test_an_open_once_unpaused_*``). The entries are put back whenever ``_decide`` returns, and
+    an open now reached past that point rests on them (``open_arranged_unconfirmed`` unless the chain confirms it).
   * **Residue.** An open on holdings (``requires``: a balance holders move to anyone, a holding in another contract)
     is not run, the stranger lacking the holding: it is checked by the oracle's arrangement, not by the engine. And
     what no stranger can run is never confirmed, whatever its truth: a deposit relaying a holder's signature
@@ -416,11 +425,13 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   samples, reported ``open_witnessed`` (``report.openness_label``, ``deployment_verdicts``' ``witnessed`` and
   ``label``, ``corpus_parity``'s ``lego_witnessed``); "open" unqualified only where the formula proves it for every
   unconfigured address (``decide._alike_for_strangers``: the caller, origin or signer only as a mapping key or one side
-  of an equality whose other side no identity reaches, through conversions keeping addresses apart; no call, hash or
+  of an equality whose other side no identity reaches or is that same identity (``msg.sender == tx.origin`` is never
+  alike: a contract a stranger calls through fails it; review 8, F2), through conversions keeping addresses apart; no call, hash or
   encoding handed it; no view call that may reach ``tx.origin``, a callee unfollowed counting as one; no unknown
   that may single anyone out) and nothing sampled reached it (``World.sampled``: ``strangers_run`` or ``runs``
   settling an unknown stranger, a callee's code saying it reads everyone alike, an inlined callee's proposal, a call
-  of the stranger's own first (``after``), an action assumed or handed the caller, entries arranged; the chain
+  of the stranger's own first (``after``), an action assumed or handed the caller, entries arranged, an open later
+  on them only once a call of the stranger's own that brings them about has run on the chain (G7); the chain
   merely confirming a proof keeps it proven). ``complete`` is unchanged. The machinery is not: the parity gate
   (``% 2 == 0``, the strangers' low bits differ) stays not determined, the mint/USDT/A52 probes too. The oracle checks
   a proven open at 24 further addresses the engine never samples (``_oracle.UNSEEN``) and takes ``open_proven``; the
