@@ -442,6 +442,11 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
 
 ### Stated assumptions (not constructs)
 
+* "Open" is as the entries stand. A gate on a lookup the caller is read in (``require(!blocked[msg.sender])``, empty
+  or with one entry no unconfigured address holds) is open, proven, whoever can change the entries; where an entry
+  point gated on who calls writes that lookup, the verdict records it, ``("configurable", "<lookup> by <writer>")`` in
+  ``condition_terms`` (``verdict._configurable``, review 8, D1), and its openness is unchanged
+  (``test_conditions::test_an_open_blocklist_records_the_restricted_writer_that_configures_it``).
 * An external call does not re-enter this contract's state-changing code before it returns (reentrancy is not
   modelled); gas is the caller's to supply (out-of-gas is not a condition).
 * A non-view external call not shown to hand the callee the caller's identity is an action the caller arranges

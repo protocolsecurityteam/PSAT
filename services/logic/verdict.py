@@ -2618,4 +2618,38 @@ def function_verdict(
             sorted(set(inlined)),
         )
     gate = verdict.gate or (gate_of(formula) if world.scope.kind == "self" else ())
+    if verdict.openness == "open":
+        verdict = replace(verdict, condition_terms=verdict.condition_terms + _configurable(formula, function, contract))
     return replace(verdict, scope=world.scope.kind, scope_writes=world.scope.writes, gate=gate), formula
+
+
+def _configurable(formula: Term, function: Any, contract: Any) -> tuple[tuple[str, str], ...]:
+    """For an open function, each lookup the caller is read in (a blocklist, empty or not) that an entry point gated
+    on who calls writes: ``("configurable", "<lookup> by <writer signature>")``. The gate passes strangers as the
+    entries stand, and that writer can change them; recorded beside the verdict, which it never changes."""
+    names = sorted(
+        {
+            t[2]
+            for t in subterms(formula, "load")
+            if t[1] == THIS and isinstance(t[2], str) and any(k == "k" and contains(x, IDENTITY_KINDS) for k, x in t[3])
+        }
+    )
+    if not names:
+        return ()
+    gated = contract.__dict__.setdefault("_psat_gated_writers", {})
+    out = []
+    for fn in contract.functions_entry_points:
+        if fn is function or fn.view or fn.pure or fn.is_constructor:
+            continue
+        written = {v.name for v in fn.all_state_variables_written()} | _by_reference(fn)
+        hit = [n for n in names if n in written]
+        if not hit:
+            continue
+        if fn.solidity_signature not in gated:
+            try:
+                gated[fn.solidity_signature] = contains(Lowerer(contract).success(fn), IDENTITY_KINDS)
+            except Exception:
+                gated[fn.solidity_signature] = True  # unread: it may be gated
+        if gated[fn.solidity_signature]:
+            out.extend(("configurable", f"{n} by {fn.solidity_signature}") for n in hit)
+    return tuple(out)

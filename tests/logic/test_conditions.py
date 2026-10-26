@@ -194,3 +194,52 @@ def test_the_admin_sets_a_configured_managers_permission_manager(anvil, followed
     O.check(d, "Manager", "setPermissionManager", v, samples=({"manager": REGISTERED}, {}), open_at=False)
     assert v.openness == "restricted"
     assert set(v.principals) | set(v.conditions) == {O.ACCOUNTS[1]}
+
+
+BLOCKLISTS = """
+pragma solidity 0.8.27;
+
+contract C {
+    address owner;
+    mapping(address => bool) blockedEmpty;
+    mapping(address => bool) blockedOne;
+    mapping(address => bool) optedOut;
+    mapping(address => bool) frozen;
+    uint256 total;
+    constructor() { owner = msg.sender; blockedOne[address(0xBEEF)] = true; }
+    function blkEmpty(uint256 x) external { require(!blockedEmpty[msg.sender]); total += x; }
+    function blkOne(uint256 x) external { require(!blockedOne[msg.sender]); total += x; }
+    function notOptedOut(uint256 x) external { require(!optedOut[msg.sender]); total += x; }
+    function notFrozen(uint256 x) external { require(!frozen[msg.sender]); total += x; }
+    function setBlock(address a, bool on) external {
+        require(msg.sender == owner);
+        blockedEmpty[a] = on;
+        blockedOne[a] = on;
+    }
+    function optOut() external { optedOut[msg.sender] = true; }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def blocklists(anvil):  # noqa: F811
+    d = O.deployment(*anvil, BLOCKLISTS)
+    d.deploy("C")
+    return d
+
+
+@pytest.mark.parametrize(
+    ("name", "recorded"),
+    [
+        ("blkEmpty", {("configurable", "blockedEmpty by setBlock(address,bool)")}),
+        ("blkOne", {("configurable", "blockedOne by setBlock(address,bool)")}),
+        ("notOptedOut", set()),  # its only writer is open to anyone: no restricted writer configures it
+        ("notFrozen", set()),  # nothing writes it
+    ],
+)
+def test_an_open_blocklist_records_the_restricted_writer_that_configures_it(blocklists, name, recorded):
+    # Every stranger passes as the entries stand (the 0xBEEF entry blocks nobody unconfigured): open, as before. A
+    # writer only the owner calls can block anyone, which the verdict records as a condition without changing it.
+    v = O.check(blocklists, "C", name, O.verdict(blocklists, "C", name), open_at={"x": 1})
+    assert v.openness == "open" and v.allowed == "now", v
+    assert {t for t in v.condition_terms if t[0] == "configurable"} == recorded, v
