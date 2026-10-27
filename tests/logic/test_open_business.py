@@ -1,14 +1,14 @@
-"""An open proved from the contract's own code stands though the stranger's own call reverts on the chain, where what
-reverted can only be an action that code assumes succeeds and hands the caller's own picks: Aragon's
-``newAppProxy(kernel, appId)`` creates a proxy whose constructor asks the kernel for the app, and a stranger's call
-with a kernel and an app id nobody registered reverts. That is the call's business, not who makes it: "open", proved
-(not ``witnessed``), carrying ``stranger_run_failed`` in ``requires``. With the right arguments every stranger, and
-addresses the engine never samples, pass (``_oracle.check``). Where no action steered by the arguments could have
-refused the stranger (a creation handed only stored values), or the chain left the stranger's call unanswered, the
-open is not determined as before (``open_unconfirmed``), and the sweep ranks an open carrying a condition below one
-carrying none (``never_bolder``). A node that didn't answer the stranger's call (geth's ``execution aborted (timeout =
-5s)``, a transport failure) refused nobody: not determined, ``read_failed:run``, never a refusal read from the
-message (``decide._is_revert``)."""
+"""An open the chain refuses is never kept on an account of what refused it. An action the contract's own code
+assumes succeeds (a contract created, ether sent by ``transfer``, a low-level or assembly call whose result it
+checks) is a callee's decision, on whatever that callee reads, whoever hands it what: a constructor or a receive hook
+checking ``tx.origin`` lets the admin through and nobody else, and no argument the stranger could pick changes that.
+So Aragon's ``newAppProxy(kernel, appId)`` (a proxy created for an app id the stranger's guess doesn't name) is not
+determined, ``open_assumed_action_unconfirmed``, like every open resting on such an action whose stranger's call the
+chain refuses; an action whose outcome the code doesn't require (an unchecked low-level call) is no such condition,
+and the function stays open once the strangers' own calls go through. A node that didn't answer the stranger's call
+(geth's ``execution aborted (timeout = 5s)``, a transport failure) refused nobody: not determined, ``read_failed:run``,
+never a refusal read from the message (``decide._is_revert``). The sweep ranks an open carrying a condition below one
+carrying none (``never_bolder``)."""
 
 from __future__ import annotations
 
@@ -54,8 +54,59 @@ contract Factory {
 }
 """
 
+# The callee, receive hook and child constructor each check the transaction's origin: only the admin passes, whatever
+# is handed them. The engine never follows them (not in the formula): each is an action assumed to succeed.
+ORIGIN = """
+pragma solidity 0.8.27;
+
+contract OriginGuard {
+    address admin;
+    constructor() { admin = msg.sender; }
+    fallback() external payable { require(tx.origin == admin, "origin"); }
+    receive() external payable { require(tx.origin == admin, "origin"); }
+}
+
+contract Child {
+    constructor(uint256 x) { x; require(tx.origin == 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266, "origin"); }
+}
+
+contract Forwarder {
+    address guard;
+    uint256 public n;
+    constructor(address g) { guard = g; }
+    function exec(bytes calldata data) external {
+        (bool ok,) = guard.call(data);
+        require(ok, "refused");
+        n += 1;
+    }
+    function execYul(uint256 x) external {
+        address g = guard;
+        bool ok;
+        assembly {
+            mstore(0, x)
+            ok := call(gas(), g, 0, 0, 32, 0, 0)
+        }
+        require(ok, "refused");
+        n += 1;
+    }
+    function pay(uint256 amt) external payable {
+        payable(guard).transfer(amt);
+        n += 1;
+    }
+    function spawn(uint256 x) external {
+        new Child(x);
+        n += 1;
+    }
+    // Control: the result is not checked, so the function truly is open.
+    function fire(bytes calldata data) external {
+        guard.call(data);
+        n += 1;
+    }
+}
+"""
+
 APP = 1
-STRANGER_RUN_FAILED = "stranger_run_failed"
+ORIGIN_CASES = [("exec", {"data": b"\x01"}), ("execYul", {"x": 1}), ("pay", {"amt": 0}), ("spawn", {"x": 1})]
 
 
 def _setup(d):
@@ -64,7 +115,15 @@ def _setup(d):
     d.deploy("Factory", ("address",), (d.at["Kernel"],))
 
 
-PROBES = [O.Probe(SOURCE, _setup, (("Factory", "newAppProxy", ()), ("Factory", "stuck", ())))]
+def _origin(d):
+    d.deploy("OriginGuard")
+    d.deploy("Forwarder", ("address",), (d.at["OriginGuard"],))
+
+
+PROBES = [
+    O.Probe(SOURCE, _setup, (("Factory", "newAppProxy", ()), ("Factory", "stuck", ()))),
+    O.Probe(ORIGIN, _origin, tuple(("Forwarder", name, ()) for name, _ in ORIGIN_CASES) + (("Forwarder", "fire", ()),)),
+]
 
 
 @pytest.fixture(scope="module")
@@ -74,25 +133,51 @@ def d(anvil):  # noqa: F811
     return d
 
 
-def test_an_open_proved_from_code_stands_with_the_failed_run_as_its_condition(d):
+@pytest.fixture(scope="module")
+def origin(anvil):  # noqa: F811
+    d = O.deployment(*anvil, ORIGIN)
+    _origin(d)
+    return d
+
+
+def test_a_creation_the_stranger_fails_leaves_the_open_not_determined(d):
     v = O.verdict(d, "Factory", "newAppProxy")
     right = {"k": d.at["Kernel"], "appId": APP}
-    O.check(d, "Factory", "newAppProxy", v, open_at=right, arrange=lambda d, who: None, open_proven=True)
-    assert v.openness == "open" and v.allowed == "now" and not v.witnessed, v
-    assert (None, STRANGER_RUN_FAILED, "business") in v.requires
+    O.check(d, "Factory", "newAppProxy", v)
+    # Honest under-claim: every address passes with the right arguments (the oracle's ``open_at`` would demand "open"
+    # here), but the engine, not following the constructor, can't tell its refusal of the stranger's guess from one
+    # of the stranger.
+    assert v.openness == "not_determined" and not v.requires, v
+    assert "open_assumed_action_unconfirmed" in v.gaps and "read_failed:run" not in v.gaps, v
     fn = O.function(d, "Factory", "newAppProxy")
-    # Proved for every unconfigured address: ones the engine never samples pass too, given the right arguments...
-    assert all(O.passes(d, "Factory", fn, right, sender=who) for who in O.UNSEEN[:6])
-    # ...and the stranger's own call at the witness reverts, as the condition says.
+    assert all(O.passes(d, "Factory", fn, right, sender=who) for who in (*O.STRANGERS, *O.UNSEEN[:6]))
     assert not O.passes(d, "Factory", fn, v.witnesses.get(FRESH, {}), sender=FRESH)
 
 
-def test_an_action_no_argument_steers_leaves_the_open_unconfirmed(d):
+def test_a_creation_no_argument_steers_leaves_the_open_not_determined(d):
     v = O.verdict(d, "Factory", "stuck")
     O.check(d, "Factory", "stuck", v, open_at=False, samples=({"x": 1},))
-    assert v.openness == "not_determined" and "open_unconfirmed" in v.gaps, v
+    assert v.openness == "not_determined" and "open_assumed_action_unconfirmed" in v.gaps and not v.requires, v
     fn = O.function(d, "Factory", "stuck")
     assert not any(O.passes(d, "Factory", fn, {"x": 1}, sender=who) for who in (*O.ACCOUNTS, *O.STRANGERS))
+
+
+@pytest.mark.parametrize(("name", "args"), ORIGIN_CASES)
+def test_an_assumed_action_whose_callee_checks_the_origin_is_never_open(origin, name, args):
+    v = O.verdict(origin, "Forwarder", name)
+    fn = O.function(origin, "Forwarder", name)
+    # Truth: the admin passes, no stranger and no unseen address does.
+    assert O.passes(origin, "Forwarder", fn, args, sender=O.OWNER)
+    assert not any(O.passes(origin, "Forwarder", fn, args, sender=w) for w in (*O.STRANGERS, *O.UNSEEN[:4]))
+    O.check(origin, "Forwarder", name, v, open_at=False, samples=(args,))
+    assert v.openness == "not_determined" and "open_assumed_action_unconfirmed" in v.gaps, v
+    assert not v.requires, v
+
+
+def test_an_action_whose_outcome_the_code_ignores_leaves_the_function_open(origin):
+    v = O.verdict(origin, "Forwarder", "fire")
+    O.check(origin, "Forwarder", "fire", v, open_at={"data": b"\x01"})
+    assert v.openness == "open" and v.allowed == "now", v
 
 
 def _timing_out(d, who: set[int]) -> Chain:
@@ -107,9 +192,8 @@ def _timing_out(d, who: set[int]) -> Chain:
 
 
 @pytest.mark.parametrize("faulty", [lambda d: O.Faulty(d, calls=True), lambda d: _timing_out(d, set(O.STRANGERS))])
-def test_an_unanswered_stranger_call_is_no_business_condition(d, faulty):
+def test_an_unanswered_stranger_call_is_no_refusal(d, faulty):
     clean = O.verdict(d, "Factory", "newAppProxy")
-    assert clean.openness == "open" and clean.requires, clean
     v = O.verdict(d, "Factory", "newAppProxy", chain=faulty(d))
     assert v.openness == "not_determined" and not v.requires, v
     assert "read_failed:run" in v.gaps, v
@@ -156,7 +240,7 @@ def test_a_nodes_trouble_never_reads_as_a_refusal(message):
 
 def test_an_open_carrying_a_condition_ranks_below_one_carrying_none():
     plain = Verdict("open", frozenset(), True)
-    needs = Verdict("open", frozenset(), True, requires=((None, STRANGER_RUN_FAILED, "business"),))
+    needs = Verdict("open", frozenset(), True, requires=((None, "valid_signature", "business"),))
     O.never_bolder(plain, needs)
     with pytest.raises(AssertionError):
         O.never_bolder(needs, plain)

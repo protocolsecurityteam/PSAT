@@ -441,7 +441,7 @@ def never_bolder(clean: Any, faulted: Any) -> None:
     """The fail-safe property: a fault never makes a verdict more open, never shrinks a complete list, never makes
     complete what the clean run was not, and never proves an open the clean run only witnessed (proven-open ranks
     above witnessed-open, above not determined), nor drops what the clean open said the call needs (an open that
-    requires something, ``stranger_run_failed`` among them, ranks below the same open requiring nothing)."""
+    requires something ranks below the same open requiring nothing)."""
     rank, clean_rank = _rank(faulted), _rank(clean)
     assert rank <= clean_rank, (clean, faulted)
     if faulted.complete:

@@ -148,10 +148,11 @@ def test_an_action_handed_the_caller_is_open_only_where_every_strangers_call_goe
 
 
 def test_an_open_now_the_chain_does_not_confirm_is_never_reported(d):
-    # Whatever the lowering gets wrong (here the contract's own Yul call, A52), "open now" stands only once every
-    # stranger's own call goes through on the chain: nobody's does.
+    # Whatever the lowering gets wrong (here the contract's own Yul call, A52, whose success the code requires and the
+    # lowering assumes), "open now" stands only once every stranger's own call goes through on the chain: nobody's
+    # does.
     v = O.verdict(d, "C", "selfCall")
     O.check(d, "C", "selfCall", v, samples=SAMPLES, open_at=False)
-    assert v.openness == "not_determined" and "open_unconfirmed" in v.gaps
+    assert v.openness == "not_determined" and "open_assumed_action_unconfirmed" in v.gaps
     fn = O.function(d, "C", "selfCall")
     assert not any(O.passes(d, "C", fn, {"x": 0}, sender=who) for who in {*O.ACCOUNTS, *O.STRANGERS})

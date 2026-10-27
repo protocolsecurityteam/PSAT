@@ -1131,10 +1131,6 @@ class World:
     # (contract, variable, key count, fields) -> every value that field has held at any key (zero and each value its
     # complete value events recorded), or ``None`` when not known that way.
     values_of: Callable[[Term, Any, int, tuple], frozenset | None] = lambda contract, var, keys, fields: None
-    # The actions the function's own code makes whose success the formula assumes (a contract created, ether sent, a
-    # low-level or assembly call): mark -> whether each time it is made it is handed something the caller picks, so
-    # its outcome may turn on the caller's arguments (``verdict.function_verdict``, ``Lowerer.action_inputs``).
-    assumed: dict = field(default_factory=dict)
     written: frozenset = frozenset()  # (contract, variable) the function itself may write
     # Topic0s of the events that write (address, variable): where candidate keys of an identity lookup appear.
     writer_topics: Callable[[int, str], frozenset[str]] = lambda address, var: frozenset()
@@ -1431,6 +1427,9 @@ class Evaluator:
         if kind in ("unknown", "opaque"):
             return UNK
         if kind == "assumed":
+            # An action the code assumes succeeds (a creation, ether sent, a low-level call whose result it checks):
+            # whatever its callee decides, on whatever it reads, the caller arranges; a pass resting on it is sampled.
+            self.world.rests_on.add("assumed")
             return ASSUMED
         if kind == "retsize":
             return self._returned_size(t[1])
@@ -2337,9 +2336,9 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
     Otherwise whatever the lowering said, a callee's code or a mis-lowered construct of the contract's own, is not
     determined: ``open_value_unconfirmed`` (ether sent), ``open_arranged_unconfirmed`` (the stranger's own entries
     arranged first), ``open_assumed_action_unconfirmed`` (an action assumed or handed the caller), else
-    ``open_unconfirmed``; the proposal stays, as data. Save one case: an open proved from the contract's own code
-    (``_proven_by_code``) whose stranger's call the chain refuses, where only an action that code assumes succeeds and
-    hands the caller's picks could have refused it, stands, carrying ``stranger_run_failed`` in ``requires``."""
+    ``open_unconfirmed``; the proposal stays, as data. An open the chain refuses is never kept on an account of what
+    refused it: an action the code assumes succeeds (a creation, ether sent, a call whose result it checks) is a
+    callee's decision, on whatever that callee reads (``tx.origin`` among them), whoever hands it what."""
     rests_on, brought = world.rests_on, world.brought
     prior_runs = world.__dict__.pop("_prior_runs", None)
     if verdict.openness != "open" or verdict.allowed != "now" or verdict.requires:
@@ -2362,13 +2361,6 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
             if found is not None and strangers_run(formula, world, found):
                 world.sampled = True
                 return replace(verdict, witnesses={**verdict.witnesses, FRESH: found})
-            if ran is False and found is None and not unanswered and not rests_on and _proven_by_code(formula, world):
-                # Proved from the contract's own code alone, every stranger alike: the open stands where the
-                # stranger's call reverting on the chain (refused, never unanswered) can only be an action that code
-                # assumes succeeds and hands the caller's own picks (a proxy created for the app id it names): the
-                # call's business, not who makes it, a condition the open carries. Where no such action could have
-                # refused it, the code itself was misread: not determined, as below.
-                return replace(verdict, requires=(*verdict.requires, (None, STRANGER_RUN_FAILED, "business")))
         if "action" in rests_on and brought and _brought_runs(world, witness, brought):
             world.sampled = True
             return verdict
@@ -2389,24 +2381,6 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
         )
     gaps = (gap, *(("read_failed:run",) if unanswered else ()), *_budget_gaps(world, refused))
     return replace(verdict, openness="not_determined", complete=False, gaps=gaps)
-
-
-# What an open proved from the contract's own code carries where the stranger's own call still reverts on the chain
-# (``_confirmed_open``): a business precondition of the call, in ``Verdict.requires``.
-STRANGER_RUN_FAILED = "stranger_run_failed"
-
-
-def _proven_by_code(formula: Term, world: World) -> bool:
-    """Whether ``formula`` is the contract's own code alone, every stranger meeting it alike
-    (``_alike_for_strangers``): no call (a callee's code or the chain's answer standing in), no unknown or opaque
-    term (code the lowering couldn't follow), no delegated code; and the actions it assumes succeed
-    (``World.assumed``) are there, each handed something the caller picks."""
-    for kind in ("call", "item", "abi", "ok", "caught", "unknown", "opaque", "delegate"):
-        if subterms(formula, kind):
-            return False
-    if not world.assumed or not all(world.assumed.values()):
-        return False  # nothing outside the formula that its arguments steer could have refused the stranger
-    return _alike_for_strangers(formula, world)
 
 
 def _budget_gaps(world: World, refused: int) -> tuple[str, ...]:

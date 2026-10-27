@@ -875,11 +875,12 @@ def byte_at(container: Term, key: Term) -> Term:
     return mk_slice(mk("elem", container, key), 0, 1)
 
 
-def _assumed(lowerer: "Lowerer", st: State, label: str, inputs: tuple) -> State:
-    """``st`` having made an action whose success is assumed, with what it was handed recorded."""
+def _assumed(st: State, label: str, required: bool = False) -> State:
+    """``st`` having made an action whose success is assumed: a mark in its writes, and where ``required`` (the call
+    reverts when the action fails: a creation, a ``transfer``) in the path too, so the formula shows what it rests
+    on. An action whose outcome the code doesn't require (an unchecked low-level call) marks the writes alone."""
     mark = mk("assumed", label)
-    lowerer.action_inputs.setdefault(mark, []).append(tuple(x for x in inputs if isinstance(x, tuple)))
-    return _acted(st, mark)
+    return _acted(replace(st, pc=mk_and([st.pc, mark])), mark) if required else _acted(st, mark)
 
 
 def _acted(st: State, call: Term) -> State:
@@ -1011,7 +1012,6 @@ class Lowerer:
         self.exits: list = []
         # What each action assumed to succeed (an ``assumed`` mark: a creation, ether sent, a low-level or assembly
         # call) was handed, per time it was made: whether its outcome may turn on what the caller picks.
-        self.action_inputs: dict[Term, list[tuple]] = {}
 
     def success(self, function: Function) -> Term:
         """The condition under which an external call to ``function`` returns."""
@@ -2142,13 +2142,12 @@ class Lowerer:
             item = _item(whole, ir.index)
             return self._write(ir.lvalue, item, st)
         if isinstance(ir, (Transfer, Send)):
-            sent = (self.val(ir.destination, st), self.val(ir.call_value, st))
-            st = _assumed(self, st, f"value:{id(ir)}", sent)
+            # ``transfer`` reverts when the recipient refuses the ether (its own code deciding): success required.
+            st = _assumed(st, f"value:{id(ir)}", required=isinstance(ir, Transfer))
             lvalue = getattr(ir, "lvalue", None)  # ``Send`` returns a bool, ``Transfer`` nothing
             return self._write(lvalue, unknown(type(ir).__name__), st) if lvalue is not None else st
         if isinstance(ir, LowLevelCall):
-            handed = (self.val(ir.destination, st), *(self.val(a, st) for a in ir.arguments))
-            st = _assumed(self, st, f"lowlevel:{id(ir)}", handed)
+            st = _assumed(st, f"lowlevel:{id(ir)}")
             if ir.lvalue is None:
                 return st
             name = str(getattr(ir.function_name, "value", ir.function_name))
@@ -2185,8 +2184,9 @@ class Lowerer:
             return self._write(ir.lvalue, ("tuple", (success, returned)), st)
         if isinstance(ir, NewContract):
             # Code deployed by this call: an effect whatever the new contract's constructor does, an action the caller
-            # arranges like any call out, unless it hands the constructor who calls.
-            st = _assumed(self, st, f"create:{id(ir)}", tuple(self.val(a, st) for a in ir.arguments))
+            # arranges like any call out, unless it hands the constructor who calls. ``new`` reverts when the
+            # constructor does (its code deciding, on whatever it reads: ``tx.origin`` among them): success required.
+            st = _assumed(st, f"create:{id(ir)}", required=True)
             if any(contains(self.val(a, st), IDENTITY_KINDS) for a in ir.arguments):
                 st = replace(st, pc=mk_and([st.pc, unknown("unsupported:NewContract")]))
             return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
@@ -2293,7 +2293,7 @@ class Lowerer:
             if out is not None and size is not None and size % 32 == 0:
                 kept = tuple((o, w) for o, w in st.mem if not out - 31 <= o < out + size)
                 mem = (*kept, *((out + 32 * i, mk("assumed", "returndata")) for i in range(size // 32)))
-            after = _assumed(self, State(st.pc, st.env, st.store, st.ret, mem=mem), base, tuple(args))
+            after = _assumed(State(st.pc, st.env, st.store, st.ret, mem=mem), base)
             # Data this reading couldn't decode that holds who calls: the callee's check of that caller is unread.
             start, length = (_small_const(args[3]), _small_const(args[4])) if len(args) == 7 else (None, None)
             named = (
@@ -2315,8 +2315,9 @@ class Lowerer:
             st = replace(st, store=stored(st.store, ("havoc", self.this, "*elsewhere", "delegatecall"), TRUE))
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
         if base in ("create", "create2"):
-            # Assembly ``create``: code deployed by this call, like ``new C()``.
-            st = _assumed(self, st, base, tuple(args))
+            # Assembly ``create``: code deployed by this call, like ``new C()``, except that it returns zero instead
+            # of reverting when the constructor does (the address, unknown by name, carries that).
+            st = _assumed(st, base)
             return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
         if base == "returndatacopy" and len(args) == 3:
             # The last call's return data copied out: its first word, when that call is known and copied from the

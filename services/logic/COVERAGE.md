@@ -368,12 +368,13 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
     open on that holding (``requires``). A writer needing the very entry it would grant (a transfer to oneself) never
     counts as bringing it about (``_arrangeable``). Otherwise not determined, the proposal kept as data:
     ``open_value_unconfirmed`` (ether), ``open_arranged_unconfirmed`` (own entries arranged first),
-    ``open_assumed_action_unconfirmed`` (an action assumed, or handed the caller), else ``open_unconfirmed`` (natural:
-    the contract's own Yul call into always-reverting code, A52, ``selfCall``; probes ``q2_arranged``, ``q2c``,
-    ``q5_declared``, ``q2d_value``: ``test_open_confirmed``), plus ``read_failed:run`` where the node left a
-    stranger's own call unanswered (a timeout, an abort, a cap: never read as a refusal, ``decide._is_revert``). A
-    node that refuses state overrides answers with an error, read as unknown: not determined, never open. "Open
-    later" never rests on a callee's answer (see G6).
+    ``open_assumed_action_unconfirmed`` (an action assumed, or handed the caller: the contract's own Yul call into
+    always-reverting code whose result it checks, A52, ``selfCall``; a creation; a ``transfer``), else
+    ``open_unconfirmed`` (the code itself misread; probes ``q2_arranged``, ``q2c``, ``q5_declared``, ``q2d_value``:
+    ``test_open_confirmed``), plus ``read_failed:run`` where the node left a stranger's own call unanswered (a
+    timeout, an abort, a cap: never read as a refusal, ``decide._is_revert``). A node that refuses state overrides
+    answers with an error, read as unknown: not determined, never open. "Open later" never rests on a callee's answer
+    (see G6).
     An open once the conditions allow (or only with some set aside) on the stranger's own entries arranged
     (``decide._arranged_later``, review 8, F1) needs the same call of its own that brings them about: each
     stranger's first call runs on the chain as it stands, and this one passes on the words it leaves in a state of
@@ -457,16 +458,16 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   ``withdrawWithSig`` 30 each, ``setUserPositionManagersWithSig`` 11, ``grantRole``/``revokeRole``/``setRole``), Lido
   and Maple none. Rows that were "open" and are now not determined carrying ``chosen_identity`` + ``now_unknown`` +
   ``read_failed:*`` + ``unknown:*``: Aave 188, Lido 4, Maple 7. ``permit``-shaped rows (the signer compared with the
-  ``owner`` argument, a nonce consumed) are ``open_unconfirmed``: Aave 63, Maple 21. They stay so under G13, which
-  keeps an open only where an action the code assumes succeeds could have refused the stranger: here nothing was
-  assumed, the stranger's run fails because its witness carries no signature that recovers to the account it names,
+  ``owner`` argument, a nonce consumed) are ``open_unconfirmed``: Aave 63, Maple 21. They stay so (G13 keeps no open
+  the chain refuses): the stranger's run fails because its witness carries no signature that recovers to the account
+  it names,
   and the engine holds no key for the addresses it makes up.
   A sound lowering gives one of three verdicts, each a construct the engine already has:
   (1) the signer is read in a stored set (``isGuardian[signer]``, a signer list): restricted to that set, the members
   listed as ``signers`` (holders of the keys), with the set's completeness as for any lookup (G1-G5);
   (2) the signer is compared with an argument the caller picks (``permit(owner, ...)``, ``*WithSig(user, ...)``):
-  open, for the account whose key signs, with a business condition (``valid_signature``, like G13's
-  ``stranger_run_failed``) rather than ``open_unconfirmed``; the ERC-1271 branch is a view call
+  open, for the account whose key signs, with a business condition (``valid_signature`` in ``requires``, confirmed on
+  the chain with a signature the strangers' own keys make) rather than ``open_unconfirmed``; the ERC-1271 branch is a view call
   ``isValidSignature(bytes32,bytes)`` handed that account, followed or named like any call target;
   (3) the signature only has to be well formed (checked against nothing stored and no argument that gates): open.
   Build: lower ``SignatureChecker``'s assembly shape as that view call and ``ECDSA.recover`` as ``signer`` (the
@@ -474,20 +475,29 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   a known private key for ``FRESH`` and the samples) so the witness can carry a signature of the digest the code
   hashes (the ``hash``/``enc`` terms, evaluated at the witness), which confirms (2) on the chain and closes A53.
 
-* **G13. A proved open turned not determined by the stranger's business** (2026-10-26, user decision). FIXED.
-  Every "open now" is confirmed by the stranger's own call on the chain (G7); one the chain refuses was
-  ``open_unconfirmed`` even where the formula is the contract's own code alone and the refusal could only be the
-  call's business: v51 turned 42/28/75 opens (Lido/Maple/Aave) into not determined this way, Aragon's
-  ``newAppProxy(kernel, appId)`` among them (a proxy created for an app id the stranger's guess doesn't name). Now
-  ``_confirmed_open`` keeps the open, proved (not ``witnessed``), with ``(None, "stranger_run_failed", "business")``
-  in ``requires`` ("open, but the call needs what its arguments name"), when the formula has no call (nor an item of
-  one, nor whether one returned), no unknown, opaque or delegated term, every stranger meets it alike (``_alike_for_strangers``), the stranger's call was refused
-  (never unanswered), nothing else was assumed or arranged (``rests_on``), and every action the code assumes succeeds
-  (``World.assumed``: a creation, ether sent, a low-level or assembly call) is handed something the caller picks, so
-  the refusal can turn on the arguments. Otherwise the current rule stands: an action handed only stored values (an
-  assembly call into code that always reverts, A52; a creation of fixed arguments), or no action at all (the code
-  itself misread), stays ``open_unconfirmed``. ``never_bolder`` ranks an open carrying a condition below the same
-  open carrying none (``test_open_business``; ``test_callee_misread::test_an_open_now_the_chain_does_not_confirm_is_never_reported``).
+* **G13. A proved open turned not determined by the stranger's business** (2026-10-26, user decision; REVERTED
+  2026-10-27, round ten-b H1, anvil probes). KNOWN GAP. Every "open now" is confirmed by the stranger's own call on the
+  chain (G7); v51 turned 42/28/75 opens (Lido/Maple/Aave) into not determined this way, Aragon's
+  ``newAppProxy(kernel, appId)`` among them (a proxy created for an app id the stranger's guess doesn't name). The
+  2026-10-26 rule kept such an open, proved, with ``stranger_run_failed`` in ``requires``, when the formula was the
+  contract's own code alone and every action it assumed succeeds was handed something the caller picks, "so the
+  refusal can turn on the arguments". That rule was unsound: an assumed action's success is its callee's decision, on
+  whatever that callee reads, whoever hands it what. A child constructor, a receive hook or a low-level callee checking
+  ``tx.origin`` lets the admin through and nobody else, and the engine, not following it, said ``open``
+  (``test_open_business::ORIGIN``: ``exec``, ``execYul``, ``pay``, ``spawn``). Now: a creation (``new C(...)``) and a
+  ``transfer`` put their ``assumed`` mark in the path (``lower._assumed(required=True)``: the call reverts when they
+  fail), as ``require(ok)`` of a low-level or assembly call always did; evaluating an ``assumed`` mark records that the
+  pass rests on it (``rests_on``), so such an open is witnessed at best, and one whose stranger's call the chain
+  refuses is not determined, ``open_assumed_action_unconfirmed``, never kept on an account of what refused it.
+  ``World.assumed``, ``Lowerer.action_inputs``, ``decide._proven_by_code`` and ``stranger_run_failed`` are gone. An
+  action whose outcome the code doesn't require (an unchecked low-level call; assembly ``create``, which returns zero
+  rather than reverting) marks the writes alone, and the function stays open once the strangers' own calls go through
+  (``fire``). Cost: ``Kernel.newAppProxy(address,bytes32)`` at 0xb8ffc3cd…88dc is ``not_determined`` +
+  ``open_assumed_action_unconfirmed`` again (re-decided 2026-10-27 against the warm cache, ``requires`` empty), with
+  the v51 rows; the way back is following the constructor's code like a callee's (its contract is in the same
+  compilation unit), a construct to build, not a rule. ``selfCall``/``payInFree`` (``test_open_confirmed``) and
+  ``test_callee_misread``'s ``selfCall`` name ``open_assumed_action_unconfirmed`` where they named
+  ``open_unconfirmed``. ``never_bolder`` ranks an open carrying a condition below the same open carrying none.
   Not covered: ``permit`` and the other signature rows (ecrecover is A53; see G12).
 
 * **G14. A node's timeout read as the chain's refusal** (2026-10-27, round ten-b H2). FIXED. ``decide._is_revert``

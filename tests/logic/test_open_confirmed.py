@@ -226,7 +226,7 @@ ARRANGED_CASES = [
     ("act", ("Registry",), "open_assumed_action_unconfirmed"),
     ("withdraw", (), "open_arranged_unconfirmed"),
     ("withdraw", ("Registry",), "open_arranged_unconfirmed"),
-    ("selfCall", (), "open_unconfirmed"),
+    ("selfCall", (), "open_assumed_action_unconfirmed"),
     ("selfCallPoke", (), "open_assumed_action_unconfirmed"),
     ("selfCallPoke", ("Sink",), "open_assumed_action_unconfirmed"),
     ("withdraw2", (), "open_arranged_unconfirmed"),
@@ -253,7 +253,11 @@ DECLARED_CASES = [
 # code misread as letting everyone through.
 GATED = [("out3", ("Allow",)), ("out3", ()), ("actView", ("Allow",)), ("actViewPoke", ("Allow",))]
 GATED += [("actViewTotal", ("Allow",))]
-VALUE_CASES = [("payIn", (), "open_value_unconfirmed"), ("payInFree", (), "open_unconfirmed"), ("donate", (), None)]
+VALUE_CASES = [
+    ("payIn", (), "open_value_unconfirmed"),
+    ("payInFree", (), "open_assumed_action_unconfirmed"),
+    ("donate", (), None),
+]
 
 PROBES = [
     O.Probe(
