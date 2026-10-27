@@ -3332,9 +3332,10 @@ def _open_parts(atom: Term, probe: "Evaluator", depth: int = 0) -> list[str]:
 def target_unread(target: Term, probe: "Evaluator") -> str:
     """Why a call's target address reads unknown, as the reads already made show (nothing is read again):
     ``read_failed`` when a storage word or view call it is read from went unanswered by the node; ``budget`` when one
-    wasn't sent for the read budget; else what it is that no read gives: ``argument`` (the caller picks it),
-    ``call_result`` (another call returns it), ``memory`` (a value memory holds that the lowering lost),
-    ``unresolved`` (anything else the lowering left unknown)."""
+    wasn't sent for the read budget; else what it is that no read gives: ``keyed`` (stored behind a mapping key or
+    at a slot the caller picks, ``tokens[k]``), ``argument`` (the caller picks it), ``call_result`` (another call
+    returns it), ``memory`` (a value memory holds that the lowering lost), ``unresolved`` (anything else the lowering
+    left unknown)."""
     chain = probe.world.chain
     keys = []
     for load in subterms(target, "load"):
@@ -3357,6 +3358,10 @@ def target_unread(target: Term, probe: "Evaluator") -> str:
         return "read_failed"
     if any(k in refused and k not in chain._memo for k in keys):
         return "budget"
+    stored = [step for load in subterms(target, "load") for _, step in load[3]]
+    stored += [raw[2] for raw in subterms(target, "rawload")]
+    if any(isinstance(step, tuple) and contains(step, _FREE_KINDS) for step in stored):
+        return "keyed"
     if any(subterms(target, kind) for kind in _FREE_KINDS):
         return "argument"
     if subterms(target, "call") or subterms(target, "item") or subterms(target, "abi"):

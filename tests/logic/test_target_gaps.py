@@ -85,9 +85,51 @@ def _setup_picky(d):
     d.deploy("Picky", ("address",), (d.at["OriginTok"],))
 
 
+LOC = 0xA16A46D94261C7517CC8FF89F61C0CE93598E3C849801011DEE649A6A557D100
+KEYED = f"""
+pragma solidity 0.8.27;
+
+interface IToken {{
+    function transferFrom(address a, address b, uint256 v) external returns (bool);
+    function ok(address who) external view returns (bool);
+}}
+
+contract Tok {{
+    mapping(address => bool) public allowed;
+    function ok(address who) external view returns (bool) {{ return allowed[who]; }}
+    function transferFrom(address a, address, uint256) external returns (bool) {{ return allowed[a]; }}
+}}
+
+contract NS {{
+    bytes32 constant LOC = {hex(LOC)};
+    struct S {{ address token; }}
+    uint256 x;
+    mapping(bytes32 => address) tokens;
+    function _s() private pure returns (S storage s) {{ assembly {{ s.slot := LOC }} }}
+    function setKey(bytes32 k, address t) external {{ tokens[k] = t; }}
+    function viaNamespaceAct(uint256 v) external {{
+        require(IToken(_s().token).transferFrom(msg.sender, address(this), v));
+        x = v;
+    }}
+    function viaKeyAct(bytes32 k, uint256 v) external {{
+        require(IToken(tokens[k]).transferFrom(msg.sender, address(this), v));
+        x = v;
+    }}
+}}
+"""
+
+
+def _setup_keyed(d):
+    d.deploy("Tok")
+    d.deploy("NS")
+    O.set_storage(d, "NS", LOC, d.at["Tok"])
+    assert O.transact(d, "NS", "setKey(bytes32,address)", ("bytes32", "address"), (1, d.at["Tok"]))
+
+
 PROBES = [
     O.Probe(SOURCE, _setup, (("C", "byArg", ()), ("C", "viewByArg", ()))),
     O.Probe(PICKY, _setup_picky, (("Picky", "approvedOnly", ()),)),
+    O.Probe(KEYED, _setup_keyed, (("NS", "viaKeyAct", ()),)),
 ]
 
 
@@ -171,3 +213,31 @@ def test_an_unfollowed_callee_the_caller_picks_is_never_an_opaque_condition(pick
     O.check(d, "Picky", "approvedOnly", v, open_at=False, samples=({"t": d.at["OriginTok"]},))
     assert v.openness == "not_determined", v
     assert "unknown:target:argument:ok(address)" in v.gaps and not any(g.startswith("conditional:") for g in v.gaps), v
+
+
+@pytest.fixture(scope="module")
+def keyed(anvil):  # noqa: F811
+    d = O.deployment(*anvil, KEYED)
+    _setup_keyed(d)
+    return d
+
+
+def test_a_stored_target_behind_a_key_the_caller_picks_is_keyed(keyed):
+    """Round ten-c, probe q2: ``IToken(tokens[k])`` is read from storage behind a key the caller picks; it was
+    labelled ``argument`` as though the caller named the address itself. Nobody passes (``Tok.allowed`` is empty)."""
+    d = keyed
+    fn = O.function(d, "NS", "viaKeyAct")
+    assert not any(O.passes(d, "NS", fn, {"k": 1, "v": 1}, sender=w) for w in (*O.ACCOUNTS, *O.STRANGERS))
+    clean = O.check(d, "NS", "viaKeyAct", O.verdict(d, "NS", "viaKeyAct"), samples=({"k": 1, "v": 1},))
+    assert clean.openness == "not_determined" and f"unknown:target:keyed:{TRANSFER}" in clean.gaps, clean.gaps
+    assert not any("target:argument" in g for g in clean.gaps), clean.gaps
+    _no_failed_read(clean)
+    # The same target read from a namespaced slot is no read the caller steers: a clean read, no target label.
+    ns = O.check(d, "NS", "viaNamespaceAct", O.verdict(d, "NS", "viaNamespaceAct"), samples=({"v": 1},))
+    assert not any("target:" in g for g in ns.gaps), ns.gaps
+    # A node failing storage reads changes nothing: ``k`` is the caller's, so no read of ``tokens[k]`` is ever sent,
+    # and what no read gives stays ``keyed``, never a failed read.
+    faulty = O.Faulty(d, storage=True)
+    v = O.verdict(d, "NS", "viaKeyAct", chain=faulty)
+    O.never_bolder(clean, v)
+    assert f"unknown:target:keyed:{TRANSFER}" in v.gaps and not any("target:argument" in g for g in v.gaps), v.gaps
