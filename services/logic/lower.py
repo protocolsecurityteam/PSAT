@@ -2927,14 +2927,11 @@ class Lowerer:
             if len(named) == 1:
                 return self._write(ir.lvalue, const(named.pop(), "function"), st)
         whole = self.val(ir.variable_left, st)
-        word = _static_field(getattr(ir.variable_left, "type", None), field_name)
-        if word is not None and isinstance(whole, tuple) and whole and whole[0] == "call":
-            # A field of a struct a call returns: a struct of plain values is encoded as their words, in order.
-            return self._write(ir.lvalue, mk("item", whole, word), st)
         decoded = _abi_field(whole, getattr(ir.variable_left, "type", None), field_name)
         if decoded is not None:
-            # Any other field of a struct a call returns (of a nested struct, beside a dynamic field, at one of
-            # several return positions): the item of the ABI-decoded return data it is.
+            # A field of a struct a call returns (of plain values, of a nested struct, beside a dynamic field, at one
+            # of several return positions): the item of the ABI-decoded return data it is, decoded by its type. The
+            # raw word is never the value: a ``bytes4`` sits left-aligned in it, a signed field sign-extended.
             return self._write(ir.lvalue, decoded, st)
         if _struct_shaped(whole, field_name):
             if ir.lvalue is not None:
@@ -3811,27 +3808,6 @@ def _items(term: Any) -> tuple | None:
     if isinstance(term, tuple) and len(term) == 3 and term[0] == "array":
         return term[2]
     return None
-
-
-def _static_field(type_: Any, name: str) -> int | None:
-    """The word ``name`` occupies in an ABI-encoded struct of ``type_`` whose fields are all of fixed size (one with
-    any dynamic field is encoded elsewhere, behind an offset word: no field of it is in place, whichever comes
-    first), when it is one word itself."""
-    from slither.core.declarations import Structure
-    from slither.core.solidity_types import UserDefinedType
-
-    if not (isinstance(type_, UserDefinedType) and isinstance(type_.type, Structure)):
-        return None
-    words: dict[str, tuple[int, int]] = {}
-    at = 0
-    for f in type_.type.elems_ordered:
-        size = _type_words(f.type)
-        if size is None:
-            return None
-        words[f.name] = (at, size)
-        at += size
-    found = words.get(name)
-    return found[0] if found is not None and found[1] == 1 else None
 
 
 def _abi_type(type_: Any) -> str | None:
