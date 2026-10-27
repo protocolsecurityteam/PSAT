@@ -197,6 +197,9 @@ class Chain:
         self.failed = 0
         # Of those, the ones not sent for the budget (``limit``).
         self.refused = 0
+        # The reads themselves, by key: those the node failed to answer, and those not sent for the budget.
+        self.failed_keys: set = set()
+        self.refused_keys: set = set()
 
     def cut(self, address: int, topics: frozenset[str]) -> bool:
         """Whether that history was read partial, or not read at all."""
@@ -284,6 +287,7 @@ class Chain:
             if not self._affordable():
                 self.failed += 1
                 self.refused += 1
+                self.refused_keys.add(key)
                 return UNK
             self.sent += 1
             try:
@@ -293,6 +297,7 @@ class Chain:
             except Exception as exc:  # a revert is a revert; any transport or node error reads as unknown, unremembered
                 if not _is_revert(str(exc)):
                     self.failed += 1
+                    self.failed_keys.add(key)
                     return UNK
                 self._memo[key] = REVERTED
         return self._memo[key]
@@ -2212,7 +2217,12 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # a callee not followed (never set aside as a condition) always are.
         probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
         theirs = {r for c in free for r in _open_parts(c, probe)} - {r for c in core for r in _open_parts(c, probe)}
-        kept = tuple(g for g in verdict.gaps if g not in theirs or g.startswith(("read_failed:", "unfollowed:")))
+        kept = tuple(
+            g
+            for g in verdict.gaps
+            if g not in theirs
+            or g.startswith(("read_failed:", "unfollowed:", "unknown:target:", "unknown:call_target:"))
+        )
         verdict = replace(verdict, gaps=kept or verdict.gaps)
     if verdict.openness == "not_determined":
         tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
@@ -3167,14 +3177,16 @@ def _unread_gaps(when: frozenset, probe: "Evaluator") -> list[str]:
 def _open_parts(atom: Term, probe: "Evaluator", depth: int = 0) -> list[str]:
     """What leaves ``atom`` unknown: a term the lowering couldn't express (``unknown:<its label>``), a call whose
     callee isn't followed and whose arguments the caller picks (``call:...`` when the caller's identity reaches it,
-    see ``call_gap``, else ``unfollowed:<signature>``), a read the chain didn't answer (``read_failed:<what>``). A
+    see ``call_gap``, else ``unfollowed:<signature>``), a read the chain didn't answer (``read_failed:<what>``), a
+    call whose target is no address a read gives (``unknown:target:<why>:<signature>``, see ``target_unread``). A
     followed callee left unknown is looked into the same way, a few contracts deep (past that, ``depth:<sig>``)."""
     out = [unknown_gap(u[1]) for u in subterms(atom, "unknown")]
     out += [f"unknown:{o[1]}" for o in subterms(atom, "opaque")]
     for call in subterms(atom, "call"):
         address = probe.eval(call[1])
         if not isinstance(address, int) or isinstance(address, bool):
-            out.append(f"read_failed:target:{call[2]}")
+            why = target_unread(call[1], probe)
+            out.append(f"read_failed:target:{call[2]}" if why == "read_failed" else f"unknown:target:{why}:{call[2]}")
         elif not call[4]:
             if probe.eval(call) is UNK and probe.world.callee(call, address % 2**160) is None:
                 out.append(call_gap(call, probe))  # an action handed the caller, its callee not followed
@@ -3204,6 +3216,48 @@ def _open_parts(atom: Term, probe: "Evaluator", depth: int = 0) -> list[str]:
     if any(t[1] for t in subterms(atom, "time")) and probe.world.chain.block_field("timestamp") is UNK:
         out.append("read_failed:block")
     return out
+
+
+def target_unread(target: Term, probe: "Evaluator") -> str:
+    """Why a call's target address reads unknown, as the reads already made show (nothing is read again):
+    ``read_failed`` when a storage word or view call it is read from went unanswered by the node; ``budget`` when one
+    wasn't sent for the read budget; else what it is that no read gives: ``argument`` (the caller picks it),
+    ``call_result`` (another call returns it), ``memory`` (a value memory holds that the lowering lost),
+    ``unresolved`` (anything else the lowering left unknown)."""
+    chain = probe.world.chain
+    keys = []
+    for load in subterms(target, "load"):
+        where = probe.storage_cell(load)
+        if where is not None:
+            keys.append(chain.storage_request(where[0], where[1])[0])
+    for raw in subterms(target, "rawload"):
+        address, slot = probe.eval(raw[1]), probe.eval(raw[2])
+        if isinstance(address, int) and isinstance(slot, int) and not isinstance(address, bool):
+            keys.append(chain.storage_request(address % 2**160, slot)[0])
+    for call in subterms(target, "call"):
+        asked = probe.call_input(call) if call[4] else None
+        sender = probe.sender(call) if asked is not None else UNK
+        if asked is not None and isinstance(sender, int):
+            keys.append(chain.call_request(asked[0] % 2**160, asked[1], sender)[0])
+    failed, refused = getattr(chain, "failed_keys", set()), getattr(chain, "refused_keys", set())
+    # A view call the verdict kept from being read alike for everyone stands in as an unknown named for it.
+    labels = [str(u[1]) for kind in ("unknown", "opaque") for u in subterms(target, kind)]
+    if any(k in failed and k not in chain._memo for k in keys) or any(x.startswith("read_failed:") for x in labels):
+        return "read_failed"
+    if any(k in refused and k not in chain._memo for k in keys):
+        return "budget"
+    if any(subterms(target, kind) for kind in _FREE_KINDS):
+        return "argument"
+    if subterms(target, "call") or subterms(target, "item"):
+        return "call_result"
+    for label in labels:
+        if label.startswith("unknown:call_target:"):
+            return label.split(":")[2]
+        if label.startswith(("origin:", "unfollowed:")):
+            return "call_result"
+    if any(word in label for label in labels for word in ("memory", "mload", "heap", "object")):
+        return "memory"
+    return "unresolved"
 
 
 _SNAPSHOT_TRIES = 128  # stranger entries tried from a storage dump's unaccounted words (all lookups combined)

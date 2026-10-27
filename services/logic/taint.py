@@ -77,9 +77,11 @@ def split(formula: Term) -> tuple[tuple[Term, ...], tuple[Term, ...]]:
 
 def unknown_gap(label: Any) -> str:
     """An unknown's label as a gap: ``unknown:<label>``, but a call ``verdict`` kept from being read as the same for
-    everyone by its own name (``origin:<sig>``, ``unfollowed:<sig>``, ``read_failed:call_target:<sig>``)."""
+    everyone by its own name (``origin:<sig>``, ``unfollowed:<sig>``, ``read_failed:call_target:<sig>``,
+    ``unknown:call_target:<why>:<sig>``)."""
     text = str(label)
-    return text if text.startswith(("origin:", "unfollowed:", "read_failed:")) else f"unknown:{text}"
+    named = ("origin:", "unfollowed:", "read_failed:", "unknown:call_target:")
+    return text if text.startswith(named) else f"unknown:{text}"
 
 
 def unknown_labels(t: Term) -> list[str]:

@@ -2436,7 +2436,8 @@ def function_verdict(
         contract as the origin, so its answer is trusted only where no code it may run reads the origin: ``origin``
         when its followed code does, ``nested`` when a callee it asks does; ``unfollowed`` when code not followed has
         a call opcode (it may reach one) or can't be read, or the callees go deeper than followed (``origin`` when it
-        has an ``ORIGIN`` opcode); ``read_failed:call_target`` when where it goes can't be read. A followed callee's
+        has an ``ORIGIN`` opcode); ``read_failed:call_target`` when where it goes went unread for a failed read,
+        ``unknown:call_target:<why>`` when it is no address a read gives (``decide.target_unread``). A followed callee's
         lowering never shows on its own that the origin goes unread (a mis-lowered read of it is no ``origin`` term):
         that takes its runtime code too, deployed and compiled, holding no ``ORIGIN`` opcode (``hidden`` when one
         does, ``unfollowed`` when that code can't be read)."""
@@ -2451,7 +2452,10 @@ def function_verdict(
             return None
         address = address_of(call[1])
         if not isinstance(address, int) or isinstance(address, bool):
-            why: str | None = "read_failed:call_target"
+            from .decide import target_unread
+
+            unread = target_unread(call[1], Evaluator(world, {"caller": FRESH, "signer": FRESH}))
+            why: str | None = "read_failed:call_target" if unread == "read_failed" else f"unknown:call_target:{unread}"
         else:
             lowered = callee(call)
             if lowered is None:
@@ -2506,7 +2510,8 @@ def function_verdict(
         value, its return value does, and its success condition joins the formula, which holds only where every use
         of it is reached unconditionally (in a top-level conjunct, under no ``ite`` or ``or``). The calls that brings
         in are asked about in turn, a few rounds deep. Every other such call becomes an unknown no caller is marked
-        alike for, named ``origin:``, ``unfollowed:`` or ``read_failed:call_target:`` and the signature. A call
+        alike for, named ``origin:``, ``unfollowed:``, ``read_failed:call_target:`` or ``unknown:call_target:<why>:``
+        and the signature. A call
         handed the caller is asked about the origin (and where it goes) only: whatever else its callee does, the
         caller it is handed already keeps it out of what every caller faces alike. ``inline=False``: every such call
         an unknown, nothing inlined (the formula no callee's code is trusted in, see ``_inlined_verdict``)."""
@@ -2517,7 +2522,9 @@ def function_verdict(
                     continue  # inlined already, inside another's place
                 why = caller_bound(call)
                 if why is None or (
-                    tainted(call) and why not in ("origin", "nested", "hidden", "read_failed:call_target")
+                    tainted(call)
+                    and why not in ("origin", "nested", "hidden")
+                    and not why.startswith(("read_failed:call_target", "unknown:call_target:"))
                 ):
                     continue
                 lowered = callee(call) if why in ("origin", "nested") else None
