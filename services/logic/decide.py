@@ -2947,10 +2947,13 @@ def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict
             if singled and candidate not in conditions:
                 passes[root].add(candidate)
     world.work_limit = limit
-    if untested:
+    # Entries the list was built from that went unread for the budget (``holders.stored``) are untested too.
+    unread = sum(int(g.split(":", 1)[1]) for g in gaps if g.startswith("untested_candidates:"))
+    gaps[:] = [g for g in gaps if not g.startswith("untested_candidates:")]
+    if untested or unread:
         # Someone never asked about may pass now: neither "nobody known passes now" nor a complete list holds.
         now_maybe = True
-        gaps.append(f"untested_candidates:{len(untested)}")
+        gaps.append(f"untested_candidates:{len(untested) + unread}")
     now_index = next((i for i, state in enumerate(states) if state == {}), None)
     if now_index is not None and fresh[now_index] is False:
         # Undecided where the reasoning stops (a callee's check it can't settle): the call itself, run from the

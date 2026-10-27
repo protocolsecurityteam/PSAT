@@ -39,7 +39,9 @@ from .terms import (
 
 _BINDINGS = 64  # argument bindings kept per member; past it, "any" (bindings only steer the search)
 _WALK_STEPS = 256  # entries followed per linked list kept in a lookup; the walk only names likely members
-_STORED_ROWS = 256  # key tuples whose stored address is read to list ``caller == E[k...]``; past it, left unlisted
+# Key tuples whose stored address is read to list ``caller == E[k...]``, at most, and never more than half the reads the
+# decision has left; past it the rest are counted, unread (``untested_candidates:<n>``).
+_STORED_ROWS = 2048
 
 
 @dataclass(frozen=True)
@@ -399,8 +401,6 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
             rows = world.entries(load[1], var, len(keys), fields, whole)
             if rows is None:
                 continue
-            if len(rows) > _STORED_ROWS:
-                return None  # read one by one, a crowd's entries would spend the reads the decision needs
             cells = []
             complete = whole
             for row in rows:
@@ -412,22 +412,41 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
                 binding = {k: row[i] for i, k in enumerate(keys) if k in chosen}
                 at = replace_terms(load, {k: mk("const", w, k[2]) for k, w in binding.items()})
                 cells.append((binding, at))
+            # Each entry is a read, sent in batches: as many as half the reads the decision has left (the rest are
+            # its own), at most ``_STORED_ROWS``. The entries past it go unread, and are counted.
+            room = _STORED_ROWS
+            if world.chain.limit is not None:
+                room = min(room, max(0, world.chain.limit - world.chain.sent) // 2)
+            unread = max(0, len(cells) - room)
+            cells = cells[:room]
             anyone = {"caller": FRESH, "signer": FRESH}
-            world.chain.gather(lambda: [Evaluator(world, anyone).eval(at) for _, at in cells])
+            world.chain.gather(lambda: [Evaluator(world, anyone).eval(at) for _, at in cells])  # noqa: B023
             reader = Evaluator(world, anyone)  # reads deferred while gathering were remembered as unknown
             found: dict[int, list[dict]] = {}
+            failed = False
             for binding, at in cells:
+                refused = world.chain.refused
                 value = reader.eval(at)
                 if not isinstance(value, int) or isinstance(value, bool):
-                    complete = False
+                    if world.chain.refused > refused:
+                        unread += 1  # not sent: the budget ran out
+                    else:
+                        failed = True
                     continue
                 if value % 2**160:
                     found.setdefault(value % 2**160, []).append(binding)
             members = {w: _bindings(b) for w, b in found.items()}
-            if complete:
+            if complete and not failed and not unread:
                 return Who(members, sources=frozenset({("lookup", var)}))
-            reason = _unlisted(world, load[1], var)[1] if not whole else f"read_failed:storage:{var}"
-            return _unproven({**members, **{m: b for m, b in _named_members().items() if m not in members}}, reason)
+            reasons = set()
+            if not whole:
+                reasons.add(_unlisted(world, load[1], var)[1])
+            if failed or (whole and not complete):
+                reasons.add(f"read_failed:storage:{var}" if failed else _unlisted(world, load[1], var)[1])
+            if unread:
+                reasons.add(f"untested_candidates:{unread}")
+            guess = _unproven({**members, **{m: b for m, b in _named_members().items() if m not in members}}, "")
+            return replace(guess, why=(guess.why - {""}) | reasons)
         return None
 
     def entries_of(t: Term, positive: bool) -> Who | None:

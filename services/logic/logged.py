@@ -756,8 +756,10 @@ def _may_be_entry(slot: Any) -> bool:
     slot = _strip(slot)
     if _constant(slot):
         return False
+    if isinstance(slot, tuple) and slot and slot[0] == "ite":
+        return _may_be_entry(slot[2]) or _may_be_entry(slot[3])  # one hash or another, by branch
     if isinstance(slot, tuple) and slot[:2] == ("op", "add"):
-        hashes = [_strip(x) for x in slot[2] if _strip(x)[0] == "hash"]
+        hashes = [_strip(x) for x in slot[2] if _hashed_slot(_strip(x))]
         return not hashes or any(_may_be_entry(h) for h in hashes)
     if not (isinstance(slot, tuple) and slot and slot[0] == "hash"):
         return True
@@ -776,6 +778,15 @@ def _may_be_entry(slot: Any) -> bool:
                 return True
             total += width
     return total == 64
+
+
+def _hashed_slot(slot: Any) -> bool:
+    """A hash, or a choice between hashes by branch."""
+    if not (isinstance(slot, tuple) and slot):
+        return False
+    if slot[0] == "ite":
+        return _hashed_slot(_strip(slot[2])) and _hashed_slot(_strip(slot[3]))
+    return slot[0] == "hash"
 
 
 def _shape(slot: Any) -> tuple | None:

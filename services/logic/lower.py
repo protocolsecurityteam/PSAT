@@ -505,20 +505,22 @@ class Exit:
     env: dict | None = None
 
 
-def merge(states: list[State]) -> State:
+def merge(states: list[State], defined: bool = False) -> State:
+    """``defined``: a storage pointer is assigned before it is read on every path (solc >= 0.5 rejects reading one
+    unassigned; a temporary is assigned where it is made), so a branch that never set one never reads it."""
     if len(states) == 1:
         return states[0]
     pc = mk_or([s.pc for s in states])
     return State(
         pc,
-        _merge_maps(states, "env"),
+        _merge_maps(states, "env", defined),
         _merge_store(states),
         _merge_ret(states),
         mem=states[0].mem if all(s.mem == states[0].mem for s in states) else (),
     )
 
 
-def _merge_maps(states: list[Any], attr: str) -> dict:
+def _merge_maps(states: list[Any], attr: str, defined: bool = False) -> dict:
     keys: dict = {}
     for s in states:
         keys.update(dict.fromkeys(getattr(s, attr)))
@@ -526,7 +528,11 @@ def _merge_maps(states: list[Any], attr: str) -> dict:
     for key in keys:
         # A local a branch never set is unset.
         values = [getattr(s, attr).get(key, unknown("unset")) for s in states]
-        if any(isinstance(v, tuple) and v[:1] == ("loc",) for v in values) and len(set(values)) > 1:
+        places = {v for v in values if isinstance(v, tuple) and v[:1] == ("loc",)}
+        if defined and len(places) == 1 and all(v in places or v == unknown("unset") for v in values):
+            out[key] = next(iter(places))  # the branches that never set it never read it
+            continue
+        if places and len(set(values)) > 1:
             # A storage pointer that points at one place or another by branch: not one location (``_write``).
             out[key] = unknown("unsupported:storage_pointer_choice")
             continue
@@ -1169,7 +1175,7 @@ class Lowerer:
             arrived = incoming.pop(id(node), None)
             if not arrived:
                 continue
-            st = merge(arrived)
+            st = merge(arrived, _block_scoped(function) is True)
             self._steps += 1
             arrival.setdefault(id(node), st)
             for target, out in self._step(function, node, st, depth, exits, body):
@@ -1379,12 +1385,7 @@ class Lowerer:
                 if isinstance(origin, StateVariable):
                     out["storage"].add((self.this, origin.name))
                 elif origin is not None and getattr(origin, "is_storage", False):
-                    loc = self._location(origin, st)
-                    if loc is None:
-                        out["everything"] = True
-                    else:
-                        out["storage"].add((loc[0], loc[1]))
-                    pointers.append(origin)
+                    pointers.append(origin)  # where it lands: placed once every pointer the loop moves is known
                 elif origin is not None:
                     local(origin)
                     out["objects"].append(origin)
@@ -1430,7 +1431,7 @@ class Lowerer:
                 if isinstance(ir, SolidityCall):
                     solidity(ir.function.name)
                 elif isinstance(ir, (InternalCall, LibraryCall)) and isinstance(ir.function, Function):
-                    self._callee_effects(ir, st, out, local)
+                    self._callee_effects(ir, st, out, local, pointers)
                 elif isinstance(ir, HighLevelCall):
                     fn = ir.function
                     if not (getattr(fn, "view", False) or getattr(fn, "pure", False)):
@@ -1445,11 +1446,91 @@ class Lowerer:
                     out["calls"] = True
                 elif isinstance(ir, InternalDynamicCall):
                     out["everything"] = out["calls"] = True
-        if any(id(p) in seen_locals for p in pointers):
-            out["everything"] = True  # a storage pointer moved within the loop: where its writes land isn't known
+        for p in {id(p): p for p in pointers}.values():
+            # Writes through a storage reference land in the variable it points into. One the loop moves points, each
+            # time, wherever every assignment of it roots (``no = $.nodeOperators[id]``); anywhere when one doesn't.
+            loc = self._location(p, st) if id(p) not in seen_locals else None
+            places = {loc[:2]} if loc is not None else self._pointer_places(p, nodes, seen_locals, st)
+            if places is None:
+                out["everything"] = True
+            else:
+                out["storage"].update(places)
         return out
 
-    def _callee_effects(self, ir: Any, st: State, out: dict, local: Callable) -> None:
+    def _pointer_places(self, pointer: Any, nodes: list, moved: set, st: State) -> set | None:
+        """The (contract, variable) pairs a storage reference moved within a loop may point into: where it points on
+        entry and what each assignment of it in the loop roots in, a state variable or a reference holding one place
+        throughout. A local whose place on entry isn't one (pointed one way or another by branch) may point wherever
+        any assignment of it in its function roots, since every value it holds was assigned there. ``None`` when some
+        assignment roots elsewhere (another moved reference, a call's returned reference)."""
+        function = getattr(nodes[0], "function", None) if nodes else None
+        held = st.env.get(id(pointer))
+        places: set = set()
+        scope = nodes
+        if isinstance(held, tuple) and held[:1] == ("loc",):
+            places.add(held[1][:2])
+        elif held is not None:
+            if function is None or pointer not in (getattr(function, "local_variables", None) or []):
+                return None
+            if pointer in function.parameters:
+                return None
+            scope = function.nodes
+        for node in scope:
+            for ir in node.irs:
+                if getattr(ir, "lvalue", None) is not pointer:
+                    continue
+                if self._same_each_time(ir):
+                    if not places or not (isinstance(held, tuple) and held[:1] == ("loc",)):
+                        return None
+                    continue
+                if not isinstance(ir, Assignment):
+                    return None
+                source = ir.rvalue
+                origin = getattr(source, "points_to_origin", None) if isinstance(source, ReferenceVariable) else source
+                if isinstance(origin, StateVariable) and not (origin.is_constant or origin.is_immutable):
+                    places.add((self.this, origin.name))
+                    continue
+                place = self._fixed_place(origin, function, st)
+                if place is None:
+                    return None
+                places.add(place)
+        return places
+
+    def _same_each_time(self, ir: Any) -> bool:
+        """A call to a ``pure`` function with only constant arguments: the same value whenever it runs."""
+        callee = getattr(ir, "function", None)
+        return (
+            isinstance(ir, (InternalCall, LibraryCall))
+            and isinstance(callee, Function)
+            and bool(getattr(callee, "pure", False))
+            and all(isinstance(a, Constant) for a in ir.arguments)
+        )
+
+    def _fixed_place(self, var: Any, function: Any, st: State) -> tuple | None:
+        """The (contract, variable) a storage reference points into when it holds one place throughout its function,
+        its place read from ``st``: a parameter or local assigned there only from a ``pure`` call with constant
+        arguments or from another such reference (``$ = _storage()``)."""
+        held = st.env.get(id(var))
+        if var is None or function is None or not (isinstance(held, tuple) and held[:1] == ("loc",)):
+            return None
+        return held[1][:2] if self._held_throughout(var, function, set()) else None
+
+    def _held_throughout(self, var: Any, function: Any, seen: set) -> bool:
+        if id(var) in seen:
+            return True
+        seen.add(id(var))
+        for node in function.nodes:
+            for ir in node.irs:
+                if getattr(ir, "lvalue", None) is not var or self._same_each_time(ir):
+                    continue
+                source = getattr(ir, "rvalue", None) if isinstance(ir, Assignment) else None
+                if source is None or isinstance(source, (ReferenceVariable, StateVariable, Constant)):
+                    return False
+                if not self._held_throughout(source, function, seen):
+                    return False
+        return True
+
+    def _callee_effects(self, ir: Any, st: State, out: dict, local: Callable, pointers: list) -> None:
         """What an internal or library call in a loop may write: the state variables its code writes, what it is handed
         by ``storage`` reference, memory it is handed; and whether it calls out or reads who calls."""
         callee = ir.function
@@ -1492,11 +1573,14 @@ class Lowerer:
         out["caller"] = out["caller"] or caller
         for p, a in zip(callee.parameters, ir.arguments):
             if getattr(p, "location", None) == "storage":
-                loc = self._location(a, st)
-                if loc is None:
-                    out["everything"] = True
+                # Handed a part of storage: the variable it roots in, placed with the loop's own pointers.
+                origin = getattr(a, "points_to_origin", None) if isinstance(a, ReferenceVariable) else a
+                if isinstance(origin, StateVariable) and not (origin.is_constant or origin.is_immutable):
+                    out["storage"].add((self.this, origin.name))
+                elif origin is not None:
+                    pointers.append(origin)
                 else:
-                    out["storage"].add((loc[0], loc[1]))
+                    out["everything"] = True
             elif not isinstance(a, (Constant, StateVariable)) and _reference_typed(getattr(p, "type", None)):
                 local(a)  # memory handed by reference: the callee may write into it
                 out["objects"].append(a)
@@ -3269,7 +3353,7 @@ def _find_continue_target(node: Any) -> Any:
         (
             n
             for n in _loop_nodes_raw(body, ends)
-            if n.type == NodeType.EXPRESSION and (s := _span(n)) and s[0] < begins[0] and innermost(s[0]) is loop
+            if n.type == NodeType.EXPRESSION and (s := _span(n)) and s[1] <= begins[0] and innermost(s[0]) is loop
         ),
         key=lambda n: _span(n)[0],
     )

@@ -252,6 +252,10 @@ Found while working, not in the before table:
 | A53 | ``ecrecover(h, v, r, s)`` evaluated as the signer identity whatever digest and signature it is handed: a signature of another digest still "recovers" the sender | OPEN (found 2026-10-24) | ``test_constructs`` (``recovered-2``, strict xfail) |
 | A54 | ``sha256`` of known bytes evaluates unknown with no label (neither computed nor rejected by name) | OPEN (found 2026-10-24) | ``test_constructs`` (``hashed``, strict xfail) |
 | A55 | ``super.transfer`` into the next body of the linearization (solc 0.4.19 ``LinkToken.transferAndCall``) lowers the base's balance check without the amount (``0 <= balances[caller]``): a pass where the chain reverts | OPEN (found 2026-10-24) | ``test_lower_shapes::test_super_runs_the_next_body_in_the_deployed_contracts_order`` (strict xfail) |
+| A56 | storage written inside a loop through a reference whose place moves (a pointer reassigned each iteration, ``Op storage o = $.ops[ids[i]]``; a part of storage handed to an internal function; a temporary holding a ``pure`` getter's pointer) marked every write of the contract lost (``Lowerer.lost``): no lookup of the contract was ever shown logged, so no holder list built from events was ever whole (Lido CSModule v3, 2026-10-26) | HANDLED: ``_loop_effects`` places each such write in the variable the reference roots in: a state variable, or a reference holding one place throughout its function (a parameter, or assigned only from a ``pure`` call with constant arguments or another such reference: ``_fixed_place``); a pointer the loop moves, wherever each of its assignments in the loop roots, and where its place on entry is a choice by branch, wherever each of its assignments in its function roots (``_pointer_places``). Anything else still marks everything | ``test_chosen_key_crowd`` (``Moved``, ``Handed``) |
+| A57 | a storage pointer set on one branch and unset on the other merged into ``unsupported:storage_pointer_choice`` (its writes lost) | HANDLED for solc >= 0.5 (a storage pointer is assigned before it is read; a temporary where it is made): the branch that never set it never reads it, so the merge keeps the one place (``merge(defined=True)``); before 0.5 an unassigned storage pointer points at slot 0, and the choice stays | ``test_chosen_key_crowd`` (``Handed``) |
+| A58 | ``continue`` in a ``for`` loop whose body opens with a tuple declaration: Slither's tuple statement starts a byte before the body's first node, so it was taken for a second increment and the loop "couldn't be told apart" (``unsupported:continue``, writes lost) | HANDLED: an increment lies wholly before the body (its span ends before the body begins) | ``test_chosen_key_crowd`` (``Continued``) |
+| A59 | an assembly ``sstore`` at ``add(c ? keccak256(96 bytes) : keccak256(96 bytes), k)`` read as a write that may land on any mapping's entry, so no lookup of the contract was logged | HANDLED: ``logged._may_be_entry`` reads a choice between hashes by branch as either hash; neither of 96 bytes is an entry (``keccak256(key . slot)`` is 64) | ``test_chosen_key_crowd`` (``Keyed``) |
 
 ### KNOWN GAPS (open, documented 2026-10-24; reviewer probes in ``scratchpad/probe_audit4/``)
 
@@ -543,6 +547,13 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   ``test_a_proven_list_keeps_the_whole_budget``). On Maple ``Pool.redeem`` (0x356b8d89, 3,335 hints from
   ``callee_code_list``, cache-only run) reads went from 2,003 to 402, decision time 40 s to 19 s, verdict unchanged
   (not determined), ``untested_candidates:3334`` (the first candidate's own search spends the 300).
+* Entries read to list ``caller == E[k]`` at keys the caller picks (``holders._STORED_ROWS``, 2,048): every key tuple
+  the logged writes name is an entry whose stored address is read, in batches, up to half the reads the decision has
+  left and at most 2,048; the entries past that, and any whose read the budget refused, are counted
+  (``untested_candidates:<n>``, summed with the candidates left unasked) and the list is not complete. It was a flat
+  256 past which nothing was listed (Lido CSModule's 295 node operators: no reward address listed, 276 now)
+  (``test_chosen_key_crowd::test_entries_past_the_read_budget_are_counted_untested``: listed and untested are every
+  manager, none undecided).
 * Reads per function: ``verdict.READS_PER_FUNCTION`` (2,000), lowered where a cap on all the reads a chain may send is
   supplied (``function_verdict(read_cap=...)``, else the ``PSAT_LOGIC_READ_CAP`` environment variable, both counted
   against ``chain.sent``) to ``READ_CAP_SHARE`` (a quarter) of what is left of it (``verdict.function_reads``), so one
