@@ -18,6 +18,29 @@ we know. The answer must be
   set of callers than the code admits, never a list called complete that is not. Budgets change how much is
   materialised, never what is claimed.
 
+## 1.1 The engine boundary
+
+The engine is five functions from inputs to values, run per entry point, with no knowledge of other functions, of
+time, of labels, or of the node. Everything else is a consumer of its row (§3) or a provider of its inputs.
+
+1. **Resolve** — which code runs at the address (proxies followed, `deployment.py`), its immutables and constants.
+2. **Lower** — the formula (§2.1), following callees whose code can be read.
+3. **Split** — the who / argument / state parts and the write set (§2.2).
+4. **Enumerate** — for each identity-keyed read in the who part, the keys: from the storage dump (accounting, §4.1)
+   first and from writers' events for preimages the accounting cannot reconstruct, bounded by `LIST_LIMIT`.
+5. **Evaluate** — the who part per candidate, with completeness as the count of unexplained slots per mapping.
+
+Outside the engine, by design:
+
+* **Composition** (§2.3) — a join over rows: it needs every function's formula and write set, so it is one pass over
+  the table of rows in the map layer, not a step of the engine.
+* **Openness labels** (§3.1) — derived by consumers from the row.
+* **Validation** (§2.4) — the harness and the oracle tests.
+* **Chain transport** — batching, throttling, caching, timeouts and the one re-ask live in the clients layer and the
+  harness; the engine receives a read function (`word(address, slot)`, `call(address, data)`, `dump(address)`,
+  `logs(address, topics)`) and asks.
+* **Taint tracking** and the **report module** — the first fed hedges that no longer exist; the second is presentation.
+
 ## 2. The three stages
 
 ### 2.1 Formula
@@ -66,7 +89,7 @@ Signer identities: a `signer` in the who part is an identity like `caller`. A wh
 be relayed). `signer == arg` yields "any account, for itself". The zero address is in the signer's domain (a
 non-recovering signature); a who part satisfied by `signer == 0` is satisfied by anyone.
 
-### 2.3 Composition of state
+### 2.3 Composition of state (map layer, not engine)
 
 A state condition reads storage that other functions write. For each storage variable in a state condition, the map
 already has the write set of every function and each writer's own formula. Composition substitutes:
@@ -146,12 +169,12 @@ undecided          [ (address, term) ]
 crowd              [ (mapping, key_count) ]            when not materialised
 arguments          [ printed conjuncts ]                what the call must carry
 state              [ (variable, value_at_block, holds: bool) ]
-composition        [ (variable, writers: [(function, principals, complete)], depth, stopped: reason|None) ]
-gaps               [ names from §5 ]            (no field for validation: §2.4)
-openness           open | restricted | not_verified | not_determined   derived (§3.1)
+writes             [ (variable, key kind: caller | argument | fixed) ]   the write set, for composition (§2.3)
+gaps               [ names from §5 ]            (no field for validation or composition)
+(openness is not a row field: consumers derive it, §3.1)
 ```
 
-### 3.1 Derived openness
+### 3.1 Derived openness (consumer-side; not an engine field)
 
 * `open` — the who part is a tautology (no identity conjunct, or one every address satisfies, `signer == 0`
   included), and no gap of §5 class A is present.
@@ -227,7 +250,9 @@ openness.
 
 ## 8. Removed from the engine
 
-The following have no role and are deleted, with their tests: the five keyed strangers and `strangers_run`;
+The following have no role and are deleted, with their tests: `taint.py`; `report.py` (its label derivation moves to
+the consumer); the chain reader's batching, throttling, retry and memo logic (moved to the clients layer; the engine
+keeps only the read-function interface); the five keyed strangers and `strangers_run`;
 `_confirmed_open`, `_alike_for_strangers`, the `witnessed` flag and "open_*_unconfirmed" gaps; arranged/after
 journeys, state overrides, `_decide_arranged`, `_state_blocked`, `_after_runs`, `_brought_runs`, `allowed`
 now/later/conditional, `requires`, the `conditions` dictionary (business, holdings, arguments); `_opaque_conditions`
@@ -256,11 +281,13 @@ detection (`_delegate_ops`) needs it to recognise delegating code; batch retry b
 ## 10. Phases
 
 1. **Classify and freeze.** INVENTORY.md (KEEP/ADAPT/REMOVE per function, field, constant, gap, test). Commit.
-2. **Record and vocabulary.** New `Verdict` per §3, gap set per §5, consumers (`report.py`,
-   `logic_run_passes.py`, harness) adapted. Old fields removed. Commit; suite re-pointed.
+2. **Record and vocabulary.** New row record per §3 (no openness, no composition, no check), gap set per §5,
+   consumers (`logic_run_passes.py`, harness; openness derived there) adapted. Old fields removed. Commit; suite
+   re-pointed.
 3. **List.** Candidates from dump + history only; composite-key accounting; completeness per §2.2.3; crowds.
    Remove hint lists and the callee-code rule. Commit; sweep green.
-4. **Composition.** Replace arranged/after/state-blocked with §2.3. Commit; `test_composition` green.
+4. **Composition in the map layer.** Delete arranged/after/state-blocked from the engine; implement §2.3 as a pass
+   over rows (scripts or the map's DB layer) with `test_composition`. Commit.
 5. **Validation out.** Remove strangers and confirmation from the engine; move the replay into the harness
    (`corpus_parity`) and `test_validation` (a deliberately mis-lowered callee makes the harness report a
    disagreement, and the engine's row is unchanged). Remove witnessed/proven. Commit.
