@@ -40,6 +40,7 @@ from .terms import (
     IDENTITY_KINDS,
     TRUE,
     Term,
+    abi_array,
     cheapest_first,
     conjuncts,
     contains,
@@ -1379,6 +1380,17 @@ class Evaluator:
             return 32  # what an arranged call returns: a standard success, one word (``true``)
         if kind in ("elem", "len", "calldatasize") and (t[1] == CALLDATA or kind == "calldatasize"):
             return self._own_data(t)
+        if kind == "elem" and t[1][0] == "abi":
+            # An item of a fixed-size array a call returned, at a key the lowering couldn't place: the item of the
+            # decoded data one step down, at the key's value here (``lower.abi_element`` for a constant key).
+            shape, key = abi_array(t[1][4]), self.eval(t[2])
+            if shape is None or not isinstance(key, int) or isinstance(key, bool) or t[1][1][0] != "call":
+                return UNK
+            inner, length = shape
+            if not 0 <= key < length:
+                return REVERTED  # out of range, as the bound the lowering put on the path says
+            picked = mk("abi", t[1][1], t[1][2], (*t[1][3], key), inner)
+            return self._call(picked[1], picked[3][0], picked) if _abi_word(inner) else UNK
         if kind in _FREE_KINDS:
             return self.assignment.get(t, UNK) if _caller_chosen(t) else UNK
         if kind == "time":

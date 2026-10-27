@@ -31,6 +31,7 @@ many branches small: ``(P and c) or (P and not c)`` is ``P``.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 
@@ -593,6 +594,13 @@ def returned_part(values: tuple, path: tuple, leaf: str | None = None) -> Any:
         else:
             return None
     return value
+
+
+def abi_array(abi: str) -> tuple[str, int] | None:
+    """The item type and length of a fixed-size array's ABI type (``uint256[2]``, ``(uint64,bytes4)[2]``,
+    ``uint256[2][3]`` an array of three ``uint256[2]``), ``None`` for any other type."""
+    found = re.fullmatch(r"(.+)\[(\d+)\]", abi)
+    return (found.group(1), int(found.group(2))) if found is not None else None
 
 
 def _rebuild(kind: str, parts: list) -> Any:

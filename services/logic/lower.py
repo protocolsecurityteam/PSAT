@@ -77,6 +77,7 @@ from .terms import (
     THIS,
     TRUE,
     Term,
+    abi_array,
     const,
     contains,
     mk,
@@ -795,7 +796,25 @@ def element(container: Term, key: Term, zero: Term | None = None) -> Term:
         return mk_ite(hit, inner, element(container[1], key, zero))
     if kind == "const" and container[1] == 0:
         return zero if zero is not None else const(0)
+    if kind == "abi":
+        picked = abi_element(container, key)
+        if picked is not None:
+            return picked
     return mk("elem", container, key)
+
+
+def abi_element(container: Term, key: Term) -> Term | None:
+    """Item ``key`` of a fixed-size array a call returned, in place in its ABI-decoded return data
+    (``("abi", call, returns, path, "T[n]")``): the item at the path one step longer, of type ``T``, where ``key`` is
+    a constant (out of range, ``unknown``). ``None`` for a key the lowering can't place (an argument: the evaluator
+    reads it at a value, ``Evaluator.eval``) or a container of any other type."""
+    shape = abi_array(container[4]) if container[0] == "abi" else None
+    if shape is None or key[0] != "const" or not isinstance(key[1], int) or isinstance(key[1], bool):
+        return None
+    inner, length = shape
+    if not 0 <= key[1] < length:
+        return unknown("out_of_bounds")
+    return mk("abi", container[1], container[2], (*container[3], key[1]), inner)
 
 
 @_shared
@@ -836,6 +855,8 @@ def length_of(container: Term) -> Term | None:
         return mk("load", container[1], container[2], (*container[3], ("f", "length")))
     if kind == "const" and container[1] == 0:
         return const(0)
+    if kind == "abi" and abi_array(container[4]) is not None:
+        return const(abi_array(container[4])[1])  # a fixed-size array a call returned: its declared length
     return mk("len", container)
 
 

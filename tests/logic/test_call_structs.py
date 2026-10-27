@@ -125,8 +125,8 @@ def test_the_verdict_lists_the_identity_a_returned_struct_names(d, name):
 # Widths and alignment: every field type a struct can hold in place, in an all-static struct (one word each, where a
 # word-indexed reading took the raw word: a ``bytes4`` sits left-aligned in it, a signed field sign-extended) and in
 # one beside a dynamic field; nested structs, fixed arrays of structs and of words (indexed by a constant and by an
-# argument: the next commit), a struct at the second of several return positions, beside a ``bytes`` return, and one
-# the callee builds from its argument. Each reading is compared with ``eth_call``, the callee followed and not.
+# argument), a struct at the second of several return positions, beside a ``bytes`` return, and one the callee builds
+# from its argument. Each reading is compared with ``eth_call``, the callee followed and not.
 WIDTHS = """
 pragma solidity 0.8.27;
 
@@ -262,7 +262,13 @@ WIDTH_CASES = [
     ("flatN", (99,), True), ("flatN", (98,), False),
     ("flatD", (-7,), True), ("flatD", (7,), False),
     ("flatOk", (True,), True), ("flatOk", (False,), False),
+    ("arrSel", (bytes.fromhex("22222222"),), True), ("arrSel", (bytes.fromhex("11111111"),), False),
+    ("arrA", (2,), True), ("arrA", (1,), False),
     ("arrN", (5,), True), ("arrN", (4,), False),
+    ("fixedXs", (4,), True), ("fixedXs", (3,), False),
+    ("fixedXsAt", (1, 4), True), ("fixedXsAt", (0, 4), False), ("fixedXsAt", (0, 3), True),
+    ("fixedXsAt", (2, 0), False),  # out of range: the bound on the path, as the chain's Panic 0x32
+    ("fixedXsLen", (2,), True), ("fixedXsLen", (3,), False),
     ("dynFirstNonce", (7,), True), ("dynFirstNonce", (32,), False), ("dynFirstNonce", (64,), False),
     ("twoDynB", (2,), True), ("twoDynB", (1,), False),
     ("wB1", (b"\xab",), True), ("wB1", (b"\x00",), False), ("wB1", (b"\xac",), False),
@@ -304,7 +310,7 @@ PROBES.append(
         WIDTHS,
         _widths,
         tuple(("C", name, ("Oracle",)) for name in IDENTITY_FIELDS)
-        + tuple(("C", name, f) for name in ("notSel", "isSel") for f in ((), ("Oracle",))),
+        + tuple(("C", name, f) for name in ("notSel", "isSel", "xsGate") for f in ((), ("Oracle",))),
     )
 )
 
@@ -354,7 +360,7 @@ def test_a_bytes4_gate_nobody_meets_is_never_open(w, followed):
     assert v.openness != "open", v
 
 
-@pytest.mark.parametrize("name", ["isSel"])
+@pytest.mark.parametrize("name", ["isSel", "xsGate"])
 @pytest.mark.parametrize("followed", [True, False], ids=["followed", "unfollowed"])
 def test_a_gate_on_a_decoded_field_everyone_meets_is_open(w, name, followed):
     v = O.verdict(w, "C", name, *(("Oracle",) if followed else ()))
