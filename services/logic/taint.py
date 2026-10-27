@@ -75,6 +75,11 @@ def split(formula: Term) -> tuple[tuple[Term, ...], tuple[Term, ...]]:
     return tuple(c for c in parts if tainted(c)), tuple(c for c in parts if not tainted(c))
 
 
+# The labels of the unknowns ``verdict.bind_callers`` puts in place of a view call it keeps from being read as the
+# same for everyone: each stands for code not followed, whatever the gap it makes is named.
+CALL_STAND_INS = ("origin:", "unfollowed:", "read_failed:call_target:", "unknown:call_target:")
+
+
 def unknown_gap(label: Any) -> str:
     """An unknown's label as a gap: ``unknown:<label>``, but a call ``verdict`` kept from being read as the same for
     everyone by its own name (``origin:<sig>``, ``unfollowed:<sig>``, ``read_failed:call_target:<sig>``,

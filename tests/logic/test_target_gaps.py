@@ -58,7 +58,37 @@ def _setup(d):
     d.deploy("C", ("address",), (d.at["Reg"],))
 
 
-PROBES = [O.Probe(SOURCE, _setup, (("C", "byArg", ()), ("C", "viewByArg", ())))]
+PICKY = """
+pragma solidity 0.8.27;
+
+interface IToken { function ok(address who) external view returns (bool); }
+
+// Lets the deployer's transactions through and nobody else's, whoever hands it what.
+contract OriginTok {
+    address admin;
+    constructor() { admin = msg.sender; }
+    function ok(address) external view returns (bool) { return tx.origin == admin; }
+}
+
+contract Picky {
+    mapping(address => bool) approved;
+    uint256 x;
+    constructor(address t) { approved[t] = true; }
+    // Truth: only the admin's transactions pass, with the one approved token.
+    function approvedOnly(address t) external { require(approved[t]); require(IToken(t).ok(address(0))); x = 1; }
+}
+"""
+
+
+def _setup_picky(d):
+    d.deploy("OriginTok")
+    d.deploy("Picky", ("address",), (d.at["OriginTok"],))
+
+
+PROBES = [
+    O.Probe(SOURCE, _setup, (("C", "byArg", ()), ("C", "viewByArg", ()))),
+    O.Probe(PICKY, _setup_picky, (("Picky", "approvedOnly", ()),)),
+]
 
 
 @pytest.fixture(scope="module")
@@ -86,8 +116,11 @@ def test_a_target_the_caller_picks_is_no_failed_read(d):
 
 
 def test_a_view_target_the_caller_picks_is_no_failed_read(d):
+    # Not determined, as before the relabelling: whoever is at the address the caller names may read ``tx.origin``,
+    # so the call is never a condition every caller faces alike (``decide._rests_on_code_not_followed``).
     v = O.check(d, "C", "viewByArg", O.verdict(d, "C", "viewByArg"))
-    assert "conditional:unknown:target:argument:ok(address)" in v.gaps
+    assert v.openness == "not_determined" and "unknown:target:argument:ok(address)" in v.gaps, v
+    assert not any(g.startswith("conditional:") for g in v.gaps), v.gaps
     _no_failed_read(v)
 
 
@@ -112,3 +145,29 @@ def test_a_target_whose_storage_read_fails_is_a_failed_read(d):
         assert set(gaps) <= set(v.gaps), v.gaps
         assert not any(g.startswith(("unknown:target:", "unknown:call_target:")) for g in v.gaps), v.gaps
         O.never_bolder(clean, v)
+
+
+@pytest.fixture(scope="module")
+def picky(anvil):  # noqa: F811
+    d = O.deployment(*anvil, PICKY)
+    _setup_picky(d)
+    return d
+
+
+def test_only_the_admin_passes_the_approved_origin_reading_token(picky):
+    d = picky
+    fn = O.function(d, "Picky", "approvedOnly")
+    args = {"t": d.at["OriginTok"]}
+    assert O.passes(d, "Picky", fn, args, sender=O.OWNER)
+    assert not any(O.passes(d, "Picky", fn, args, sender=w) for w in (*O.STRANGERS, *O.UNSEEN[:4], *O.ACCOUNTS[1:]))
+
+
+def test_an_unfollowed_callee_the_caller_picks_is_never_an_opaque_condition(picky):
+    """Round ten-c, probe q5: with its gap relabelled ``unknown:target:argument:<sig>``, a call to an address the
+    caller names passed ``_opaque_conditions``' prefix test and a function only the admin ever passes read "open,
+    conditional". The rule is on the terms: code not followed may read ``tx.origin``, whatever the label."""
+    d = picky
+    v = O.verdict(d, "Picky", "approvedOnly")
+    O.check(d, "Picky", "approvedOnly", v, open_at=False, samples=({"t": d.at["OriginTok"]},))
+    assert v.openness == "not_determined", v
+    assert "unknown:target:argument:ok(address)" in v.gaps and not any(g.startswith("conditional:") for g in v.gaps), v

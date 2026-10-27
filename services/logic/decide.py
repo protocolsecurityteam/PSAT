@@ -32,7 +32,7 @@ from typing import Any, cast
 from eth_abi.abi import decode, encode
 from eth_utils.crypto import keccak
 
-from .taint import singles_out_nobody, split, tainted, unknown_gap, unknown_labels
+from .taint import CALL_STAND_INS, singles_out_nobody, split, tainted, unknown_gap, unknown_labels
 from .terms import (
     _EXACT,
     CALLDATA,
@@ -2476,19 +2476,48 @@ def _opaque_conditions(free: tuple[Term, ...], world: World, failed: int) -> lis
     """The conjuncts every caller faces alike that read unknown now only for what the lowering couldn't express,
     here or in a callee followed into: none once any read of the decision failed (``failed``: the chain's count when
     it began) or the work or the reads ran out, where the whole formula's answer stands. A callee not followed is
-    never one: its code may read ``tx.origin``, which every callee sees as the caller's."""
+    never one, whatever its gap is labelled: its code may read ``tx.origin``, which every callee sees as the
+    caller's. That is decided on the terms (``_rests_on_code_not_followed``): a call whose target no read gives (an
+    argument the caller picks, another call's result), one whose callee isn't followed or lies deeper than followed,
+    or an unknown standing in for such a call (``verdict.bind_callers``)."""
     chain = world.chain
     if world.exhausted() or chain.failed > failed or (chain.limit is not None and chain.sent >= chain.limit):
         return []
     probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
     out = []
     for part in free:
-        if probe.truth(part) is not UNK:
+        if probe.truth(part) is not UNK or _rests_on_code_not_followed(part, probe):
             continue
         reasons = _open_parts(part, probe)
         if reasons and all(r.startswith("unknown:") for r in reasons):
             out.append(part)
     return out
+
+
+def _rests_on_code_not_followed(atom: Term, probe: "Evaluator", depth: int = 0) -> bool:
+    """Whether what leaves ``atom`` unknown includes code the engine didn't follow: a call whose target is no address
+    a read gives, one left unknown whose callee isn't followed or lies past ``IDENTITY_DEPTH``, or such a call inside
+    a followed callee's own condition; an unknown that stands in for a view call kept from being read alike
+    (``taint.CALL_STAND_INS``). A call the chain answered rests on nothing further: ``verdict.bind_callers`` has
+    already kept any not answered alike for everyone from being read."""
+    if any(str(u[1]).startswith(CALL_STAND_INS) for u in subterms(atom, "unknown")):
+        return True
+    for call in subterms(atom, "call"):
+        address = probe.eval(call[1])
+        if not isinstance(address, int) or isinstance(address, bool):
+            return True
+        if probe.eval(call) is not UNK:
+            continue
+        lowered = probe.world.callee(call, address % 2**160)
+        if lowered is None or depth >= IDENTITY_DEPTH:
+            return True
+        if any(
+            _rests_on_code_not_followed(part, probe, depth + 1)
+            for part in (lowered[0], *lowered[1])
+            if isinstance(part, tuple) and part and isinstance(part[0], str)
+        ):
+            return True
+    return False
 
 
 def _on_conditions(formula: Term, world: World, coverage: Coverage, opaque: list[Term]) -> Verdict | None:

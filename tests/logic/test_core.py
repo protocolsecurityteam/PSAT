@@ -133,12 +133,15 @@ def test_a_screen_beside_an_unknown_is_open_only_on_it(d):
 
 
 def test_a_pause_still_holds_everyone_back_now(d):
+    def unpause(d):
+        assert O.transact(d, "C", "pause(bool)", ("bool",), (False,))
+
     with O.snapshot(d):
         assert O.transact(d, "C", "pause(bool)", ("bool",), (True,))
-        v = O.check(d, "C", "pausableGas", O.verdict(d, "C", "pausableGas"), open_at=False, samples=({"x": 1},))
+        v = O.verdict(d, "C", "pausableGas")
+        # Open later, on the gas condition set aside: ``check`` verifies the state unpausing brings about.
+        O.check(d, "C", "pausableGas", v, open_at=False, samples=({"x": 1},), later=unpause)
         assert v.openness == "open" and v.allowed in ("later", "later_conditional")
-        assert O.transact(d, "C", "pause(bool)", ("bool",), (False,))
-        assert O.strangers_passing(d, "C", O.function(d, "C", "pausableGas"), {"x": 1}) == {True}
 
 
 def test_a_call_handed_the_caller_stays_undecided(d):

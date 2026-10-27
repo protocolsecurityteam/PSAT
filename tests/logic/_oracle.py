@@ -314,9 +314,11 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
     deposit, a request, coming to hold what ``requires`` names), run with the verdict's own ``after`` calls before
     that stranger's call; ``open_at``: arguments at which, so arranged, every stranger passes (the verdict must then
     be "open"; checked whatever the verdict), or ``False`` where none can now. With ``open_at=False`` the verdict is
-    never "open later" either unless ``later(d)`` says how a state comes about in which every stranger passes (the
-    owner unpausing): "open later" claims such a state is reachable, so it is checked there, each stranger's call at
-    each of ``samples`` until one passes for all (its own ``after`` calls made first, then at its witness or a sample).
+    never "open later", nor open only on conditions set aside (``conditional``, ``later_conditional``), either unless
+    ``later(d)`` says how a state comes about in which every stranger passes (the owner unpausing, the condition set
+    aside coming to hold): each such open claims such a state is reachable, so it is checked there, each stranger's
+    call at each of ``samples`` until one passes for all (its own ``after`` calls made first, then at its witness or
+    a sample).
     An "open now" verdict is checked at its own witness unless ``open_at`` is given. ``holders_after(d)``: what has to
     happen first for the listed holders to pass where the verdict lists them on a condition closed now (the owner
     turning it on, code coming to be at an address), run before their calls. ``open_proven``: ``True`` where the
@@ -358,7 +360,10 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
                 assert passes(d, where, fn, own, sender=who), (name, hex(who), own, v)
     if open_at is False:
         assert not (v.openness == "open" and v.allowed == "now"), (name, v)
-        claimed = v.openness == "open" and v.allowed == "later"  # on conditions set aside, it claims none
+        # "Open later" and an open only on conditions set aside each claim a state in which every stranger passes
+        # (round ten-c: a conditional open went unverified here, and a caller-picked callee reading ``tx.origin``
+        # read "open, conditional" past 20k tests).
+        claimed = v.openness == "open"
         assert not claimed or later is not None, (name, "no state the probe knows lets a stranger through", v)
         if claimed and later is not None:
             with snapshot(d):
