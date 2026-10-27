@@ -48,7 +48,9 @@ BUDGETS = {
     "UNPROVEN_CANDIDATES": ((D,), (0, 1)),
     "UNPROVEN_READS": ((D,), (0, 2)),
     "UNPROVEN_BATCH": ((D,), (1,)),  # a size: never zero
-    "_EXECUTED_CANDIDATES": ((D, V), (0, 1)),
+    # One is no longer tight: past the first, every candidate's call is run again without the search
+    # (``_run_rest``, swept as ``_RUN_CANDIDATES``), and no registered candidate needs a search of its own.
+    "_EXECUTED_CANDIDATES": ((D, V), (0,)),
     "_PRIOR_WRITERS": ((V,), (0, 1)),
     "ARRANGE_WORK": ((V,), (0, 0.5)),
     "LOG_CALLS": ((D,), (0,)),  # one window spans anvil's whole history: a cap of one cuts no scan
@@ -65,6 +67,7 @@ BUDGETS = {
 # The other constants that bound work, swept over a sample of probes: (modules that read it, tight value).
 SAMPLED = {
     "_EARLY_GUESSES": ((D,), 1),
+    "_RUN_CANDIDATES": ((D,), 0),
     "LOG_WINDOW": ((D,), 16),
     "LOG_SECONDS": ((D, V), 0.0),  # read by name into ``verdict``: set where it is read
     "LOG_TOTAL_SECONDS": ((D, V), 0.0),
@@ -116,6 +119,7 @@ _SAMPLE = 20  # probes per sampled constant, seeded by its name
 # A probe each sampled constant is known to cut (module, index, contract, function), always in its sample: the
 # vacuity guard then needn't scan the registry for it. Measured 2026-10-24; a stale one costs only that scan.
 KNOWN_CUT = {
+    "_RUN_CANDIDATES": ("test_executed_holders", 0, "Master", "configureMinter"),
     "_EARLY_GUESSES": ("test_abi_encode_types", 1, "Seeded", "wN8neg"),
     "LOG_SECONDS": ("test_arranged", 2, "Roles", "grantRole"),
     "LOG_TOTAL_SECONDS": ("test_arranged", 2, "Roles", "grantRole"),

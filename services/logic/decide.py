@@ -2961,6 +2961,10 @@ def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict
                 passes["caller"].add(candidate)
                 witnesses[candidate] = found_args
                 undecided.discard(candidate)
+        for candidate, found_args in _run_rest(world, sorted(undecided - passes["caller"]), witnesses).items():
+            passes["caller"].add(candidate)
+            witnesses[candidate] = found_args
+            undecided.discard(candidate)
         # Those listed on who they are alone: a call of theirs that goes through on the chain shows it exactly.
         for candidate in sorted(conditions)[:_EXECUTED_CANDIDATES]:
             found_args = _executes(formula, world, candidate, candidates)
@@ -2968,6 +2972,10 @@ def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict
                 passes["caller"].add(candidate)
                 witnesses[candidate] = found_args
                 del conditions[candidate]
+        for candidate, found_args in _run_rest(world, sorted(conditions), witnesses).items():
+            passes["caller"].add(candidate)
+            witnesses[candidate] = found_args
+            del conditions[candidate]
     elif now_index is not None and fresh[now_index] is UNK:
         # Whether a stranger passes is unknown, so none is singled out; a candidate left undecided whose own call
         # goes through on the chain still holds the power (a pass only a callee's code showed, confirmed).
@@ -2977,6 +2985,10 @@ def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict
                 known["caller"].add(candidate)
                 witnesses[candidate] = found_args
                 undecided.discard(candidate)
+        for candidate, found_args in _run_rest(world, sorted(undecided - known["caller"]), witnesses).items():
+            known["caller"].add(candidate)
+            witnesses[candidate] = found_args
+            undecided.discard(candidate)
     if limited:
         if world.chain.sent >= world.chain.limit:
             gaps.append("budget:unproven_reads")
@@ -3468,24 +3480,13 @@ def _acts_once_allowed(
 
 
 _EXECUTED_CANDIDATES = 8  # undecided candidates per function whose call is run on the chain
+# Past those, candidates per function whose call is run once more cheaply: at the arguments already found for it (or
+# all zero), every such call in one batch.
+_RUN_CANDIDATES = 256
 
 
-def _executes(
-    formula: Term,
-    world: World,
-    candidate: int,
-    candidates: set,
-    tries: int | None = None,
-    unanswered: list | None = None,
-) -> dict[str, Any] | None:
-    """The arguments with which a call from ``candidate`` returns when the chain runs it (``eth_call``), else
-    ``None``: guesses from the search with the conditions the engine can't settle left free, then all zero; the
-    first ``tries`` of them only, when given. A guess sending ether is sent it (``Chain.call_value``), and a payable
-    function is also tried sending one wei. Each call the node didn't answer (a failed read, refused overrides,
-    unknown arguments) is appended to ``unanswered``: no refusal."""
-    identity = {"caller": candidate, "signer": FRESH}
-    found: dict[Term, Any] = {}
-    # Plausible values besides: an amount of one, a flag set, the candidate's own address, a short name.
+def _plausible(world: World, candidate: int) -> dict[Term, Any]:
+    """Plausible arguments for ``candidate``'s call: an amount of one, a flag set, its own address, a short name."""
     plausible = {}
     for parameter in world.parameters:
         if parameter[0] != "arg":
@@ -3504,6 +3505,46 @@ def _executes(
             if type_.endswith("[]")
             else 0
         )
+    return plausible
+
+
+def _run_rest(world: World, rest: list[int], witnesses: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Of ``rest`` (the candidates ``_executes`` left unsettled or never reached), the first ``_RUN_CANDIDATES``
+    whose own call goes through on the chain as it stands: candidate -> the arguments it went through with. Tried at
+    the arguments found for it (``witnesses``), all zero and the plausible ones (``_plausible``), without the search
+    ``_executes`` makes: one ``eth_call`` per candidate and guess, each guess's calls asked in one batch. A call
+    refused or unanswered settles nothing, so whoever is left out stays as the reasoning left them."""
+    rest = rest[:_RUN_CANDIDATES]
+    guesses: dict[int, list[dict[str, Any]]] = {}
+    for c in rest:
+        tried = [witnesses.get(c, {}), {}, _argument_values(_plausible(world, c))]
+        guesses[c] = [g for i, g in enumerate(tried) if g not in tried[:i]]
+    out: dict[int, dict[str, Any]] = {}
+    for step in range(3):
+        todo = [c for c in rest if c not in out and step < len(guesses[c])]
+        if not todo:
+            break
+        world.chain.gather(lambda: [runs(world, c, guesses[c][step]) for c in todo], rounds=1)  # noqa: B023
+        out.update({c: guesses[c][step] for c in todo if runs(world, c, guesses[c][step]) is True})
+    return out
+
+
+def _executes(
+    formula: Term,
+    world: World,
+    candidate: int,
+    candidates: set,
+    tries: int | None = None,
+    unanswered: list | None = None,
+) -> dict[str, Any] | None:
+    """The arguments with which a call from ``candidate`` returns when the chain runs it (``eth_call``), else
+    ``None``: guesses from the search with the conditions the engine can't settle left free, then all zero; the
+    first ``tries`` of them only, when given. A guess sending ether is sent it (``Chain.call_value``), and a payable
+    function is also tried sending one wei. Each call the node didn't answer (a failed read, refused overrides,
+    unknown arguments) is appended to ``unanswered``: no refusal."""
+    identity = {"caller": candidate, "signer": FRESH}
+    found: dict[Term, Any] = {}
+    plausible = _plausible(world, candidate)
     guesses = [{}, plausible]
     if _outcome(formula, world, identity, candidates, relaxed=True, witness=found) is True and found:
         guesses.insert(0, {**plausible, **found})
