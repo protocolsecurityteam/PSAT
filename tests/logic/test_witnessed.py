@@ -174,6 +174,7 @@ def _v(openness, witnessed=False, allowed="now", complete=True):
         principals=frozenset(),
         signers=frozenset(),
         conditions={},
+        requires=(),
     )
 
 

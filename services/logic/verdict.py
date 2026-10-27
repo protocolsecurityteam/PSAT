@@ -1844,6 +1844,12 @@ def function_verdict(
     selector = int.from_bytes(keccak(text=function.solidity_signature)[:4], "big")
     world = World(chain, address, selector, contracts, dict(values or {}), _address_literals(contract))
     world.effective = lowerer.effective
+    marks = {k[1] for e in lowerer.exits for k in e.store if k[0] == "act" and k[1][0] == "assumed"}
+    world.assumed = {
+        m: bool(lowerer.action_inputs.get(m))
+        and all(any(contains(x, _CHOSEN) for x in made) for made in lowerer.action_inputs[m])
+        for m in marks
+    }
     world.confirm_left = CONFIRM_READS
     world.written = lowerer.written
     world.parameters = tuple(parameter(p, i) for i, p in enumerate(function.parameters))

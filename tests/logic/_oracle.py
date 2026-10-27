@@ -440,7 +440,8 @@ def sound(v: Any, truth: set[int] | None = None, *, anyone: bool = False) -> Non
 def never_bolder(clean: Any, faulted: Any) -> None:
     """The fail-safe property: a fault never makes a verdict more open, never shrinks a complete list, never makes
     complete what the clean run was not, and never proves an open the clean run only witnessed (proven-open ranks
-    above witnessed-open, above not determined)."""
+    above witnessed-open, above not determined), nor drops what the clean open said the call needs (an open that
+    requires something, ``stranger_run_failed`` among them, ranks below the same open requiring nothing)."""
     rank, clean_rank = _rank(faulted), _rank(clean)
     assert rank <= clean_rank, (clean, faulted)
     if faulted.complete:
@@ -448,10 +449,10 @@ def never_bolder(clean: Any, faulted: Any) -> None:
         assert listed(faulted) >= listed(clean), (clean, faulted)
 
 
-def _rank(v: Any) -> tuple[int, int, int]:
+def _rank(v: Any) -> tuple[int, int, int, int]:
     if v.openness != "open":
-        return (OPENNESS[v.openness], 0, 0)
-    return (OPENNESS["open"], ALLOWED.get(v.allowed, 0), 0 if v.witnessed else 1)
+        return (OPENNESS[v.openness], 0, 0, 0)
+    return (OPENNESS["open"], ALLOWED.get(v.allowed, 0), 0 if v.witnessed else 1, 0 if v.requires else 1)
 
 
 def listed(v: Any) -> set[int]:

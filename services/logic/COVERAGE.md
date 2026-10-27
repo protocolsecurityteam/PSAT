@@ -445,6 +445,22 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   (``test_witnessed``). Cost: an open on a callee's answer, an action (``sink.poke()``) or an ordering of addresses is
   witnessed even where it holds for everyone.
 
+* **G13. A proved open turned not determined by the stranger's business** (2026-10-26, user decision). FIXED.
+  Every "open now" is confirmed by the stranger's own call on the chain (G7); one the chain refuses was
+  ``open_unconfirmed`` even where the formula is the contract's own code alone and the refusal could only be the
+  call's business: v51 turned 42/28/75 opens (Lido/Maple/Aave) into not determined this way, Aragon's
+  ``newAppProxy(kernel, appId)`` among them (a proxy created for an app id the stranger's guess doesn't name). Now
+  ``_confirmed_open`` keeps the open, proved (not ``witnessed``), with ``(None, "stranger_run_failed", "business")``
+  in ``requires`` ("open, but the call needs what its arguments name"), when the formula has no call (nor an item of
+  one, nor whether one returned), no unknown, opaque or delegated term, every stranger meets it alike (``_alike_for_strangers``), the stranger's call was refused
+  (never unanswered), nothing else was assumed or arranged (``rests_on``), and every action the code assumes succeeds
+  (``World.assumed``: a creation, ether sent, a low-level or assembly call) is handed something the caller picks, so
+  the refusal can turn on the arguments. Otherwise the current rule stands: an action handed only stored values (an
+  assembly call into code that always reverts, A52; a creation of fixed arguments), or no action at all (the code
+  itself misread), stays ``open_unconfirmed``. ``never_bolder`` ranks an open carrying a condition below the same
+  open carrying none (``test_open_business``; ``test_callee_misread::test_an_open_now_the_chain_does_not_confirm_is_never_reported``).
+  Not covered: ``permit`` and the other signature rows (ecrecover is A53; see G12).
+
 ### Stated assumptions (not constructs)
 
 * "Open" is as the entries stand. A gate on a lookup the caller is read in (``require(!blocked[msg.sender])``, empty
