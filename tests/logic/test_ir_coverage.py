@@ -129,7 +129,7 @@ contract C {
     }
     function viaSend() external { require(payable(msg.sender).send(0)); }
     function viaSlice(bytes calldata d) external view { require(address(bytes20(d[4:])) == msg.sender); }
-    function viaMember(address t) external view { require(I(t).info().who == msg.sender); }
+    function viaMember(address t) external view { require(bytes(I(t).info().name).length == uint160(msg.sender)); }
 }
 """
 
@@ -148,7 +148,7 @@ VERDICTS = {
     "viaPointer": "unsupported:InternalDynamicCall",
     "viaSend": "Send",
     "viaSlice": "unsupported:slice",
-    "viaMember": "unsupported:member:who",
+    "viaMember": "unsupported:member:name",
 }
 
 AT = 0xA1 << 140

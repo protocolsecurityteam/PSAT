@@ -49,6 +49,7 @@ from .terms import (
     mk_not,
     packed_width,
     replace_terms,
+    returned_part,
     signed,
     stable,
     subterms,
@@ -1486,6 +1487,8 @@ class Evaluator:
         if kind == "item":
             inner = t[1]
             return self._call(inner, t[2]) if inner[0] == "call" else UNK
+        if kind == "abi":
+            return self._call(t[1], t[3][0], t) if t[1][0] == "call" and _abi_word(t[4]) else UNK
         if kind == "op":
             args = [self.eval(a) for a in t[2]]
             return REVERTED if any(a is REVERTED for a in args) else self._op(t[1], args)
@@ -1823,8 +1826,17 @@ class Evaluator:
             return memo[key]
         return ASSUMED if opened else UNK
 
-    def _call(self, t: Term, index: int) -> Any:
+    def _call(self, t: Term, index: int, abi: Term | None = None) -> Any:
+        """What call ``t`` returns at word ``index`` of its return data, or, given ``abi`` (an item of the decoded
+        data), the value its path names; ``index`` is then its return position, where a followed callee's own
+        returned values answer instead."""
         _, target, signature, args, view = t[:5]
+
+        def picked(lowered: Any) -> Any:
+            if abi is not None:
+                return returned_part(lowered[1], abi[3], abi[4])
+            return lowered[1][index] if index < len(lowered[1]) else None
+
         if (target, signature) in self.blind and any(contains(a, IDENTITY_KINDS) for a in args):
             address = self.eval(target) if view else UNK
             if isinstance(address, int) and self.world.chain.code(address) == b"":
@@ -1837,8 +1849,9 @@ class Evaluator:
             # Taken to succeed: what it returns is what its own code returns when it does (Aave's ``hub.add``
             # returning the shares a ``SafeCast`` then bounds), when that can be worked out.
             lowered = self._callee(t) if self.callee_code else None
-            if lowered is not None and index < len(lowered[1]):
-                value = self.eval(lowered[1][index])
+            term = picked(lowered) if lowered is not None else None
+            if term is not None:
+                value = self.eval(term)
                 if isinstance(value, (int, bool)) and value not in (REVERTED,):
                     self.coded[0] = True
                     return value
@@ -1848,24 +1861,26 @@ class Evaluator:
             # Over arguments the caller picks, each guess would be a call of its own: the callee's own code, where it
             # is followed and settles the answer, then the chain. A pass resting on it is asked again of the chain.
             lowered = self._callee(t)
-            if lowered is not None and index < len(lowered[1]):
+            term = picked(lowered) if lowered is not None else None
+            if term is not None:
                 returned = self.truth(lowered[0])
                 if returned is False:
                     self.coded[0] = True
                     return REVERTED
-                value = self.eval(lowered[1][index]) if returned is True else UNK
+                value = self.eval(term) if returned is True else UNK
                 if isinstance(value, (int, bool)) and not isinstance(value, FreeHash):
                     self.coded[0] = True
                     return value
         if request is None:
             # Not every argument is known: answer with the callee's own code, lowered over these arguments.
             lowered = self._callee(t) if self.callee_code else None
-            if lowered is None or index >= len(lowered[1]):
+            term = picked(lowered) if lowered is not None else None
+            if term is None:
                 return UNK
             self.coded[0] = True
             if self.truth(lowered[0]) is False:
                 return REVERTED
-            return self.eval(lowered[1][index])
+            return self.eval(term)
         address, data = request
         overrides = self.overrides()
         if overrides is False:
@@ -1875,6 +1890,8 @@ class Evaluator:
             return raw
         if not raw and self.world.chain.code(address) == b"":
             return REVERTED  # a high-level call into an address with no code reverts this contract
+        if abi is not None:
+            return _decoded_item(raw, abi)
         if len(raw) < 32 * (index + 1):
             return UNK
         return int.from_bytes(raw[32 * index : 32 * (index + 1)], "big")
@@ -2104,6 +2121,35 @@ def converted(type_: str, value: int) -> int:
     return signed(value, bits) if is_signed else value % 2**bits
 
 
+def _abi_word(abi: str) -> bool:
+    """Whether a value of ABI type ``abi`` is one word in place: what an ``abi`` item evaluates to a number."""
+    return re.fullmatch(r"address|bool|u?int\d*|bytes\d+", abi) is not None
+
+
+def _decoded_item(raw: bytes, abi: Term) -> Any:
+    """The item of ``raw`` return data an ``abi`` term names, decoded by its tuple type and read down its path, as the
+    engine holds words: an address or ``bytesN`` its number, a signed integer its two's complement word."""
+    from eth_abi.grammar import parse
+
+    try:
+        value: Any = decode([c.to_type_str() for c in parse(abi[2]).components], raw)
+        for step in abi[3]:
+            value = value[step]
+    except Exception as exc:  # eth_abi's decoding errors (data too short, malformed); never the decision's own timeout
+        if isinstance(exc, TimeoutError):
+            raise
+        return UNK
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value % 2**256
+    if isinstance(value, bytes):
+        return int.from_bytes(value, "big")
+    if isinstance(value, str) and value[:2] == "0x":
+        return int(value, 16)
+    return UNK
+
+
 def _abi_value(value: Any, type_: str) -> Any:
     if isinstance(value, bytes):
         return value.decode("latin-1") if type_ == "string" else value
@@ -2326,7 +2372,7 @@ def _proven_by_code(formula: Term, world: World) -> bool:
     (``_alike_for_strangers``): no call (a callee's code or the chain's answer standing in), no unknown or opaque
     term (code the lowering couldn't follow), no delegated code; and the actions it assumes succeed
     (``World.assumed``) are there, each handed something the caller picks."""
-    for kind in ("call", "item", "ok", "caught", "unknown", "opaque", "delegate"):
+    for kind in ("call", "item", "abi", "ok", "caught", "unknown", "opaque", "delegate"):
         if subterms(formula, kind):
             return False
     if not world.assumed or not all(world.assumed.values()):
@@ -3281,7 +3327,7 @@ def target_unread(target: Term, probe: "Evaluator") -> str:
         return "budget"
     if any(subterms(target, kind) for kind in _FREE_KINDS):
         return "argument"
-    if subterms(target, "call") or subterms(target, "item"):
+    if subterms(target, "call") or subterms(target, "item") or subterms(target, "abi"):
         return "call_result"
     for label in labels:
         if label.startswith("unknown:call_target:"):
@@ -4032,7 +4078,7 @@ def _decide_one(
     return True if solve(mk_not(formula), ground) is None else UNK
 
 
-_CALL_KINDS = frozenset({"call", "item", "ok", "caught", "retsize"})
+_CALL_KINDS = frozenset({"call", "item", "abi", "ok", "caught", "retsize"})
 
 
 def confirmed(ev: Evaluator, formula: Term, free: frozenset | None = None, answer: Any = None) -> Any:
@@ -5330,9 +5376,9 @@ def _solve(
                 return inside if sort == "bool" else as_int(inside)
         if kind == "hash":
             return lit(FreeHash(identity=True), sort)
-        if kind in ("call", "item"):
+        if kind in ("call", "item", "abi"):
             # A view call over arguments the caller picks: the callee's own code, in these terms.
-            call, index = (t, 0) if kind == "call" else (t[1], t[2])
+            call, index = (t, 0) if kind == "call" else (t[1], t[2] if kind == "item" else t[3][0])
             if call[0] == "call" and (call[1], call[2]) in ground.blind and contains(call, IDENTITY_KINDS):
                 return var(sort, escape=True)  # whoever it lets through can't all be listed: unknown, as evaluated
             if chain_calls and call[0] == "call" and call[4]:
@@ -5343,10 +5389,13 @@ def _solve(
                 answered.append((t, sort, value, call, inputs, [go(x, "int") for x in inputs]))
                 return value
             lowered = ground.world.callee(call) if call[0] == "call" and call[4] and ground.callee_code else None
-            if lowered is not None and index < len(lowered[1]):
+            picked = None
+            if lowered is not None:
+                picked = returned_part(lowered[1], t[3], t[4]) if kind == "abi" else returned_part(lowered[1], (index,))
+            if picked is not None:
                 if inlined is not None:
                     inlined[0] = True
-                return go(lowered[1][index], sort)
+                return go(picked, sort)
         return var(sort, escape=True)
 
     goal = go(formula, "bool")

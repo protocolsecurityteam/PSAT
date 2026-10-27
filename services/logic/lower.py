@@ -2504,7 +2504,7 @@ class Lowerer:
         # same revert point as above, on this path.
         st = State(mk_and([st.pc, mk("ok", value, self._last_returns)]), st.env, st.store, st.ret)
         if len(returns) > 1:
-            value = ("tuple", tuple(mk("item", value, i) for i in range(len(returns))))
+            value = _returned_items(value, returns)
         return self._write(ir.lvalue, value, st)
 
     def _returned(self, function: Function, index: int, var: Any, st: State) -> Any:
@@ -2931,6 +2931,11 @@ class Lowerer:
         if word is not None and isinstance(whole, tuple) and whole and whole[0] == "call":
             # A field of a struct a call returns: a struct of plain values is encoded as their words, in order.
             return self._write(ir.lvalue, mk("item", whole, word), st)
+        decoded = _abi_field(whole, getattr(ir.variable_left, "type", None), field_name)
+        if decoded is not None:
+            # Any other field of a struct a call returns (of a nested struct, beside a dynamic field, at one of
+            # several return positions): the item of the ABI-decoded return data it is.
+            return self._write(ir.lvalue, decoded, st)
         if _struct_shaped(whole, field_name):
             if ir.lvalue is not None:
                 # A field of a memory struct: read from, and written back into, the struct this call holds.
@@ -3809,22 +3814,100 @@ def _items(term: Any) -> tuple | None:
 
 
 def _static_field(type_: Any, name: str) -> int | None:
-    """The word ``name`` occupies in an ABI-encoded struct of ``type_`` whose fields are all of fixed size, when it
-    is one word itself."""
+    """The word ``name`` occupies in an ABI-encoded struct of ``type_`` whose fields are all of fixed size (one with
+    any dynamic field is encoded elsewhere, behind an offset word: no field of it is in place, whichever comes
+    first), when it is one word itself."""
     from slither.core.declarations import Structure
     from slither.core.solidity_types import UserDefinedType
 
     if not (isinstance(type_, UserDefinedType) and isinstance(type_.type, Structure)):
         return None
-    word = 0
+    words: dict[str, tuple[int, int]] = {}
+    at = 0
     for f in type_.type.elems_ordered:
         size = _type_words(f.type)
         if size is None:
             return None
-        if f.name == name:
-            return word if size == 1 else None
-        word += size
+        words[f.name] = (at, size)
+        at += size
+    found = words.get(name)
+    return found[0] if found is not None and found[1] == 1 else None
+
+
+def _abi_type(type_: Any) -> str | None:
+    """``type_`` as the ABI names it: a struct a tuple of its fields, an enum ``uint8``, a contract ``address``."""
+    from slither.utils.type import convert_type_for_solidity_signature_to_string
+
+    try:
+        return convert_type_for_solidity_signature_to_string(type_)
+    except Exception as exc:  # a type the conversion doesn't know: refused by whoever asked
+        if isinstance(exc, TimeoutError):
+            raise
+        return None
+
+
+def _abi_static(abi: str) -> bool:
+    """Whether a value of ABI type ``abi`` is encoded in place, whole: no ``bytes``, ``string`` or dynamic array
+    anywhere in it."""
+    return "[]" not in abi and not any(part in ("bytes", "string") for part in re.split(r"[(),\[\]]", abi))
+
+
+def _abi_word(abi: str) -> bool:
+    """Whether a value of ABI type ``abi`` is one word in place."""
+    return _abi_static(abi) and "(" not in abi and "[" not in abi
+
+
+def _abi_field(whole: Any, type_: Any, name: str) -> Term | None:
+    """Field ``name`` of a struct (of ``type_``) another contract returned, as the item of the ABI-decoded return data
+    it is: ``whole`` the call itself (its one return value), a field of it already taken, or a return position of
+    one returning several (``_returned_items``), or a choice between such. ``None`` where ``whole`` is no such
+    value, or the field is encoded elsewhere (``bytes``, a string, a dynamic array), which its reader refuses by
+    name."""
+    from slither.core.declarations import Structure
+    from slither.core.solidity_types import UserDefinedType
+
+    if not (isinstance(type_, UserDefinedType) and isinstance(type_.type, Structure)):
+        return None
+    fields = type_.type.elems_ordered
+    index = next((i for i, f in enumerate(fields) if f.name == name), None)
+    if index is None:
+        return None
+    leaf, struct = _abi_type(fields[index].type), _abi_type(type_)
+    if leaf is None or struct is None or not _abi_static(leaf):
+        return None
+    return _abi_step(whole, index, leaf, struct)
+
+
+def _abi_step(whole: Any, index: int, leaf: str, struct: str) -> Term | None:
+    if not isinstance(whole, tuple) or not whole:
+        return None
+    if whole[0] == "ite":
+        a, b = _abi_step(whole[2], index, leaf, struct), _abi_step(whole[3], index, leaf, struct)
+        return mk_ite(whole[1], a, b) if a is not None and b is not None else None
+    if whole[0] == "call":
+        return mk("abi", whole, f"({struct})", (0, index), leaf)
+    if whole[0] == "abi" and whole[4] == struct:
+        return mk("abi", whole[1], whole[2], (*whole[3], index), leaf)
     return None
+
+
+def _returned_items(call: Term, returns: list) -> tuple:
+    """The values of a call returning several, by position. Word ``i`` of the return data where every value is one
+    head word (a one-word type, or a dynamic one encoded elsewhere behind its offset word); otherwise (a struct or a
+    fixed array among them, laid out in place over several words) the item of the decoded data at each position
+    (``abi``), a dynamic value then refused by its type."""
+    abis = [_abi_type(r.type) for r in returns]
+    if all(a is not None and (_abi_word(a) or not _abi_static(a)) for a in abis):
+        return ("tuple", tuple(mk("item", call, i) for i in range(len(returns))))
+    whole = "(" + ",".join(a or "?" for a in abis) + ")"
+    items = []
+    for i, a in enumerate(abis):
+        if a is not None and all(abis) and _abi_static(a):
+            items.append(mk("abi", call, whole, (i,), a))
+        else:
+            label = re.sub(r"[^A-Za-z0-9_.()\[\]]", "", a or "") or "unknown"
+            items.append(unknown(f"unsupported:abi_item:{label}"))
+    return ("tuple", tuple(items))
 
 
 def _type_words(type_: Any) -> int | None:

@@ -57,6 +57,7 @@ from .terms import (
     mk_and,
     mk_not,
     replace_terms,
+    returned_part,
     stable,
     substitute,
     subterms,
@@ -651,7 +652,7 @@ def latched_atoms(formula: Term, world: World, contract: Any) -> frozenset:
         current = probe.truth(atom)
         if current is UNK:
             continue
-        reads = [t for kind in ("call", "item", "ok", "caught") for t in subterms(atom, kind)]
+        reads = [t for kind in ("call", "item", "abi", "ok", "caught") for t in subterms(atom, kind)]
         calls = {t if t[0] == "call" else t[1] for t in reads}
         if subterms(atom, "balance") or not all(_codeless(probe, call) for call in calls):
             continue  # another contract's answer, or ether: changeable from outside this code
@@ -2534,7 +2535,7 @@ def function_verdict(
                 ):
                     continue
                 lowered = callee(call) if why in ("origin", "nested") else None
-                uses = [x for x in subterms(term, "item") if x[1] == call]
+                uses = [x for kind in ("item", "abi") for x in subterms(term, kind) if x[1] == call]
                 bare = call in subterms(replace_terms(term, {x: TRUE for x in uses}, keep_subjects=True), "call")
                 inlining = inline and lowered is not None and top and round_ < IDENTITY_DEPTH
                 if inlining and (not (uses or bare) or _unconditional(term, call)):
@@ -2548,7 +2549,8 @@ def function_verdict(
                         if x[1] == call:
                             mapping[x] = mk_not(pc)
                     for x in uses:
-                        mapping[x] = ret[x[2]] if x[2] < len(ret) else unknown(f"origin:{call[2]}")
+                        part = returned_part(ret, x[3], x[4]) if x[0] == "abi" else returned_part(ret, (x[2],))
+                        mapping[x] = part if part is not None else unknown(f"origin:{call[2]}")
                     if bare:
                         mapping[call] = ret[0] if ret else unknown(f"origin:{call[2]}")
                     term = replace_terms(term, mapping)

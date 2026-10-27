@@ -13,7 +13,9 @@ Values::
     ("signer", digest, v, r, s)             ecrecover: the identity that signed ``digest``
     ("call", target, signature, args, view) another contract's answer
     ("immutable", code, name)               an immutable of the code at ``code``
-    ("item", value, index)                  one element of a tuple result
+    ("item", value, index)                  one element of a tuple result: word ``index`` of the return data
+    ("abi", call, returns, path, type)      an item of a call's ABI-decoded return data (``returns`` its tuple type,
+                                            ``path`` the position and the struct fields down to it, ``type`` its own)
     ("ok", call, n)  ("caught", call, n)    whether that call returns, or reverts in the callee (a ``try``); ``n``
                                             return values expected, ``None`` if unknown
     ("len", value)  ("elem", value, index)  arrays
@@ -565,6 +567,32 @@ def assume_conjuncts(formula: Term, rounds: int = 3) -> Term:
             return formula
         formula = rewritten
     return formula
+
+
+def returned_part(values: tuple, path: tuple, leaf: str | None = None) -> Any:
+    """Of the values a followed callee returns, the one ``path`` names: its position, then a field of the struct
+    returned there, and so on (an ``abi`` item's path, ``leaf`` its type). ``None`` where there is no such position,
+    or the value there isn't followed down to the field: a struct built field by field is, each branch of a choice
+    between such, and an item of another call's return data (whose path grows by the rest)."""
+    if not path or not isinstance(path[0], int) or path[0] >= len(values):
+        return None
+    value = values[path[0]]
+    for at, step in enumerate(path[1:], 1):
+        if not isinstance(value, tuple) or not value:
+            return None
+        if value[0] == "struct":
+            if not isinstance(step, int) or step >= len(value[2]):
+                return None
+            value = value[2][step]
+        elif value[0] == "ite":
+            a = returned_part((value[2],), (0, *path[at:]), leaf)
+            b = returned_part((value[3],), (0, *path[at:]), leaf)
+            return mk_ite(value[1], a, b) if a is not None and b is not None else None
+        elif value[0] == "abi" and leaf is not None:
+            return mk("abi", value[1], value[2], (*value[3], *path[at:]), leaf)
+        else:
+            return None
+    return value
 
 
 def _rebuild(kind: str, parts: list) -> Any:

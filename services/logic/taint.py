@@ -27,7 +27,7 @@ def singles_out_nobody(unknown_term: Term) -> bool:
 _KINDS = frozenset(
     {
         "this", "sig", "callvalue", "calldatasize", "arg", "const", "time", "load", "rawload", "hash", "enc",
-        "call", "immutable", "item", "ok", "caught", "len", "elem", "slice", "op", "conv", "ite", "cmp", "not",
+        "call", "immutable", "item", "abi", "ok", "caught", "len", "elem", "slice", "op", "conv", "ite", "cmp", "not",
         "and", "or", "opaque", "assumed", "retsize", "codesize", "balance", "codehash", "code", "constant", "array",
         "struct", "slot",
     }

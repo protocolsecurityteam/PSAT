@@ -33,6 +33,7 @@ from .terms import (
     mk_cmp,
     mk_ite,
     replace_terms,
+    returned_part,
     stable,
     subterms,
 )
@@ -256,6 +257,10 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
                 items = {
                     x: lowered[1][x[2]] for x in subterms(t, "item") if x[1] == c and lowered and x[2] < len(lowered[1])
                 }
+                for x in subterms(t, "abi"):
+                    part = returned_part(lowered[1], x[3], x[4]) if x[1] == c and lowered else None
+                    if part is not None:
+                        items[x] = part
                 bare = c in subterms(replace_terms(t, {**asked, **items}), "call")
                 if lowered is None or (bare and not lowered[1]):
                     # Code not followed: the addresses this code names, unproven to be all it lets through.
