@@ -769,14 +769,30 @@ def _crowded(message: str) -> bool:
     return found is not None and (found.group(1) is None or int(found.group(1)) >= LOG_ROWS)
 
 
-# How nodes word a call that failed in the EVM (a revert, an ``assert``'s invalid opcode, running out of gas), as
-# opposed to the node or the transport failing: the former is the call's answer, the same every time it is asked.
-_EVM_FAILURES = ("revert", "execution", "evm error", "invalid opcode", "invalidfeopcode", "out of gas", "invalid jump")
+# How nodes word a call that failed in the EVM, as opposed to the node or the transport failing: the former is the
+# call's answer, the same every time it is asked. Whole phrases from the clients' own vocabularies (geth, erigon and
+# reth "execution reverted[: reason]", "invalid opcode", "out of gas", "invalid jump destination", "stack underflow";
+# nethermind "VM execution error." with "Reverted 0x..."; anvil "EVM error InvalidFEOpcode"; besu "Execution
+# reverted"; hardhat and ganache "VM Exception while processing transaction: revert"), never a bare word a node's own
+# trouble shares: geth's "execution aborted (timeout = 5s)" is no answer.
+_EVM_FAILURES = re.compile(
+    r"\b(?:execution reverted|revert(?:ed)?|vm execution error|evm error|vm exception|invalid opcode|invalidfeopcode"
+    r"|out of gas|invalid jump|stack underflow|stack overflow|stack limit reached|write protection)\b",
+    re.IGNORECASE,
+)
+# A node that didn't run the call to its end, or couldn't: whatever else its message says, the call went unanswered.
+_UNANSWERED = re.compile(
+    r"\b(?:timeout|timed out|aborted|deadline|cancel(?:l)?ed|rate.?limit|too many requests|exceeds allowance|gas cap"
+    r"|unavailable|overloaded|connection|internal error)\b",
+    re.IGNORECASE,
+)
 
 
 def _is_revert(message: str) -> bool:
-    message = message.lower()
-    return any(marker in message for marker in _EVM_FAILURES)
+    """Whether ``message`` is the EVM's own refusal of a call, as its node words it: a revert, an ``assert``'s invalid
+    opcode, running out of gas. A message naming the node's or the transport's trouble (a timeout, an abort, a cap)
+    is never one, whatever else it says: that call is unanswered, not refused."""
+    return _UNANSWERED.search(message) is None and _EVM_FAILURES.search(message) is not None
 
 
 def _hex20(value: int) -> str:
@@ -2330,13 +2346,13 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
         return verdict
     refused = getattr(world.chain, "refused", 0)
     witness = verdict.witnesses.get(FRESH, {})
+    unanswered: list = []  # the stranger's own calls the node didn't answer (a timeout, an abort): no refusal
     if verdict.after:
         if prior_runs is not None and _after_runs(world, witness, *prior_runs):
             world.sampled = True
             return verdict
         gap = "open_arranged_unconfirmed"
     else:
-        unanswered: list = []
         ran = runs(world, FRESH, witness)
         if ran is True:
             if strangers_run(formula, world, witness):
@@ -2371,7 +2387,8 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
             if rests_on & {"assumed", "action"}
             else "open_unconfirmed"
         )
-    return replace(verdict, openness="not_determined", complete=False, gaps=(gap, *_budget_gaps(world, refused)))
+    gaps = (gap, *(("read_failed:run",) if unanswered else ()), *_budget_gaps(world, refused))
+    return replace(verdict, openness="not_determined", complete=False, gaps=gaps)
 
 
 # What an open proved from the contract's own code carries where the stranger's own call still reverts on the chain

@@ -6,15 +6,18 @@ with a kernel and an app id nobody registered reverts. That is the call's busine
 addresses the engine never samples, pass (``_oracle.check``). Where no action steered by the arguments could have
 refused the stranger (a creation handed only stored values), or the chain left the stranger's call unanswered, the
 open is not determined as before (``open_unconfirmed``), and the sweep ranks an open carrying a condition below one
-carrying none (``never_bolder``)."""
+carrying none (``never_bolder``). A node that didn't answer the stranger's call (geth's ``execution aborted (timeout =
+5s)``, a transport failure) refused nobody: not determined, ``read_failed:run``, never a refusal read from the
+message (``decide._is_revert``)."""
 
 from __future__ import annotations
 
 import pytest
 
-from services.logic.decide import FRESH, Verdict
+from services.logic.decide import FRESH, Chain, Verdict, _is_revert
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+from tests.support.anvil import rpc
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -92,11 +95,63 @@ def test_an_action_no_argument_steers_leaves_the_open_unconfirmed(d):
     assert not any(O.passes(d, "Factory", fn, {"x": 1}, sender=who) for who in (*O.ACCOUNTS, *O.STRANGERS))
 
 
-def test_an_unanswered_stranger_call_is_no_business_condition(d):
+def _timing_out(d, who: set[int]) -> Chain:
+    """The deployment's chain, answering the strangers' ``eth_call`` as geth does when it stops a long call."""
+
+    def one(method, params):
+        if method == "eth_call" and int(params[0].get("from", "0x0"), 16) in who:
+            raise RuntimeError("execution aborted (timeout = 5s)")
+        return rpc(d.url, method, params)
+
+    return Chain(one, int(rpc(d.url, "eth_blockNumber", []), 16), None)
+
+
+@pytest.mark.parametrize("faulty", [lambda d: O.Faulty(d, calls=True), lambda d: _timing_out(d, set(O.STRANGERS))])
+def test_an_unanswered_stranger_call_is_no_business_condition(d, faulty):
     clean = O.verdict(d, "Factory", "newAppProxy")
-    v = O.verdict(d, "Factory", "newAppProxy", chain=O.Faulty(d, calls=True))
+    assert clean.openness == "open" and clean.requires, clean
+    v = O.verdict(d, "Factory", "newAppProxy", chain=faulty(d))
     assert v.openness == "not_determined" and not v.requires, v
+    assert "read_failed:run" in v.gaps, v
     O.never_bolder(clean, v)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "execution reverted",
+        "execution reverted: Ownable: caller is not the owner",
+        "Reverted 0x08c379a0",
+        "VM execution error.",
+        "EVM error InvalidFEOpcode",
+        "invalid opcode: INVALID",
+        "out of gas",
+        "invalid jump destination",
+        "stack underflow (0 <=> 1)",
+        "VM Exception while processing transaction: revert",
+    ],
+)
+def test_the_nodes_own_words_for_a_failed_call_read_as_a_refusal(message):
+    assert _is_revert(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "execution aborted (timeout = 5s)",
+        "execution reverted but the node timed out",  # a node's trouble is never read as the call's answer
+        "Read timed out",
+        "context deadline exceeded",
+        "injected: upstream timeout",
+        "gas required exceeds allowance (50000000)",
+        "429 Too Many Requests",
+        "Internal error",
+        "execution",
+        "",
+    ],
+)
+def test_a_nodes_trouble_never_reads_as_a_refusal(message):
+    assert not _is_revert(message)
 
 
 def test_an_open_carrying_a_condition_ranks_below_one_carrying_none():

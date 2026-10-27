@@ -370,8 +370,10 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
     ``open_value_unconfirmed`` (ether), ``open_arranged_unconfirmed`` (own entries arranged first),
     ``open_assumed_action_unconfirmed`` (an action assumed, or handed the caller), else ``open_unconfirmed`` (natural:
     the contract's own Yul call into always-reverting code, A52, ``selfCall``; probes ``q2_arranged``, ``q2c``,
-    ``q5_declared``, ``q2d_value``: ``test_open_confirmed``). A node that refuses state overrides answers with an
-    error, read as unknown: not determined, never open. "Open later" never rests on a callee's answer (see G6).
+    ``q5_declared``, ``q2d_value``: ``test_open_confirmed``), plus ``read_failed:run`` where the node left a
+    stranger's own call unanswered (a timeout, an abort, a cap: never read as a refusal, ``decide._is_revert``). A
+    node that refuses state overrides answers with an error, read as unknown: not determined, never open. "Open
+    later" never rests on a callee's answer (see G6).
     An open once the conditions allow (or only with some set aside) on the stranger's own entries arranged
     (``decide._arranged_later``, review 8, F1) needs the same call of its own that brings them about: each
     stranger's first call runs on the chain as it stands, and this one passes on the words it leaves in a state of
@@ -487,6 +489,16 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   itself misread), stays ``open_unconfirmed``. ``never_bolder`` ranks an open carrying a condition below the same
   open carrying none (``test_open_business``; ``test_callee_misread::test_an_open_now_the_chain_does_not_confirm_is_never_reported``).
   Not covered: ``permit`` and the other signature rows (ecrecover is A53; see G12).
+
+* **G14. A node's timeout read as the chain's refusal** (2026-10-27, round ten-b H2). FIXED. ``decide._is_revert``
+  matched the bare word "execution", so geth's "execution aborted (timeout = 5s)" on the stranger's ``eth_call`` was
+  REVERTED: a refusal the chain never gave (under G13 it made a business condition; anywhere it makes a candidate
+  look refused). Now it matches the clients' whole phrases (geth/erigon/reth "execution reverted", "invalid opcode",
+  "out of gas", "invalid jump", "stack underflow"; nethermind "VM execution error", "Reverted 0x"; anvil "EVM error";
+  hardhat/ganache "VM Exception"; "revert"/"reverted" as words) and only after no word of the node's own trouble
+  (timeout, timed out, aborted, deadline, cancelled, rate limit, exceeds allowance, gas cap, unavailable, connection,
+  internal error) is in the message: such a call is unanswered, ``read_failed:run`` on an unconfirmed open, never
+  determined (``test_open_business``: the vocabularies, a timing-out chain, ``_oracle.Faulty``).
 
 ### Stated assumptions (not constructs)
 
