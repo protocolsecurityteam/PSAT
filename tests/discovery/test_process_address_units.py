@@ -10,6 +10,19 @@ import pytest
 from workers.discovery import DiscoveryWorker
 
 
+@pytest.fixture(autouse=True)
+def _stub_request_store(monkeypatch):
+    """These units drive a mock session; the proxy-context lookup and the stored-request merge are SQL, covered by
+    the real-DB tests."""
+
+    def merge(session, job, patch, **_kw):
+        job.request = {**(job.request or {}), **patch}
+        return True
+
+    monkeypatch.setattr("workers.discovery.adopt_current_proxy_context", lambda *a, **kw: None)
+    monkeypatch.setattr("workers.discovery.merge_job_request", merge)
+
+
 def _job(**overrides) -> Any:
     defaults = {
         "id": "job-1",

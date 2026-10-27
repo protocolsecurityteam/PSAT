@@ -8,17 +8,40 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import bindparam, func, select, text
+from sqlalchemy import bindparam, func, literal, or_, select, text
 from sqlalchemy import update as sa_update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
-from db.models import Job, JobDependency, JobStage, JobStatus, derive_job_chain_id
+from db.models import Contract, Job, JobDependency, JobStage, JobStatus, derive_job_chain_id
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id, chain_by_name
 
+from ._chains import _mainnet_coalesced_chain
 from .heartbeats import DEFAULT_JOB_LEASE_TTL_S, DEFAULT_JOB_STALE_TIMEOUT, LeaseLost
 from .static_cache import _not_stamped_with_other_era, _stands_without_walk_first, job_stands_for_current_analyzer
 
 logger = logging.getLogger("db.queue")
+
+# Set when a job is converted to proxy context while a stage that reads the context runs on its claim-time copy. That
+# stage's exit, whichever it is, sends the job back to static; the running worker keeps its lease, so no second worker
+# writes the job's artifacts alongside it.
+RESTART_STATIC_REQUEST_KEY = "restart_static_for_proxy_context"
+_CONTEXT_READING_STAGES = frozenset(
+    {JobStage.static, JobStage.resolution, JobStage.policy, JobStage.effects, JobStage.coverage}
+)
+_POINTER_WRITING_STAGES = (JobStage.discovery, JobStage.static)
+_RAN_PAST_STATIC_STAGES = frozenset(
+    {JobStage.resolution, JobStage.policy, JobStage.effects, JobStage.coverage, JobStage.done}
+)
+
+
+class ProxyContextUnsettled(Exception):
+    """A proxy pointing at the address has an analysis queued or running, so its pointer may still change."""
+
+    def __init__(self, proxies: list[str]) -> None:
+        super().__init__(", ".join(proxies))
+        self.proxies = proxies
 
 
 def reclaim_stuck_jobs(session: Session, stale_timeout_seconds: int = DEFAULT_JOB_STALE_TIMEOUT) -> list[str]:
@@ -241,6 +264,9 @@ def advance_job(
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
+    if _restart_static_if_flagged(session, job):
+        session.commit()
+        return
     job.stage = next_stage
     job.status = JobStatus.queued
     job.detail = detail or f"Advanced to {next_stage.value}"
@@ -262,6 +288,9 @@ def complete_job(
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
+    if _restart_static_if_flagged(session, job):
+        session.commit()
+        return
     newly_completed = job.status != JobStatus.completed
     job.stage = JobStage.done
     job.status = JobStatus.completed
@@ -278,6 +307,116 @@ def complete_job(
     session.commit()
 
 
+def static_restart_pending(session: Session, job_id: Any, *, lease_id: uuid.UUID | None = None) -> bool:
+    """Lock the job row and say whether its stage's exit will send it back to static (``RESTART_STATIC_REQUEST_KEY``).
+
+    The lock is held until the caller's exit commits, so no conversion lands between this answer and the exit. Raises
+    ``LeaseLost`` if a given *lease_id* no longer holds the row.
+    """
+    with session.no_autoflush:
+        row = session.execute(
+            select(Job.lease_id, Job.request[RESTART_STATIC_REQUEST_KEY].astext)
+            .where(Job.id == job_id)
+            .with_for_update()
+        ).first()
+    if row is None:
+        return False
+    if lease_id is not None and row[0] != lease_id:
+        raise LeaseLost(f"Job {job_id}: lease no longer owns the row")
+    return row[1] == "true"
+
+
+def _restart_static_if_flagged(session: Session, job: Job) -> bool:
+    """Consume :data:`RESTART_STATIC_REQUEST_KEY`: the job goes back to a queued static stage, the flag cleared.
+
+    Read from the row, which the caller's lease lock holds, never from the session's claim-time copy.
+    """
+    flagged = session.execute(
+        select(Job.request[RESTART_STATIC_REQUEST_KEY].astext).where(Job.id == job.id)
+    ).scalar_one_or_none()
+    if flagged != "true":
+        return False
+    stored = session.execute(
+        sa_update(Job)
+        .where(Job.id == job.id)
+        .values(request=Job.request.op("-", return_type=JSONB)(literal(RESTART_STATIC_REQUEST_KEY)))
+        .returning(Job.request)
+        .execution_options(synchronize_session=False)
+    ).first()
+    set_committed_value(job, "request", stored[0] if stored is not None else None)
+    job.stage = JobStage.static
+    job.status = JobStatus.queued
+    job.worker_id = None
+    job.lease_id = None
+    job.lease_expires_at = None
+    job.next_attempt_at = None
+    job.detail = "Re-running static in proxy context"
+    return True
+
+
+def defer_job(
+    session: Session,
+    job_id: Any,
+    *,
+    detail: str,
+    delay_seconds: int,
+    lease_id: uuid.UUID | None = None,
+) -> None:
+    """Put a claimed job back in its queue until ``delay_seconds`` from now (DB clock) without spending a retry: the
+    stage is waiting on another job, not failing.
+    """
+    job = _locked_job(session, job_id, lease_id)
+    if job is None:
+        return
+    _check_lease_or_raise(job, lease_id)
+    job.status = JobStatus.queued
+    job.detail = detail
+    job.worker_id = None
+    job.lease_id = None
+    job.lease_expires_at = None
+    session.execute(
+        sa_update(Job)
+        .where(Job.id == job_id)
+        .values(next_attempt_at=text(f"NOW() + INTERVAL '{int(delay_seconds)} seconds'"))
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+
+
+def merge_job_request(
+    session: Session,
+    job: Job,
+    patch: dict[str, Any],
+    *,
+    defaults: dict[str, Any] | None = None,
+    unless_present: str | None = None,
+) -> bool:
+    """Merge *patch* into the stored ``job.request`` in one UPDATE, never from the session's copy.
+
+    Sessions keep the claim-time ``request``, so writing ``{**job.request, ...}`` back erases keys another worker wrote
+    since (a proxy converting this job to its context). The merge reads the row's own value, and under a concurrent
+    committed update Postgres re-evaluates it against the newest version. *defaults* fill only absent keys. With
+    *unless_present*, nothing is written while that key holds a value, and False is returned. Either way the session's
+    copy is set to the stored value. Doesn't commit.
+    """
+    merged = (
+        literal(defaults or {}, JSONB)
+        .op("||", return_type=JSONB)(func.coalesce(Job.request, literal({}, JSONB)))
+        .op("||", return_type=JSONB)(literal(patch, JSONB))
+    )
+    stmt = sa_update(Job).where(Job.id == job.id)
+    if unless_present is not None:
+        stmt = stmt.where(Job.request[unless_present].astext.is_(None))
+    stored = session.execute(
+        stmt.values(request=merged).returning(Job.request).execution_options(synchronize_session=False)
+    ).first()
+    applied = stored is not None
+    if stored is None:
+        stored = session.execute(select(Job.request).where(Job.id == job.id)).first()
+    set_committed_value(job, "request", stored[0] if stored is not None else None)
+    return applied
+
+
 def _convert_impl_job_to_proxy_context(
     session: Session,
     job: Job,
@@ -285,28 +424,32 @@ def _convert_impl_job_to_proxy_context(
     proxy_addr: str,
     proxy_type: str | None = None,
     discovery_relationship: str = "implementation",
-) -> None:
-    """Convert a standalone impl job to proxy context, re-enqueuing it if it already ran.
+    parent_job_id: str | None = None,
+) -> bool:
+    """Convert a standalone impl job to proxy context so every stage from static runs in it. False when the job
+    already carries a proxy context (another proxy, or intake, got there first); the job is then left as it is.
 
     An impl found before its proxy resolves against its own empty storage. Converting the same job (not a duplicate) and
     re-running from static lets split-proxy linkage fire and re-reads against the proxy; the deployment-scoped writes
-    replace the stale rows.
+    replace the stale rows. A job past static is re-enqueued there; one whose context-reading stage is running is
+    flagged instead, and that stage's exit re-enqueues it.
     """
-    req = dict(job.request) if isinstance(job.request, dict) else {}
-    req["proxy_address"] = proxy_addr
+    patch: dict[str, Any] = {"proxy_address": proxy_addr}
     if proxy_type:
-        req["proxy_type"] = proxy_type
-    req.setdefault("discovery_relationship", discovery_relationship)
-    job.request = req  # reassign so SQLAlchemy flushes the JSONB change
+        patch["proxy_type"] = proxy_type
+    defaults: dict[str, Any] = {"discovery_relationship": discovery_relationship}
+    if parent_job_id:
+        defaults["parent_job_id"] = parent_job_id
+    converted = merge_job_request(session, job, patch, defaults=defaults, unless_present="proxy_address")
+    if not converted:
+        session.commit()
+        return False
 
-    already_ran_resolution = job.status == JobStatus.completed or job.stage in (
-        JobStage.resolution,
-        JobStage.policy,
-        JobStage.effects,
-        JobStage.coverage,
-        JobStage.done,
-    )
-    if already_ran_resolution:
+    # The UPDATE holds the row lock, so this reads the stage no other writer can move before the commit.
+    session.refresh(job, attribute_names=["status", "stage"])
+    if job.status == JobStatus.processing and job.stage in _CONTEXT_READING_STAGES:
+        merge_job_request(session, job, {RESTART_STATIC_REQUEST_KEY: True})
+    elif job.status == JobStatus.completed or job.stage in _RAN_PAST_STATIC_STAGES:
         job.stage = JobStage.static
         job.status = JobStatus.queued
         job.worker_id = None
@@ -315,6 +458,7 @@ def _convert_impl_job_to_proxy_context(
         job.next_attempt_at = None
         job.detail = f"Re-resolving in proxy context ({proxy_addr})"
     session.commit()
+    return True
 
 
 @functools.cache
@@ -349,6 +493,35 @@ def _impl_job_stmt(kind: str, chain_scoped: bool, root_scoped: bool, version: in
     return stmt.limit(1) if first_only else stmt
 
 
+def _impl_job_lookup(
+    impl_lc: str, proxy_lc: str, chain: str | None, root_job_id: str | None
+) -> tuple[tuple[bool, bool, int], dict[str, Any]]:
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    params: dict[str, Any] = {"impl": impl_lc, "proxy": proxy_lc}
+    if chain is not None:
+        params["chain_id"] = derive_job_chain_id(chain, impl_lc)
+    if root_job_id is not None:
+        params["root"] = root_job_id
+    return (chain is not None, root_job_id is not None, ANALYSIS_SCHEMA_VERSION), params
+
+
+def _first_standing_impl_job(
+    session: Session,
+    kind: str,
+    shape: tuple[bool, bool, int],
+    params: dict[str, Any],
+    eras: dict[str, int | None],
+) -> Job | None:
+    first = session.execute(_impl_job_stmt(kind, *shape, first_only=True), params).scalar_one_or_none()
+    if first is None or job_stands_for_current_analyzer(session, first, eras):
+        return first
+    for candidate in session.execute(_impl_job_stmt(kind, *shape, first_only=False), params).scalars():
+        if job_stands_for_current_analyzer(session, candidate, eras):
+            return candidate
+    return None
+
+
 def reconcile_impl_job_for_proxy(
     session: Session,
     *,
@@ -369,41 +542,26 @@ def reconcile_impl_job_for_proxy(
     ``root_job_id`` scopes lookups to the current cascade for ``--force`` re-runs. Only jobs that stand for the current
     analyzer (``job_stands_for_current_analyzer``) skip or get backpatched; a stale one leads to a fresh spawn.
     """
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
-
     impl_lc = impl_addr.lower()
     proxy_lc = proxy_addr.lower()
-    params: dict[str, Any] = {"impl": impl_lc, "proxy": proxy_lc}
-    if chain is not None:
-        params["chain_id"] = derive_job_chain_id(chain, impl_lc)
-    if root_job_id is not None:
-        params["root"] = root_job_id
-    shape = (chain is not None, root_job_id is not None, ANALYSIS_SCHEMA_VERSION)
+    shape, params = _impl_job_lookup(impl_lc, proxy_lc, chain, root_job_id)
     eras: dict[str, int | None] = {}
 
-    def _first_standing(kind: str) -> Job | None:
-        first = session.execute(_impl_job_stmt(kind, *shape, first_only=True), params).scalar_one_or_none()
-        if first is None or job_stands_for_current_analyzer(session, first, eras):
-            return first
-        for candidate in session.execute(_impl_job_stmt(kind, *shape, first_only=False), params).scalars():
-            if job_stands_for_current_analyzer(session, candidate, eras):
-                return candidate
-        return None
-
-    same_proxy = _first_standing("same_proxy")
-    if same_proxy is not None:
-        return "skip"
-
-    standalone = _first_standing("standalone")
-    if standalone is not None:
-        _convert_impl_job_to_proxy_context(
+    while True:
+        if _first_standing_impl_job(session, "same_proxy", shape, params, eras) is not None:
+            return "skip"
+        standalone = _first_standing_impl_job(session, "standalone", shape, params, eras)
+        if standalone is None:
+            break
+        if _convert_impl_job_to_proxy_context(
             session,
             standalone,
             proxy_addr=proxy_lc,
             proxy_type=proxy_type,
             discovery_relationship=discovery_relationship,
-        )
-        return "backpatched"
+        ):
+            return "backpatched"
+        # It took a proxy context concurrently; the lookups now see it as that proxy's job.
 
     other_proxy = session.execute(_impl_job_stmt("other_proxy", *shape, first_only=True), params).scalar_one_or_none()
     if other_proxy is not None:
@@ -414,6 +572,82 @@ def reconcile_impl_job_for_proxy(
             proxy_lc,
         )
     return "spawn"
+
+
+def adopt_current_proxy_context(session: Session, job: Job, *, chain: str) -> str | None:
+    """Give an address job without a proxy context the context of a proxy on *chain* whose current implementation
+    (``Contract.implementation``) is the job's address, as that proxy's reconcile would. Returns the proxy address the
+    job carries afterwards, or None when it is not the current implementation of any known proxy.
+
+    Linking otherwise happens only when the proxy's static stage runs, so an implementation submitted after its proxy
+    would resolve against its own storage and take the contract row from the proxy's implementation job. A pointer is
+    settled once no job for its proxy is queued or running in discovery or static, the stages that rewrite it; until
+    every pointer at this address is settled this raises :class:`ProxyContextUnsettled` and decides nothing. A proxy job
+    held by pending dependencies doesn't count: it may be waiting on this very job, and deferral is invisible to the
+    dependency cycle check, so only claimable jobs, which run static to its end, are waited on. Among several proxies,
+    the first (by row id) without a standing implementation job of its own is chosen, else the first. The proxy's job,
+    which holds the row, becomes the parent unless the request names one.
+    """
+    request = job.request if isinstance(job.request, dict) else {}
+    carried = request.get("proxy_address")
+    if isinstance(carried, str) and carried:
+        return carried
+    if not job.address or request.get("effects_resume_work_id") is not None:
+        return None
+    impl_lc = job.address.lower()
+    stmt = (
+        select(Contract.address, Contract.proxy_type, Contract.job_id)
+        .where(
+            func.lower(Contract.implementation) == impl_lc,
+            func.lower(Contract.address) != impl_lc,
+            or_(Contract.is_proxy.is_(True), Contract.proxy_type == "beacon"),
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(chain),
+        )
+        .order_by(Contract.id)
+    )
+    proxies = [(proxy_addr.lower(), proxy_type, holder) for proxy_addr, proxy_type, holder in session.execute(stmt)]
+    if not proxies:
+        return None
+
+    blocked = (
+        select(JobDependency.id)
+        .where(JobDependency.depender_job_id == Job.id, JobDependency.status == "pending")
+        .exists()
+    )
+    in_flight_stmt = select(Job.address).where(
+        func.lower(Job.address).in_([proxy for proxy, _type, _holder in proxies]),
+        Job.chain_id == chain_by_name(chain).chain_id,
+        Job.stage.in_(_POINTER_WRITING_STAGES),
+        Job.status.in_((JobStatus.queued, JobStatus.processing)),
+        Job.request["effects_resume_work_id"].astext.is_(None),
+        ~blocked,
+    )
+    in_flight = sorted({address.lower() for (address,) in session.execute(in_flight_stmt) if address})
+    if in_flight:
+        raise ProxyContextUnsettled(in_flight)
+
+    eras: dict[str, int | None] = {}
+    chosen = proxies[0]
+    for candidate in proxies:
+        shape, params = _impl_job_lookup(impl_lc, candidate[0], chain, None)
+        if _first_standing_impl_job(session, "same_proxy", shape, params, eras) is None:
+            chosen = candidate
+            break
+    proxy_lc, proxy_type, holder = chosen
+    if _convert_impl_job_to_proxy_context(
+        session,
+        job,
+        proxy_addr=proxy_lc,
+        proxy_type=proxy_type,
+        parent_job_id=str(holder) if holder is not None else None,
+    ):
+        logger.info(
+            "address job adopted the proxy context of the proxy whose current implementation it is",
+            extra={"job_id": str(job.id), "impl": impl_lc, "proxy": proxy_lc, "proxies_known": len(proxies)},
+        )
+    stored = job.request if isinstance(job.request, dict) else {}
+    adopted = stored.get("proxy_address")
+    return adopted if isinstance(adopted, str) and adopted else None
 
 
 def fail_job(session: Session, job_id: Any, error: str) -> None:
@@ -448,6 +682,10 @@ def requeue_job(
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
+    if _restart_static_if_flagged(session, job):
+        # The failed attempt ran on a request the job no longer has; the re-run is a fresh one, not a retry of it.
+        session.commit()
+        return
     job.status = JobStatus.queued
     job.error = error
     job.retry_count = retry_count
@@ -479,6 +717,7 @@ def fail_job_terminal(
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
+    _restart_static_if_flagged(session, job)
     job.status = JobStatus.failed_terminal
     job.error = error
     job.detail = "Failed (terminal)"

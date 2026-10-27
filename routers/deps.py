@@ -9,7 +9,7 @@ import re
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from db.models import SessionLocal, User
 from db.queue import (
@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 ADMIN_KEY = os.environ.get("PSAT_ADMIN_KEY")
 if not ADMIN_KEY:
     logger.info("PSAT_ADMIN_KEY is not set; admin endpoints accept only signed-in admin accounts")
+
+# Witness actor when the shared key authenticated: the key is shared, so it names no one more specific.
+ADMIN_KEY_ACTOR = "admin_api_key"
 
 # Explicit mainnet default: a required chain param at this layer is impractical.
 DEFAULT_RPC_URL = default_rpc_url(chain_id=1) or ""
@@ -125,6 +128,7 @@ def require_admin(request: Request, x_psat_admin_key: str | None = Header(defaul
     """
     reason = _key_reason(x_psat_admin_key)
     if reason is None:
+        request.state.psat_admin_actor = ADMIN_KEY_ACTOR
         return
     # A wrong key is a hard fail even with a valid cookie, so a stale key in a script surfaces instead of hiding.
     if x_psat_admin_key:
@@ -136,11 +140,20 @@ def require_admin(request: Request, x_psat_admin_key: str | None = Header(defaul
     if rejection is not None:
         _reject_admin(request, rejection)
     check_same_origin(request)
+    request.state.psat_admin_actor = f"account:{user.id}"
     # Mutation audit lines carry the same trace_id, which ties them to this account.
     logger.info(
         "admin access via account",
         extra={"trace_id": trace_id_var.get(), "path": request.url.path, "user_id": str(user.id)},
     )
+
+
+def admin_actor(request: Request, _: None = Depends(require_admin)) -> str:
+    """Who ``require_admin`` authenticated: ``account:<user id>``, or :data:`ADMIN_KEY_ACTOR` for the shared key."""
+    actor = getattr(request.state, "psat_admin_actor", None)
+    if not isinstance(actor, str) or not actor:
+        _reject_admin(request, "admin_actor_not_determined")
+    return actor
 
 
 def is_admin_request(request: Request, x_psat_admin_key: str | None) -> bool:
@@ -168,6 +181,7 @@ def _normalize_address_or_400(address: str) -> str:
 
 __all__ = [
     "ADMIN_KEY",
+    "ADMIN_KEY_ACTOR",
     "DEFAULT_RPC_URL",
     "MAX_TVL_HISTORY_DAYS",
     "SessionLocal",
@@ -178,6 +192,7 @@ __all__ = [
     "StorageUnavailable",
     "_ADDRESS_RE",
     "_normalize_address_or_400",
+    "admin_actor",
     "check_same_origin",
     "create_job",
     "current_user",

@@ -90,6 +90,13 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
     )
 
 
+@router.get("/api/companies", dependencies=[Depends(deps.require_admin)], response_model=None)
+def list_companies() -> list[str]:
+    """Every protocol row, analyzed or not: the names ``/api/analyze`` can link a submission to."""
+    with deps.SessionLocal() as session:
+        return list(session.execute(select(Protocol.name).order_by(func.lower(Protocol.name))).scalars())
+
+
 @router.get("/api/company/{company_name}", response_model=None)
 def company_overview(company_name: str, response: Response, request: Request) -> CompanyOverviewResponse | Response:
     started = time.monotonic()

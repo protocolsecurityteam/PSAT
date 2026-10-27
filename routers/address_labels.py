@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from db.models import AddressLabel
 from schemas.api_requests import AddressLabelUpsert
@@ -30,6 +32,30 @@ def _resolve_chain_or_400(chain: str | None) -> str | None:
         return chain_by_name(chain).name
     except UnknownChainError:
         raise HTTPException(status_code=400, detail=f"Unknown chain: {chain!r}") from None
+
+
+def _label_row(session: Session, address: str, chain: str | None) -> AddressLabel | None:
+    stmt = select(AddressLabel).where(AddressLabel.address == address)
+    stmt = stmt.where(AddressLabel.chain == chain) if chain is not None else stmt.where(AddressLabel.chain.is_(None))
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def create_label_if_absent(session: Session, address: str, chain: str, name: str) -> bool:
+    """Write a chain-qualified label only when the address shows no name on ``chain`` yet; never overwrites.
+
+    A global row counts as existing: a new override would shadow it on that chain.
+    """
+    if _label_row(session, address, chain) is not None or _label_row(session, address, None) is not None:
+        return False
+    try:
+        with session.begin_nested():
+            session.add(AddressLabel(address=address, chain=chain, name=name))
+    except IntegrityError:
+        # Raced by a concurrent writer; theirs stands.
+        return False
+    session.commit()
+    deps.log_admin_mutation("address_label_create", id=f"{chain}:{address}")
+    return True
 
 
 def _row_view(row: AddressLabel) -> AddressLabelView:
@@ -68,9 +94,7 @@ def upsert_address_label(
     a = deps._normalize_address_or_400(address)
     c = _resolve_chain_or_400(chain)
     with deps.SessionLocal() as session:
-        stmt = select(AddressLabel).where(AddressLabel.address == a)
-        stmt = stmt.where(AddressLabel.chain == c) if c is not None else stmt.where(AddressLabel.chain.is_(None))
-        row = session.execute(stmt).scalar_one_or_none()
+        row = _label_row(session, a, c)
         if row is None:
             row = AddressLabel(address=a, chain=c, name=payload.name.strip(), note=payload.note)
             session.add(row)
@@ -96,9 +120,7 @@ def delete_address_label(
     a = deps._normalize_address_or_400(address)
     c = _resolve_chain_or_400(chain)
     with deps.SessionLocal() as session:
-        stmt = select(AddressLabel).where(AddressLabel.address == a)
-        stmt = stmt.where(AddressLabel.chain == c) if c is not None else stmt.where(AddressLabel.chain.is_(None))
-        row = session.execute(stmt).scalar_one_or_none()
+        row = _label_row(session, a, c)
         if row is None:
             raise HTTPException(status_code=404, detail="Label not found")
         session.delete(row)
