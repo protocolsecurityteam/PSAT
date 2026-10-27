@@ -10,7 +10,8 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
     ``--scope-skip`` (both runs skipped enumerating self-scoped functions, ``PSAT_LOGIC_SCOPE_SKIP=1``), both rows
     say the function is self-scoped. Without it a self-scoped row is enumerated like any other and must keep its
     holders. A row that turns self-scoped never hides what it stopped listing. A new row that errored counts as
-    losing them.
+    losing them. A holder either run's replay shows passing that neither run lists at all is a loss too (``(b)
+    missed``): listed by nobody is no better than dropped.
 (c) ``--budget-only``: the two runs differ only in budgets (work, history caps, candidate limits). A budget may cost
     completeness, never the answer: openness and the listed set must be identical; ``complete`` and gaps may differ.
 (d) Always: a new row claiming "provably nobody" (restricted, complete, nobody listed) where the harness replayed a
@@ -24,12 +25,17 @@ Witnessed and proven opens (``lego_witnessed``: an open resting on what sampled 
 every unconfigured address) are two claims: under (a) and (c) a witnessed open turning proven is a change, failed
 like any other gain; a proven open turning witnessed is a confidence-only move, printed, never a failure. A row
 without the field (a run from before it) says nothing either way.
-A row that appears twice within the old files, or within the new ones, stops the comparison with an error.
+A row that appears twice within the old files, or within the new ones, stops the comparison with an error, unless
+the copies come from different engine commits (``lego_commit``, a resumed run re-deciding what an older commit left):
+then the one written last (``written``) counts.
 
 Always printed, not a failure by itself: every row whose scope changed (or turned self-scoped, where the old run
 recorded none), with how many replay-confirmed holders it stopped listing; how many new rows skipped enumerating
 holders as self-scoped (``self_scoped`` among ``lego_gaps``), and each of those where a holder the harness replayed
-(prod's, ``checks[p] is True``) goes through, so a function wrongly labelled self-scoped shows in the diff.
+(prod's, ``checks[p] is True``) goes through, so a function wrongly labelled self-scoped shows in the diff; every
+holder that moved from listed now (a principal) to listed only on conditions (``lego_conditions``), and back, which
+is neither a loss nor a gain; and each conditional holder whose own replayed call goes through now (a holder listed
+as conditional that the chain shows passing as things stand: a labelling error).
 """
 
 from __future__ import annotations
@@ -60,14 +66,31 @@ def load(patterns: list[str]) -> dict[tuple, dict]:
                     corpus = row.get("corpus") or (named.group(1) if named else "")
                     key = (corpus, row["address"].lower(), row["function"], row.get("contract"))
                     if key in rows:
-                        raise DuplicateRow(f"duplicate row {key}: {seen[key]} and {path}:{number}")
+                        before = rows[key]
+                        commits = (before.get("lego_commit"), row.get("lego_commit"))
+                        if None in commits or commits[0] == commits[1]:
+                            raise DuplicateRow(f"duplicate row {key}: {seen[key]} and {path}:{number}")
+                        if (before.get("written") or 0) >= (row.get("written") or 0):
+                            continue
                     rows[key], seen[key] = row, f"{path}:{number}"
     return rows
 
 
+def principals(row: dict) -> set[str]:
+    return {p.lower() for p in row.get("lego_principals") or []}
+
+
+def conditional(row: dict) -> set[str]:
+    return {"0x" + format(int(q, 16), "040x") for q in row.get("lego_conditions") or {}}
+
+
 def listed(row: dict) -> set[str]:
-    conditional = {"0x" + format(int(q, 16), "040x") for q in row.get("lego_conditions") or {}}
-    return {p.lower() for p in row.get("lego_principals") or []} | conditional
+    return principals(row) | conditional(row)
+
+
+def passing(row: dict) -> set[str]:
+    """Holders whose own call the harness replayed and saw go through."""
+    return {p.lower() for p, ok in (row.get("checks") or {}).items() if ok is True and p != "anyone"}
 
 
 def verdict(row: dict) -> str | None:
@@ -97,8 +120,37 @@ def confidence_moves(old: dict[tuple, dict], new: dict[tuple, dict]) -> list[str
 
 
 def _confirmed_lost(a: dict, b: dict) -> list[str]:
-    confirmed = {p for p, ok in (a.get("checks") or {}).items() if ok is True and p != "anyone"}
-    return sorted((confirmed & listed(a)) - listed(b))
+    return sorted((passing(a) & listed(a)) - listed(b))
+
+
+def _missed(a: dict, b: dict) -> list[str]:
+    """Holders either run's replay shows passing that neither run lists."""
+    return sorted((passing(a) | passing(b)) - listed(a) - listed(b))
+
+
+def condition_moves(old: dict[tuple, dict], new: dict[tuple, dict]) -> list[str]:
+    """Holders listed now in one run and only on conditions in the other: a change of label, not of who is listed."""
+    out = []
+    for key in sorted(old.keys() & new.keys()):
+        a, b = old[key], new[key]
+        where = f"{key[0]} {a.get('contract')}.{key[2]} @ {key[1]}"
+        down, up = principals(a) & conditional(b), conditional(a) & principals(b)
+        if down:
+            out.append(f"{where}: {len(down)} now -> conditional {sorted(down)[:4]}")
+        if up:
+            out.append(f"{where}: {len(up)} conditional -> now {sorted(up)[:4]}")
+    return out
+
+
+def conditional_passing(new: dict[tuple, dict]) -> list[str]:
+    """New rows listing a holder as conditional whose own replayed call goes through as things stand."""
+    out = []
+    for key in sorted(new):
+        row = new[key]
+        mislabelled = sorted(conditional(row) & passing(row))
+        if mislabelled:
+            out.append(f"{key[0]} {row.get('contract')}.{key[2]} @ {key[1]}: {len(mislabelled)} {mislabelled[:4]}")
+    return out
 
 
 def failures(
@@ -122,6 +174,9 @@ def failures(
             lost = _confirmed_lost(a, b)
             if lost:
                 out.append(f"(b) lost {len(lost)} replay-confirmed holder(s) {lost[:4]}: {where} ({verdict(b)})")
+            missed = _missed(a, b)
+            if missed:
+                out.append(f"(b) missed {len(missed)} replay-confirmed holder(s) {missed[:4]}: {where} ({verdict(b)})")
         if budget_only and (verdict(a) != verdict(b) or listed(a) != listed(b)):
             out.append(
                 f"(c) budget changed the answer: {where} {verdict(a)}/{len(listed(a))} -> {verdict(b)}/{len(listed(b))}"
@@ -169,9 +224,9 @@ def skipped_passing(new: dict[tuple, dict]) -> list[str]:
     out = []
     for key in sorted(new):
         row = new[key]
-        passing = sorted(p for p, ok in (row.get("checks") or {}).items() if ok is True and p != "anyone")
-        if skipped(row) and passing:
-            out.append(f"{key[0]} {row.get('contract')}.{key[2]} @ {key[1]}: {', '.join(passing[:4])}")
+        through = sorted(passing(row))
+        if skipped(row) and through:
+            out.append(f"{key[0]} {row.get('contract')}.{key[2]} @ {key[1]}: {', '.join(through[:4])}")
     return out
 
 
@@ -194,9 +249,17 @@ def main(argv: list[str] | None = None) -> int:
     for line in flips:
         print("  " + line)
     print(f"skipped self-scoped rows: {sum(skipped(row) for row in new.values())}")
-    passing = skipped_passing(new)
-    print(f"skipped rows a prod holder's replay passes: {len(passing)}")
-    for line in passing:
+    through = skipped_passing(new)
+    print(f"skipped rows a prod holder's replay passes: {len(through)}")
+    for line in through:
+        print("  " + line)
+    moves = condition_moves(old, new)
+    print(f"holders moved between now and conditional: {len(moves)}")
+    for line in moves:
+        print("  " + line)
+    mislabelled = conditional_passing(new)
+    print(f"rows listing a conditional holder whose call goes through now: {len(mislabelled)}")
+    for line in mislabelled:
         print("  " + line)
     moves = confidence_moves(old, new)
     print(f"confidence-only moves: {len(moves)}")
