@@ -2283,12 +2283,15 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # (its callee unfollowed, or its code only proposing), keeps the stranger undecided, or open only on
         # conditions: its call, run once on the chain, settles it when every stranger's goes through. One that fails
         # proves nothing (other arguments, another state) and changes nothing.
-        found = _executes(formula, world, FRESH, set(), tries=1)
-        if found is not None and strangers_run(formula, world, found, tries=1):
+        unanswered: list = []
+        found = _executes(formula, world, FRESH, set(), tries=1, unanswered=unanswered)
+        if found is not None and strangers_run(formula, world, found, tries=1, unanswered=unanswered):
             world.sampled = True
             verdict = Verdict("open", frozenset(), True, witnesses={FRESH: found})
         elif found is not None and verdict.openness == "not_determined":
-            verdict = replace(verdict, gaps=(*verdict.gaps, "strangers_differ"))
+            # Another stranger's call failing where ``FRESH``'s went through: the strangers differ, unless the node
+            # left it unanswered, which is no failure of theirs.
+            verdict = replace(verdict, gaps=(*verdict.gaps, "read_failed:run" if unanswered else "strangers_differ"))
     if verdict.openness == "not_determined" and free:
         # What only the conditions leave open is theirs to report, not a reason the answer is open; a failed read and
         # a callee not followed (never set aside as a condition) always are.
@@ -2338,7 +2341,9 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
     arranged first), ``open_assumed_action_unconfirmed`` (an action assumed or handed the caller), else
     ``open_unconfirmed``; the proposal stays, as data. An open the chain refuses is never kept on an account of what
     refused it: an action the code assumes succeeds (a creation, ether sent, a call whose result it checks) is a
-    callee's decision, on whatever that callee reads (``tx.origin`` among them), whoever hands it what."""
+    callee's decision, on whatever that callee reads (``tx.origin`` among them), whoever hands it what. A call of any
+    stranger's the node didn't answer, on any of these paths (with ether, its first calls, the calls bringing its
+    entries about), is named ``read_failed:run`` beside the gap: the code refused nobody."""
     rests_on, brought = world.rests_on, world.brought
     prior_runs = world.__dict__.pop("_prior_runs", None)
     if verdict.openness != "open" or verdict.allowed != "now" or verdict.requires:
@@ -2347,21 +2352,23 @@ def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
     witness = verdict.witnesses.get(FRESH, {})
     unanswered: list = []  # the stranger's own calls the node didn't answer (a timeout, an abort): no refusal
     if verdict.after:
-        if prior_runs is not None and _after_runs(world, witness, *prior_runs):
+        if prior_runs is not None and _after_runs(world, witness, *prior_runs, unanswered=unanswered):
             world.sampled = True
             return verdict
         gap = "open_arranged_unconfirmed"
     else:
         ran = runs(world, FRESH, witness)
+        if ran is None:
+            unanswered.append(witness)
         if ran is True:
-            if strangers_run(formula, world, witness):
+            if strangers_run(formula, world, witness, unanswered=unanswered):
                 return verdict
         elif not witness.get("msg.value"):
             found = _executes(formula, world, FRESH, set(), tries=2, unanswered=unanswered)
-            if found is not None and strangers_run(formula, world, found):
+            if found is not None and strangers_run(formula, world, found, unanswered=unanswered):
                 world.sampled = True
                 return replace(verdict, witnesses={**verdict.witnesses, FRESH: found})
-        if "action" in rests_on and brought and _brought_runs(world, witness, brought):
+        if "action" in rests_on and brought and _brought_runs(world, witness, brought, unanswered=unanswered):
             world.sampled = True
             return verdict
         if "action" in rests_on and any(c in world.requirements for c in subterms(formula, "call")):
@@ -2405,27 +2412,43 @@ def _overrides(words: dict) -> dict | None:
     return out
 
 
-def _after_runs(world: World, witness: dict[str, Any], first: bytes | None, made_by: dict[int, dict]) -> bool:
+def _after_runs(
+    world: World,
+    witness: dict[str, Any],
+    first: bytes | None,
+    made_by: dict[int, dict],
+    unanswered: list | None = None,
+) -> bool:
     """Whether, for each stranger, its first call (``first``) goes through as the chain stands, and this call with
-    ``witness`` then goes through on the words that call leaves (``made_by``), handed to the node as overrides."""
+    ``witness`` then goes through on the words that call leaves (``made_by``), handed to the node as overrides. A
+    call the node didn't answer (neither of the two) is appended to ``unanswered``: no refusal."""
     if first is None:
         return False
     for who in (FRESH, *_OTHER_STRANGERS):
         words = made_by.get(who)
         overrides = _overrides(words) if words is not None else None
-        if overrides is None or not isinstance(world.chain.call(world.this, first, who), bytes):
+        if overrides is None:
+            return False
+        answer = world.chain.call(world.this, first, who)
+        if not isinstance(answer, bytes):
+            if answer is not REVERTED and unanswered is not None:
+                unanswered.append({"first": who})
             return False
         own = {k: who if v == FRESH else v for k, v in witness.items()}
-        if runs(world, who, own, overrides) is not True:
+        ran = runs(world, who, own, overrides)
+        if ran is not True:
+            if ran is None and unanswered is not None:
+                unanswered.append(own)
             return False
     return True
 
 
-def _brought_runs(world: World, witness: dict[str, Any], brought: list) -> bool:
+def _brought_runs(world: World, witness: dict[str, Any], brought: list, unanswered: list | None = None) -> bool:
     """Whether, for each stranger, every call that brings its entries about in an action's callee (``brought``: each
     action's call, and (target, the entries, the calls that bring them about)) goes through as the chain stands, and
     this call with ``witness`` then goes through on the words those calls leave there (worked out from their lowering,
-    ``verdict.writer_words``), handed to the node as state overrides."""
+    ``verdict.writer_words``), handed to the node as state overrides. A call the node didn't answer (a maker's, or
+    this one) is appended to ``unanswered``: no refusal."""
     from .verdict import call_data, writer_words
 
     if any(makers is None for _, (_, _, makers) in brought):
@@ -2436,7 +2459,12 @@ def _brought_runs(world: World, witness: dict[str, Any], brought: list) -> bool:
             for function, arguments in makers:
                 own = {k: who if v == FRESH else v for k, v in arguments.items()}
                 data = call_data(function, own)
-                if data is None or not isinstance(world.chain.call(target, data, who), bytes):
+                if data is None:
+                    return False
+                answer = world.chain.call(target, data, who)
+                if not isinstance(answer, bytes):
+                    if answer is not REVERTED and unanswered is not None:
+                        unanswered.append(own)
                     return False
                 made = writer_words(world, target, function, own, who)
                 if made is None:
@@ -2444,7 +2472,12 @@ def _brought_runs(world: World, witness: dict[str, Any], brought: list) -> bool:
                 words.update(made)
         overrides = _overrides(words)
         own = {k: who if v == FRESH else v for k, v in witness.items()}
-        if not overrides or runs(world, who, own, overrides) is not True:
+        if not overrides:
+            return False
+        ran = runs(world, who, own, overrides)
+        if ran is not True:
+            if ran is None and unanswered is not None:
+                unanswered.append(own)
             return False
     return True
 
@@ -2749,9 +2782,15 @@ def _decide_arranged(formula: Term, world: World, coverage: Coverage) -> Verdict
         unsingled = tuple(f"callee_unsingled:{signature}" for signature in coded)
         if now is True:
             witness = _argument_values(found)
-            if coded and not (runs(world, FRESH, witness) is True and strangers_run(formula, world, witness)):
+            unanswered: list = []
+            ran = runs(world, FRESH, witness) if coded else True
+            if ran is None:
+                unanswered.append(witness)
+            if coded and not (ran is True and strangers_run(formula, world, witness, unanswered=unanswered)):
                 # Every stranger alike only on a callee's code: open only where each one's own call goes through.
-                return Verdict("not_determined", frozenset(), False, gaps=(*unsingled, "strangers_differ"))
+                # A call the node didn't answer is no stranger's failure.
+                gap = "read_failed:run" if unanswered else "strangers_differ"
+                return Verdict("not_determined", frozenset(), False, gaps=(*unsingled, gap))
             world.sampled = world.sampled or bool(coded)
             return Verdict("open", frozenset(), True, witnesses={FRESH: witness})
         if coded:
@@ -3760,15 +3799,22 @@ def _executes(
     return None
 
 
-def strangers_run(formula: Term, world: World, witness: dict[str, Any], tries: int | None = None) -> bool:
+def strangers_run(
+    formula: Term, world: World, witness: dict[str, Any], tries: int | None = None, unanswered: list | None = None
+) -> bool:
     """Whether every other stranger's own call goes through on the chain, as ``FRESH``'s did with ``witness``: one
     passing proves little where the caller's address (or the origin a callee reads) feeds arithmetic, so each of
     ``_OTHER_STRANGERS`` must pass too (``_strangers_pass``), with ``FRESH``'s arguments, its own address where they
-    held ``FRESH``'s, or a search of its own."""
+    held ``FRESH``'s, or a search of its own. A call the node didn't answer is appended to ``unanswered``, as
+    ``_executes`` does: it refused nobody, and is never read as the code's doing."""
     for other in _OTHER_STRANGERS:
         own = {k: other if v == FRESH else v for k, v in witness.items()}
-        if runs(world, other, own) is not True and _executes(formula, world, other, set(), tries=tries) is None:
-            return False
+        ran = runs(world, other, own)
+        if ran is True or _executes(formula, world, other, set(), tries=tries, unanswered=unanswered) is not None:
+            continue
+        if ran is None and unanswered is not None:
+            unanswered.append(own)
+        return False
     return True
 
 

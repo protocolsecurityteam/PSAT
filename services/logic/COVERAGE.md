@@ -371,8 +371,13 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
     ``open_assumed_action_unconfirmed`` (an action assumed, or handed the caller: the contract's own Yul call into
     always-reverting code whose result it checks, A52, ``selfCall``; a creation; a ``transfer``), else
     ``open_unconfirmed`` (the code itself misread; probes ``q2_arranged``, ``q2c``, ``q5_declared``, ``q2d_value``:
-    ``test_open_confirmed``), plus ``read_failed:run`` where the node left a stranger's own call unanswered (a
-    timeout, an abort, a cap: never read as a refusal, ``decide._is_revert``). A node that refuses state overrides
+    ``test_open_confirmed``), plus ``read_failed:run`` where the node left any of the five strangers' own calls
+    unanswered (a timeout, an abort, a cap: never read as a refusal, ``decide._is_revert``), on every path that runs
+    them: ``FRESH``'s call and the other four's (``strangers_run``), with ether, its first calls (``_after_runs``) and
+    the calls bringing its entries about (``_brought_runs``); and where ``strangers_differ`` would otherwise blame
+    the strangers (``decide``, the callee-coded open in ``_decide``). Before round ten-c only ``FRESH``'s own
+    unanswered search was named, so the other four's timing out read ``open_unconfirmed`` ("the code misread") and
+    a payable's ``open_value_unconfirmed`` (probe q1; ``test_open_business`` ``Open``). A node that refuses state overrides
     answers with an error, read as unknown: not determined, never open. "Open later" never rests on a callee's answer
     (see G6).
     An open once the conditions allow (or only with some set aside) on the stranger's own entries arranged
@@ -508,7 +513,11 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   hardhat/ganache "VM Exception"; "revert"/"reverted" as words) and only after no word of the node's own trouble
   (timeout, timed out, aborted, deadline, cancelled, rate limit, exceeds allowance, gas cap, unavailable, connection,
   internal error) is in the message: such a call is unanswered, ``read_failed:run`` on an unconfirmed open, never
-  determined (``test_open_business``: the vocabularies, a timing-out chain, ``_oracle.Faulty``).
+  determined (``test_open_business``: the vocabularies, a timing-out chain, ``_oracle.Faulty``). Round ten-c: the
+  label was emitted only from ``FRESH``'s own search (``_executes``); the other strangers' unanswered calls
+  (``strangers_run``) and a payable witness's read as the code's or the ether's doing. ``unanswered`` is now threaded
+  through every stranger path (see ``read_failed:run`` above), and ``strangers_differ`` is never said of a call the
+  node didn't answer.
 
 ### Stated assumptions (not constructs)
 

@@ -7,14 +7,16 @@ determined, ``open_assumed_action_unconfirmed``, like every open resting on such
 chain refuses; an action whose outcome the code doesn't require (an unchecked low-level call) is no such condition,
 and the function stays open once the strangers' own calls go through. A node that didn't answer the stranger's call
 (geth's ``execution aborted (timeout = 5s)``, a transport failure) refused nobody: not determined, ``read_failed:run``,
-never a refusal read from the message (``decide._is_revert``). The sweep ranks an open carrying a condition below one
-carrying none (``never_bolder``)."""
+never a refusal read from the message (``decide._is_revert``), whichever stranger's call it was and whether or not it
+sent ether (round ten-c, probe q1: only ``FRESH``'s own unanswered call was named; the other four strangers' were
+blamed on the code, ``open_unconfirmed``, and a payable's on the ether, ``open_value_unconfirmed``). The sweep ranks
+an open carrying a condition below one carrying none (``never_bolder``)."""
 
 from __future__ import annotations
 
 import pytest
 
-from services.logic.decide import FRESH, Chain, Verdict, _is_revert
+from services.logic.decide import _OTHER_STRANGERS, _STRANGERS, FRESH, Chain, Verdict, _is_revert, batch_results
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
 from tests.support.anvil import rpc
@@ -105,6 +107,16 @@ contract Forwarder {
 }
 """
 
+OPEN = """
+pragma solidity 0.8.27;
+
+contract Open {
+    uint256 public n;
+    function go(uint256 x) external { n += x; }
+    function payIn() external payable { require(msg.value > 0); n += msg.value; }
+}
+"""
+
 APP = 1
 ORIGIN_CASES = [("exec", {"data": b"\x01"}), ("execYul", {"x": 1}), ("pay", {"amt": 0}), ("spawn", {"x": 1})]
 
@@ -122,6 +134,7 @@ def _origin(d):
 
 PROBES = [
     O.Probe(SOURCE, _setup, (("Factory", "newAppProxy", ()), ("Factory", "stuck", ()))),
+    O.Probe(OPEN, lambda d: d.deploy("Open"), (("Open", "go", ()), ("Open", "payIn", ()))),
     O.Probe(ORIGIN, _origin, tuple(("Forwarder", name, ()) for name, _ in ORIGIN_CASES) + (("Forwarder", "fire", ()),)),
 ]
 
@@ -137,6 +150,13 @@ def d(anvil):  # noqa: F811
 def origin(anvil):  # noqa: F811
     d = O.deployment(*anvil, ORIGIN)
     _origin(d)
+    return d
+
+
+@pytest.fixture(scope="module")
+def plain(anvil):  # noqa: F811
+    d = O.deployment(*anvil, OPEN)
+    d.deploy("Open")
     return d
 
 
@@ -180,15 +200,82 @@ def test_an_action_whose_outcome_the_code_ignores_leaves_the_function_open(origi
     assert v.openness == "open" and v.allowed == "now", v
 
 
-def _timing_out(d, who: set[int]) -> Chain:
-    """The deployment's chain, answering the strangers' ``eth_call`` as geth does when it stops a long call."""
+def _timing_out(d, who: set[int], batch_too: bool = False) -> Chain:
+    """The deployment's chain, answering ``who``'s ``eth_call`` as geth does when it stops a long call; with
+    ``batch_too``, a batch leaves their slots unanswered as well."""
 
     def one(method, params):
         if method == "eth_call" and int(params[0].get("from", "0x0"), 16) in who:
             raise RuntimeError("execution aborted (timeout = 5s)")
         return rpc(d.url, method, params)
 
-    return Chain(one, int(rpc(d.url, "eth_blockNumber", []), 16), None)
+    def batch(calls):
+        out = []
+        for m, p in calls:
+            try:
+                out.append(one(m, p))
+            except RuntimeError:
+                out.append(None)
+        return out
+
+    return Chain(one, int(rpc(d.url, "eth_blockNumber", []), 16), batch if batch_too else None)
+
+
+def _transient(d, who: set[int]) -> Chain:
+    """A node whose batch drops ``who``'s calls wholesale (TRANSIENT, as the RPC client reports a chunk that failed)
+    and whose single read of them times out: never an answer, never a refusal."""
+
+    def one(method, params):
+        if method == "eth_call" and int(params[0].get("from", "0x0"), 16) in who:
+            raise RuntimeError("Read timed out")
+        return rpc(d.url, method, params)
+
+    def batch(calls):
+        classified = []
+        for m, p in calls:
+            if m == "eth_call" and int(p[0].get("from", "0x0"), 16) in who:
+                classified.append((None, "transport"))
+                continue
+            try:
+                classified.append((rpc(d.url, m, p), "ok"))
+            except RuntimeError as exc:
+                classified.append(({"message": str(exc)}, "error"))
+        return batch_results(classified)
+
+    return Chain(one, int(rpc(d.url, "eth_blockNumber", []), 16), batch)
+
+
+WHO = {"all": set(_STRANGERS), "fresh": {FRESH}, "others": set(_OTHER_STRANGERS)}
+
+
+def test_a_plain_open_is_open_now(plain):
+    for name in ("go", "payIn"):
+        v = O.check(plain, "Open", name, O.verdict(plain, "Open", name))
+        assert v.openness == "open" and v.allowed == "now", (name, v)
+
+
+@pytest.mark.parametrize("who", sorted(WHO))
+@pytest.mark.parametrize("name", ["go", "payIn"])
+def test_whichever_strangers_call_goes_unanswered_names_read_failed_run(plain, name, who):
+    """Round ten-c, probe q1: ``FRESH``'s own call passing and another stranger's timing out, or a payable's call
+    with ether timing out, is the node's doing, never the code's or the ether's."""
+    clean = O.verdict(plain, "Open", name)
+    v = O.verdict(plain, "Open", name, chain=_timing_out(plain, WHO[who], batch_too=True))
+    O.never_bolder(clean, v)
+    assert v.openness == "not_determined", v
+    assert "read_failed:run" in v.gaps, (name, who, v.gaps)
+
+
+@pytest.mark.parametrize("who", sorted(WHO))
+def test_a_transient_batch_of_stranger_calls_is_no_refusal_and_no_pass(plain, who, monkeypatch):
+    from services.logic import decide as D
+
+    monkeypatch.setattr(D, "BATCH_RETRY_WAIT", 0.0)
+    clean = O.verdict(plain, "Open", "go")
+    v = O.verdict(plain, "Open", "go", chain=_transient(plain, WHO[who]))
+    O.never_bolder(clean, v)
+    assert v.openness == "not_determined", v
+    assert "read_failed:run" in v.gaps, (who, v.gaps)
 
 
 @pytest.mark.parametrize("faulty", [lambda d: O.Faulty(d, calls=True), lambda d: _timing_out(d, set(O.STRANGERS))])
