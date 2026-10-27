@@ -54,8 +54,13 @@ class BulkAnalyzeRowResult(TypedDict):
     label: BulkLabelOutcome | None
 
 
+# ``not_created``: the company matched nothing and no row queued, so nothing was written.
+BulkCompanyStatus = Literal["existing", "created", "not_created"]
+
+
 class BulkAnalyzeResponse(TypedDict):
     company: str
+    company_status: BulkCompanyStatus
     queued: int
     rejected: int
     duplicate: int

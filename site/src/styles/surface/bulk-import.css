@@ -17,11 +17,23 @@
   color: #cbd5e1;
 }
 
-.ps-bulk-import-company select {
+.ps-bulk-import-company input {
   width: 200px;
   padding: 7px 10px;
   border-radius: 8px;
   font-size: 12px;
+}
+
+.ps-bulk-import-company-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ps-bulk-import-company-match {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e2e8f0;
 }
 
 .ps-bulk-import-hint {

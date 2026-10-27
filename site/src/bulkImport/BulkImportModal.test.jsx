@@ -22,6 +22,7 @@ function mockApi(posted) {
       posted.push(body);
       return {
         company: body.company,
+        company_status: "existing",
         queued: 1,
         rejected: 1,
         duplicate: 0,
@@ -32,6 +33,14 @@ function mockApi(posted) {
       };
     },
   );
+}
+
+async function companiesLoaded() {
+  await waitFor(() => expect(document.querySelector("#bulk-import-companies option[value='lido']")).not.toBeNull());
+}
+
+function typeCompany(value) {
+  fireEvent.change(screen.getByLabelText("Company"), { target: { value } });
 }
 
 async function upload(text) {
@@ -45,7 +54,7 @@ describe("BulkImportModal", () => {
     const posted = [];
     mockApi(posted);
     render(<BulkImportModal onClose={() => {}} />);
-    await screen.findByRole("option", { name: "lido" });
+    await companiesLoaded();
     expect(screen.getByText("Choose a CSV")).toBeInTheDocument();
 
     await upload(`address,chain,name\n${A},ethereum,Vault\n${B},base,Off\n0xzz,ethereum,Bad\n${A},mainnet,Dup\n${B},ethereum,`);
@@ -56,7 +65,7 @@ describe("BulkImportModal", () => {
 
     const queue = screen.getByRole("button", { name: "Queue 2 analyses" });
     expect(queue).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Company"), { target: { value: "lido" } });
+    typeCompany("lido");
     expect(queue).toBeEnabled();
     fireEvent.click(queue);
 
@@ -75,6 +84,92 @@ describe("BulkImportModal", () => {
     expect(screen.getByText(/job 7f3a1c09 · name over 255 characters, no label saved/)).toBeInTheDocument();
     expect(screen.getAllByText("not sent")).toHaveLength(3);
     expect(screen.getByText("3 not sent")).toBeInTheDocument();
+    expect(screen.getByText("existing company")).toBeInTheDocument();
+    expect(screen.getByTestId("bulk-import-result-company")).toHaveTextContent(/^lido$/);
+    expect(screen.queryByText("company created")).not.toBeInTheDocument();
+  });
+
+  it("says whether the typed company links to an existing one or is new", async () => {
+    const posted = [];
+    mockApi(posted);
+    render(<BulkImportModal onClose={() => {}} />);
+    await companiesLoaded();
+    await upload(`address,chain\n${A},ethereum`);
+    const queue = screen.getByRole("button", { name: "Queue 1 analysis" });
+
+    expect(screen.queryByText(/existing company|New company/)).not.toBeInTheDocument();
+    expect(queue).toBeDisabled();
+    typeCompany("   ");
+    expect(screen.queryByText(/existing company|New company/)).not.toBeInTheDocument();
+    expect(queue).toBeDisabled();
+
+    typeCompany("  LIDO ");
+    expect(screen.getByText("existing company")).toBeInTheDocument();
+    expect(screen.getByTestId("bulk-import-company-match")).toHaveTextContent(/^lido$/);
+    expect(screen.queryByText(/New company/)).not.toBeInTheDocument();
+    expect(queue).toBeEnabled();
+
+    typeCompany("Lidoo");
+    expect(screen.getByText("New company — created if a row queues")).toBeInTheDocument();
+    expect(screen.queryByText("existing company")).not.toBeInTheDocument();
+
+    typeCompany("  Brand New  ");
+    fireEvent.click(queue);
+    await screen.findByRole("button", { name: "Import another" });
+    expect(posted[0].company).toBe("Brand New");
+  });
+
+  it("says no company was created when no row queued", async () => {
+    setFetchHandler((url) => url.pathname === "/api/companies", () => ["lido"]);
+    setFetchHandler((url) => url.pathname === "/api/config", () => new Response("down", { status: 503 }));
+    setFetchHandler((url) => url.pathname === "/api/analyze/bulk", () => ({
+      company: "Fresh Co",
+      company_status: "not_created",
+      queued: 0,
+      rejected: 1,
+      duplicate: 0,
+      results: [{ row: 0, status: "rejected", job_id: null, label: null, reason: "chain not enabled" }],
+    }));
+    render(<BulkImportModal onClose={() => {}} />);
+    await companiesLoaded();
+    await upload(`address,chain\n${A},arbitrum`);
+    typeCompany("Fresh Co");
+    fireEvent.click(screen.getByRole("button", { name: "Queue 1 analysis" }));
+    await screen.findByText("not created (no row queued)");
+    expect(screen.getByTestId("bulk-import-result-company")).toHaveTextContent(/^Fresh Co$/);
+    expect(screen.queryByText("existing company")).not.toBeInTheDocument();
+    expect(screen.queryByText("company created")).not.toBeInTheDocument();
+  });
+
+  it("works as free text without suggestions or a match claim when the company list fails", async () => {
+    const posted = [];
+    setFetchHandler((url) => url.pathname === "/api/companies", () => new Response("down", { status: 503 }));
+    setFetchHandler((url) => url.pathname === "/api/config", () => ({
+      enabled_chains: ["ethereum"], chain_spellings: { ethereum: "ethereum" },
+    }));
+    setFetchHandler((url) => url.pathname === "/api/analyze/bulk", (url, init) => {
+      const body = JSON.parse(init.body);
+      posted.push(body);
+      return {
+        company: "Acme",
+        company_status: "created",
+        queued: 1,
+        rejected: 0,
+        duplicate: 0,
+        results: [{ row: 0, status: "queued", job_id: "7f3a1c09-0000", label: null, reason: null }],
+      };
+    });
+    render(<BulkImportModal onClose={() => {}} />);
+    await upload(`address,chain\n${A},ethereum`);
+    typeCompany(" acme ");
+    expect(screen.getByLabelText("Company")).toBeEnabled();
+    expect(screen.getByLabelText("Company")).not.toHaveAttribute("list");
+    expect(document.querySelector("datalist")).toBeNull();
+    expect(screen.queryByText(/existing company|New company/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Queue 1 analysis" }));
+    await screen.findByText("company created");
+    expect(screen.getByTestId("bulk-import-result-company")).toHaveTextContent(/^Acme$/);
+    expect(posted[0].company).toBe("acme");
   });
 
   it("after an answerless failure warns about partial queuing and blocks a resend until a new file", async () => {
@@ -84,9 +179,9 @@ describe("BulkImportModal", () => {
     }));
     setFetchHandler((url) => url.pathname === "/api/analyze/bulk", () => new Response("boom", { status: 500 }));
     render(<BulkImportModal onClose={() => {}} />);
-    await screen.findByRole("option", { name: "lido" });
+    await companiesLoaded();
     await upload(`address,chain\n${A},ethereum`);
-    fireEvent.change(screen.getByLabelText("Company"), { target: { value: "lido" } });
+    typeCompany("lido");
     fireEvent.click(screen.getByRole("button", { name: "Queue 1 analysis" }));
     await screen.findByText(/Some rows may already be queued: check the jobs list/);
     expect(screen.queryByText(/try again/i)).not.toBeInTheDocument();
@@ -102,9 +197,9 @@ describe("BulkImportModal", () => {
       { status: 422, headers: { "Content-Type": "application/json" } },
     ));
     render(<BulkImportModal onClose={() => {}} />);
-    await screen.findByRole("option", { name: "lido" });
+    await companiesLoaded();
     await upload(`address,chain\n${A},ethereum`);
-    fireEvent.change(screen.getByLabelText("Company"), { target: { value: "lido" } });
+    typeCompany("lido");
     fireEvent.click(screen.getByRole("button", { name: /^Queue 1 analysis$/ }));
     await screen.findByText("rows: List should have at most 500 items");
     expect(screen.getByRole("button", { name: "Queue 1 analysis" })).toBeEnabled();
@@ -115,9 +210,9 @@ describe("BulkImportModal", () => {
     setFetchHandler((url) => url.pathname === "/api/companies", () => ["lido"]);
     setFetchHandler((url) => url.pathname === "/api/analyze/bulk", () => new Promise((resolve) => { release = resolve; }));
     render(<BulkImportModal onClose={() => {}} />);
-    await screen.findByRole("option", { name: "lido" });
+    await companiesLoaded();
     await upload(`address,chain\n${A},ethereum`);
-    fireEvent.change(screen.getByLabelText("Company"), { target: { value: "lido" } });
+    typeCompany("lido");
     fireEvent.click(screen.getByRole("button", { name: "Queue 1 analysis" }));
     await screen.findByRole("button", { name: "Queuing…" });
     expect(screen.getByLabelText("Company")).toBeDisabled();
@@ -129,7 +224,7 @@ describe("BulkImportModal", () => {
   it("refuses an over-cap file in the preview with nothing to queue", async () => {
     mockApi([]);
     render(<BulkImportModal onClose={() => {}} />);
-    await screen.findByRole("option", { name: "lido" });
+    await companiesLoaded();
     const body = Array.from({ length: 501 }, () => `${A},ethereum`).join("\n");
     fireEvent.change(screen.getByTestId("bulk-import-file"), {
       target: { files: [new File([`address,chain\n${body}`], "big.csv")] },

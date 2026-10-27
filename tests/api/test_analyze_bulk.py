@@ -112,16 +112,211 @@ def test_row_matches_a_single_submission(api_client, db_session, protocol):
     assert shape(a) == shape(b)
 
 
+@pytest.fixture()
+def new_company():
+    return f"Fresh Co {uuid.uuid4().hex[:8]}"
+
+
+def _protocols_named(db_session, name: str):
+    from db.models import Protocol
+
+    db_session.expire_all()
+    return db_session.query(Protocol).filter(Protocol.name.ilike(name)).all()
+
+
 @requires_postgres
-def test_unknown_company_404s_and_queues_nothing(api_client, db_session):
-    from db.models import Job
+def test_unknown_company_is_created_and_rows_link_to_it(api_client, db_session, new_company):
+    from services.discovery.membership_gate import HUMAN_ASSERTION_REQUEST_KEY
 
     addr = _addr()
     resp = api_client.post(
-        "/api/analyze/bulk", json={"company": f"nope-{uuid.uuid4().hex[:8]}", "rows": [{"address": addr}]}
+        "/api/analyze/bulk",
+        json={"company": f"  {new_company} ", "rows": [{"address": addr}, {"address": "0xnope"}]},
     )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["company"], body["company_status"], body["queued"]) == (new_company, "created", 1)
+    [protocol] = _protocols_named(db_session, new_company)
+    assert protocol.name == new_company
+    job = _job(db_session, body["results"][0]["job_id"])
+    assert (job.protocol_id, job.company, job.address) == (protocol.id, new_company, addr)
+    assert job.request["protocol_id"] == protocol.id
+    assert job.request[HUMAN_ASSERTION_REQUEST_KEY]["actor"]
+
+
+@requires_postgres
+def test_case_and_whitespace_variants_reuse_the_existing_company(api_client, db_session, protocol):
+    for spelling in (protocol.name.upper(), f"  {protocol.name.title()}\t"):
+        resp = api_client.post("/api/analyze/bulk", json={"company": spelling, "rows": [{"address": _addr()}]})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert (body["company"], body["company_status"]) == (protocol.name, "existing")
+        job = _job(db_session, body["results"][0]["job_id"])
+        assert (job.protocol_id, job.company) == (protocol.id, protocol.name)
+    assert [p.id for p in _protocols_named(db_session, protocol.name)] == [protocol.id]
+
+
+@requires_postgres
+def test_bulk_stores_the_canonical_spelling_where_single_keeps_the_typed_one(api_client, db_session):
+    from db.models import Protocol
+
+    canonical = f"Lido {uuid.uuid4().hex[:8]}"
+    protocol = Protocol(name=canonical)
+    db_session.add(protocol)
+    db_session.commit()
+    typed = f"  {canonical.lower()} "
+    bulk = api_client.post("/api/analyze/bulk", json={"company": typed, "rows": [{"address": _addr()}]})
+    single = api_client.post("/api/analyze", json={"address": _addr(), "company": canonical.lower()})
+    bulk_job = _job(db_session, bulk.json()["results"][0]["job_id"])
+    single_job = _job(db_session, single.json()["job_id"])
+    assert (bulk_job.company, bulk_job.protocol_id) == (canonical, protocol.id)
+    assert (single_job.company, single_job.protocol_id) == (canonical.lower(), protocol.id)
+
+
+@requires_postgres
+def test_concurrent_case_variant_imports_create_one_company(db_session, monkeypatch):
+    import threading
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm import sessionmaker
+
+    import api
+    from routers import deps, jobs
+
+    monkeypatch.setattr(deps, "SessionLocal", sessionmaker(bind=db_session.get_bind(), expire_on_commit=False))
+    real = jobs.get_or_create_protocol
+    # Holds each creator inside its create until the other arrives; only the lock keeps the second one out.
+    both_inside = threading.Barrier(2, timeout=1.5)
+
+    def rendezvous(session, name):
+        try:
+            both_inside.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return real(session, name)
+
+    monkeypatch.setattr(jobs, "get_or_create_protocol", rendezvous)
+    base = f"Foo {uuid.uuid4().hex[:8]}"
+    statuses: list[str] = []
+
+    def post(company: str) -> None:
+        resp = TestClient(api.app).post("/api/analyze/bulk", json={"company": company, "rows": [{"address": _addr()}]})
+        assert resp.status_code == 200, resp.text
+        statuses.append(resp.json()["company_status"])
+
+    threads = [threading.Thread(target=post, args=(spelling,)) for spelling in (base, base.lower())]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert len(_protocols_named(db_session, base)) == 1
+    assert sorted(statuses) == ["created", "existing"]
+
+
+@requires_postgres
+def test_second_import_of_a_new_company_links_to_the_first(api_client, db_session, new_company):
+    first = api_client.post("/api/analyze/bulk", json={"company": new_company, "rows": [{"address": _addr()}]})
+    second = api_client.post("/api/analyze/bulk", json={"company": new_company.lower(), "rows": [{"address": _addr()}]})
+    assert first.json()["company_status"] == "created"
+    assert (second.json()["company"], second.json()["company_status"]) == (new_company, "existing")
+    [protocol] = _protocols_named(db_session, new_company)
+    for resp in (first, second):
+        assert _job(db_session, resp.json()["results"][0]["job_id"]).protocol_id == protocol.id
+
+
+@requires_postgres
+def test_no_company_is_created_when_no_row_queues(api_client, db_session, new_company):
+    from db.models import Job
+
+    addr = _addr()
+    rows = [{"address": "0xzz"}, {"address": addr, "chain": "arbitrum"}, {"address": addr, "chain": "nowhere"}]
+    resp = api_client.post("/api/analyze/bulk", json={"company": new_company, "rows": rows})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["company_status"], body["queued"], body["rejected"]) == ("not_created", 0, 3)
+    assert body["company"] == new_company
+    assert _protocols_named(db_session, new_company) == []
+    assert db_session.query(Job).filter_by(address=addr).count() == 0
+
+
+def _commit_elsewhere(db_session, name: str) -> None:
+    from sqlalchemy.orm import Session
+
+    from db.models import Protocol
+
+    with Session(db_session.get_bind()) as other:
+        other.add(Protocol(name=name))
+        other.commit()
+
+
+@requires_postgres
+def test_a_lost_create_race_links_to_the_winner(api_client, db_session, new_company, monkeypatch):
+    from db.models import Protocol
+    from routers import jobs
+
+    def racing(session, name):
+        _commit_elsewhere(db_session, name)
+        session.add(Protocol(name=name))
+        session.flush()
+        raise AssertionError("the flush must lose uq_protocol_name")
+
+    monkeypatch.setattr(jobs, "get_or_create_protocol", racing)
+    resp = api_client.post("/api/analyze/bulk", json={"company": new_company, "rows": [{"address": _addr()}]})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["company_status"], body["queued"]) == ("existing", 1)
+    [protocol] = _protocols_named(db_session, new_company)
+    assert _job(db_session, body["results"][0]["job_id"]).protocol_id == protocol.id
+
+
+@requires_postgres
+def test_a_row_committed_before_the_helper_looks_is_not_reported_created(
+    api_client, db_session, new_company, monkeypatch
+):
+    from routers import jobs
+
+    real = jobs.get_or_create_protocol
+
+    def late_rival(session, name):
+        _commit_elsewhere(db_session, name)
+        return real(session, name)
+
+    monkeypatch.setattr(jobs, "get_or_create_protocol", late_rival)
+    resp = api_client.post("/api/analyze/bulk", json={"company": new_company, "rows": [{"address": _addr()}]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["company_status"] == "existing"
+    [protocol] = _protocols_named(db_session, new_company)
+    assert _job(db_session, resp.json()["results"][0]["job_id"]).protocol_id == protocol.id
+
+
+@requires_postgres
+@pytest.mark.parametrize("company", ["   ", "\t", "x" * 256])
+def test_blank_or_over_long_company_is_422(api_client, db_session, company):
+    from db.models import Job
+
+    addr = _addr()
+    resp = api_client.post("/api/analyze/bulk", json={"company": company, "rows": [{"address": addr}]})
+    assert resp.status_code == 422, resp.text
+    assert db_session.query(Job).filter_by(address=addr).count() == 0
+    assert _protocols_named(db_session, company.strip() or "") == []
+
+
+def test_company_limit_matches_the_protocol_column():
+    from db.models import Protocol
+    from routers import jobs
+
+    assert jobs._COMPANY_NAME_MAX == Protocol.name.type.length == 255
+
+
+@requires_postgres
+def test_single_submission_still_404s_on_an_unknown_company(api_client, db_session, new_company):
+    from db.models import Job
+
+    addr = _addr()
+    resp = api_client.post("/api/analyze", json={"address": addr, "company": new_company})
     assert resp.status_code == 404
     assert db_session.query(Job).filter_by(address=addr).count() == 0
+    assert _protocols_named(db_session, new_company) == []
 
 
 @requires_postgres

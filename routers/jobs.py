@@ -6,16 +6,19 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from db.models import AddressLabel, Artifact, Contract, Job, JobStage, JobStatus, Protocol, derive_job_chain_id
 from db.queue import store_artifact
+from db.queue.discovery import get_or_create_protocol
 from schemas.api_requests import AnalyzeRequest, BulkAnalyzeRequest
 from schemas.api_responses import (
     AnalyzeRemainingResponse,
     BulkAnalyzeResponse,
     BulkAnalyzeRowResult,
+    BulkCompanyStatus,
     BulkLabelOutcome,
     CancelQueuedJobsResponse,
     DeleteCompanyAddressResponse,
@@ -71,14 +74,43 @@ def _check_submission_chain(request: AnalyzeRequest) -> None:
             raise AnalyzeRejected(400, str(exc)) from exc
 
 
-def _company_protocol_id(session: Session, company: str) -> int:
-    # Lookup-only, so a typo 404s instead of minting a protocol.
-    protocol_row = session.execute(
+def _find_company(session: Session, company: str) -> Protocol | None:
+    return session.execute(
         select(Protocol).where(func.lower(Protocol.name) == company.lower()).limit(1)
     ).scalar_one_or_none()
+
+
+def _company_protocol_id(session: Session, company: str) -> int:
+    # Lookup-only, so a typo 404s instead of minting a protocol.
+    protocol_row = _find_company(session, company)
     if protocol_row is None:
         raise AnalyzeRejected(404, "Company not found")
     return protocol_row.id
+
+
+def _create_company(session: Session, company: str) -> tuple[Protocol, bool]:
+    """Find-or-create ``company`` case-insensitively; the bool is whether this call created the row."""
+    # Serializes bulk creators across case variants, which ``uq_protocol_name`` (case-sensitive) can't.
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"protocol_name:{company.lower()}"})
+    existing = _find_company(session, company)
+    if existing is not None:
+        return existing, False
+    # Other creators don't take the lock: their row may land before the helper's lookup (it returns that row, so
+    # "created" is witnessed by our own insert, not by the call returning) or lose to it on ``uq_protocol_name``.
+    inserted: list[object] = []
+
+    def _record_insert(_session: Session, instance: object) -> None:
+        inserted.append(instance)
+
+    event.listen(session, "pending_to_persistent", _record_insert)
+    try:
+        with session.begin_nested():
+            protocol = get_or_create_protocol(session, company)
+    except IntegrityError:
+        return session.execute(select(Protocol).where(Protocol.name == company)).scalar_one(), False
+    finally:
+        event.remove(session, "pending_to_persistent", _record_insert)
+    return protocol, any(obj is protocol for obj in inserted)
 
 
 def submit_analysis(session: Session, request: AnalyzeRequest, *, actor: str, protocol_id: int | None = None) -> Job:
@@ -125,6 +157,7 @@ def analyze_address(request: AnalyzeRequest, actor: str = Depends(deps.admin_act
 
 
 _LABEL_NAME_MAX: int = AddressLabel.name.type.length
+_COMPANY_NAME_MAX: int = Protocol.name.type.length
 
 
 def _label_from_name(session: Session, address: str, chain: str | None, name: str) -> BulkLabelOutcome:
@@ -152,14 +185,21 @@ def _bulk_row_key(address: str, chain: str | None) -> tuple[str, str]:
 
 @router.post("/api/analyze/bulk", dependencies=[Depends(deps.require_admin)], response_model=None)
 def analyze_bulk(body: BulkAnalyzeRequest, actor: str = Depends(deps.admin_actor)) -> BulkAnalyzeResponse:
-    """Each row is exactly a single ``/api/analyze`` address+company submission; a refused row is that row's result."""
+    """Each row is exactly a single ``/api/analyze`` address+company submission; a refused row is that row's result.
+    An unknown company is created, but only once a row is about to queue.
+    """
+    company = body.company.strip()
+    if not company:
+        raise HTTPException(status_code=422, detail="company must not be blank")
+    if len(company) > _COMPANY_NAME_MAX:
+        raise HTTPException(status_code=422, detail=f"company must be at most {_COMPANY_NAME_MAX} characters")
     results: list[BulkAnalyzeRowResult] = []
     first_row: dict[tuple[str, str], int] = {}
     with deps.SessionLocal() as session:
-        try:
-            protocol_id = _company_protocol_id(session, body.company)
-        except AnalyzeRejected as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        existing = _find_company(session, company)
+        protocol_id = existing.id if existing is not None else None
+        company_name = existing.name if existing is not None else company
+        company_status: BulkCompanyStatus = "existing" if existing is not None else "not_created"
         for index, row in enumerate(body.rows):
             address = row.address.strip()
             chain = (row.chain or "").strip() or None
@@ -182,11 +222,18 @@ def analyze_bulk(body: BulkAnalyzeRequest, actor: str = Depends(deps.admin_actor
                 result["reason"] = "duplicate row in this request"
                 continue
             try:
-                request = AnalyzeRequest(address=address, chain=chain, name=name, company=body.company)
+                request = AnalyzeRequest(address=address, chain=chain, name=name, company=company_name)
             except ValidationError:
                 result["reason"] = "address must be a 20-byte hex address"
                 continue
             try:
+                if protocol_id is None:
+                    # The row's own refusal checks run first, so an all-refused import mints no protocol.
+                    _check_submission_chain(request)
+                    protocol, created = _create_company(session, company)
+                    protocol_id, company_name = protocol.id, protocol.name
+                    company_status = "created" if created else "existing"
+                    request = request.model_copy(update={"company": company_name})
                 job = submit_analysis(session, request, actor=actor, protocol_id=protocol_id)
             except AnalyzeRejected as exc:
                 result["reason"] = exc.detail
@@ -198,9 +245,12 @@ def analyze_bulk(body: BulkAnalyzeRequest, actor: str = Depends(deps.admin_actor
             if name is not None and job.address:
                 result["label"] = _label_from_name(session, job.address, chain, name)
     counts = {status: sum(r["status"] == status for r in results) for status in ("queued", "rejected", "duplicate")}
-    deps.log_admin_mutation("analyze_bulk", company=body.company, rows=len(results), **counts)
+    deps.log_admin_mutation(
+        "analyze_bulk", company=company_name, company_status=company_status, rows=len(results), **counts
+    )
     return {
-        "company": body.company,
+        "company": company_name,
+        "company_status": company_status,
         "queued": counts["queued"],
         "rejected": counts["rejected"],
         "duplicate": counts["duplicate"],

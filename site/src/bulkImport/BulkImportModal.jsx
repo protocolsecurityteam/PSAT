@@ -21,6 +21,12 @@ const CHECK_WHY = {
   chain_unchecked: () => "the server checks the chain",
 };
 
+const COMPANY_STATUS = {
+  existing: ["", "existing company"],
+  created: ["ok", "company created"],
+  not_created: ["pending", "not created (no row queued)"],
+};
+
 const SUMMARY_ORDER = ["ready", "chain_unchecked", "invalid_address", "unknown_chain", "chain_not_enabled", "duplicate"];
 
 function readText(file) {
@@ -107,6 +113,21 @@ function ResultCell({ row }) {
   );
 }
 
+function CompanyState({ typed, companies }) {
+  // Without the list there is nothing to match against; the server decides.
+  if (!typed || !companies) return null;
+  const match = companies.find((n) => n.toLowerCase() === typed.toLowerCase());
+  if (match) {
+    return (
+      <span className="ps-bulk-import-company-state">
+        <Chip tone="ok">existing company</Chip>
+        <span className="ps-bulk-import-company-match" data-testid="bulk-import-company-match">{match}</span>
+      </span>
+    );
+  }
+  return <Chip tone="pending">New company — created if a row queues</Chip>;
+}
+
 function RowsTable({ rows, results }) {
   return (
     <table className="ps-addresses-modal-table">
@@ -143,7 +164,6 @@ function RowsTable({ rows, results }) {
 
 export default function BulkImportModal({ onClose }) {
   const [companies, setCompanies] = useState(null);
-  const [companiesError, setCompaniesError] = useState(null);
   const [config, setConfig] = useState(undefined);
   const [company, setCompany] = useState("");
   const [file, setFile] = useState(null);
@@ -158,8 +178,8 @@ export default function BulkImportModal({ onClose }) {
 
   useEffect(() => {
     api("/api/companies")
-      .then((names) => setCompanies(Array.isArray(names) ? names : []))
-      .catch((err) => setCompaniesError(err?.message || String(err)));
+      .then((names) => setCompanies(Array.isArray(names) ? names.filter((n) => typeof n === "string") : null))
+      .catch(() => setCompanies(null));
     api("/api/config")
       .then((c) => setConfig(c && c.chain_spellings && Array.isArray(c.enabled_chains) ? c : null))
       .catch(() => setConfig(null));
@@ -197,7 +217,7 @@ export default function BulkImportModal({ onClose }) {
   }
 
   async function queue() {
-    if (!preview?.sendable?.length || !company || submitting || maybePartial) return;
+    if (!preview?.sendable?.length || !typedCompany || submitting || maybePartial) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -205,7 +225,7 @@ export default function BulkImportModal({ onClose }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          company,
+          company: typedCompany,
           rows: preview.sendable.map((r) => ({ address: r.address, chain: r.chain || null, name: r.name || null })),
         }),
       });
@@ -219,6 +239,7 @@ export default function BulkImportModal({ onClose }) {
     }
   }
 
+  const typedCompany = company.trim();
   const sendable = preview?.sendable?.length || 0;
   const rows = preview?.rows;
   let title = "Choose a CSV";
@@ -232,7 +253,7 @@ export default function BulkImportModal({ onClose }) {
       type="button"
       className="ps-audit-modal-btn primary"
       onClick={queue}
-      disabled={!company || !sendable || submitting || maybePartial}
+      disabled={!typedCompany || !sendable || submitting || maybePartial}
     >
       {submitting ? "Queuing…" : sendable ? `Queue ${sendable} ${sendable === 1 ? "analysis" : "analyses"}` : "Queue"}
     </button>
@@ -248,17 +269,23 @@ export default function BulkImportModal({ onClose }) {
       <div className="ps-addresses-modal-toolbar ps-bulk-import-toolbar">
         <label className="ps-bulk-import-company">
           Company
-          <select
+          <input
+            type="text"
             value={company}
             onChange={(e) => setCompany(e.target.value)}
-            disabled={!!results || !companies || submitting}
-          >
-            <option value="">{companies ? "Choose a company…" : "Loading…"}</option>
-            {(companies || []).map((name) => (
-              <option key={name} value={name}>{name}</option>
-            ))}
-          </select>
+            disabled={!!results || submitting}
+            list={companies?.length ? "bulk-import-companies" : undefined}
+            placeholder="Existing or new company"
+            autoComplete="off"
+            spellCheck={false}
+          />
         </label>
+        {companies?.length > 0 && (
+          <datalist id="bulk-import-companies">
+            {companies.map((name) => <option key={name} value={name} />)}
+          </datalist>
+        )}
+        <CompanyState typed={typedCompany} companies={results ? null : companies} />
         {file && (
           <button type="button" className="ps-audit-modal-btn" onClick={() => inputRef.current?.click()} disabled={!!results || submitting}>
             Replace file
@@ -268,7 +295,6 @@ export default function BulkImportModal({ onClose }) {
           address, chain, name (optional)
           {preview?.extraColumns ? ` · ${preview.extraColumns} extra column${preview.extraColumns === 1 ? "" : "s"} ignored` : ""}
         </span>
-        {companiesError && <span className="ps-addresses-modal-result err">Couldn't load companies: {companiesError}</span>}
         {submitError && <span className="ps-addresses-modal-result err">{submitError}</span>}
       </div>
       <input
@@ -301,6 +327,16 @@ export default function BulkImportModal({ onClose }) {
       {results && (
         <div className="ps-addresses-modal-toolbar ps-bulk-import-summary">
           <span className="ps-bulk-import-lead">{results.response.results.length} sent</span>
+          {COMPANY_STATUS[results.response.company_status] && (
+            <span className="ps-bulk-import-company-state">
+              <Chip tone={COMPANY_STATUS[results.response.company_status][0]}>
+                {COMPANY_STATUS[results.response.company_status][1]}
+              </Chip>
+              <span className="ps-bulk-import-company-match" data-testid="bulk-import-result-company">
+                {results.response.company}
+              </span>
+            </span>
+          )}
           <Chip tone="processing">{`${results.response.queued} queued`}</Chip>
           {results.response.rejected > 0 && <Chip tone="err">{`${results.response.rejected} rejected`}</Chip>}
           {rows.length - results.response.queued - results.response.rejected > 0 && (
