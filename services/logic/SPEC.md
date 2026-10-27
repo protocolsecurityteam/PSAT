@@ -1,4 +1,4 @@
-# Logic engine specification: formula, list, check
+# Logic engine specification: formula and list
 
 Status: draft for the restructure on branch `test/auth-fuzz-restructure`, 2026-10-27. Supersedes the decision
 rules in `decide.py` and `holders.py` described in COVERAGE.md sections G4, G7, G11, G13 and the "Stated
@@ -83,27 +83,26 @@ Composition replaces every notion of "later", "arranged", "after" and "condition
 simulated. Ether sent with a call (`msg.value`) and a function's own writes within the call are argument/state facts
 and compose like any other.
 
-### 2.4 Check
+### 2.4 Validation (outside the engine)
 
-For each row with a materialised list, one `eth_call` per principal (its own call, at the block, with arguments
-chosen by the solver to satisfy the argument conditions) and one for a stranger address that is in no mapping. The
-check has exactly two outcomes:
+The engine ends at the formula and the list. Validation of the engine against the chain is done by the harness and
+the oracle tests, never by the engine: for a row with a materialised list, one `eth_call` per principal (its own
+call at the block, arguments chosen by the solver to satisfy the argument and state parts) and one for a stranger in
+no mapping. A principal's call reverting, or the stranger's passing, is a **defect in the lowering or the evaluator**,
+recorded by the harness as a disagreement for that row and fixed with a test. The engine's row is never changed by
+validation; the engine has no field for it. Signature-gated principals and conditions unsatisfiable at the block
+are skipped by the harness, not counted.
 
-* agreement — nothing is recorded beyond `checked: n`;
-* disagreement — a principal's call reverts, or the stranger's passes: the row keeps its formula and list and adds
-  the gap `engine_chain_disagree:<who>`; the row's openness is `not_determined`. A disagreement is a defect in the
-  lowering or the evaluator and is fixed with a test, never with a decision rule.
-
-The check never adds a principal, never removes one, never promotes a list to complete, never changes a condition.
-A call the node does not answer is `read_failed:run`, not a disagreement.
+Failed chain reads are operational: the chain reader retries (one re-ask per read, then the batch's `TRANSIENT`
+path); a read still unanswered aborts the row with `Offline`, and the pipeline re-queues it. A failed read is never a
+verdict, a gap, or an openness.
 
 ### 2.5 Cases the three parts must cover
 
 Resolved against the inventory (INVENTORY.md §G) so that no case needs a rule outside §2:
 
-* **Signers.** A `signer` is an identity in the who part (§2.2). The check cannot sign for a principal, so a
-  signature-gated principal is `checked: skipped:signature`; the stranger's call is still made with a non-recovering
-  signature. Skipping is not a gap.
+* **Signers.** A `signer` is an identity in the who part (§2.2). Validation (§2.4) cannot sign for a principal
+  and skips such rows; the engine does not care.
 * **Preimages and proofs.** A who part or argument condition satisfiable by anyone who knows a preimage or a proof
   against a stored commitment is reported as an argument condition naming the commitment (`need:` per §6). Openness
   follows the identity conjuncts alone: with none, the row is open with that condition.
@@ -125,13 +124,12 @@ Resolved against the inventory (INVENTORY.md §G) so that no case needs a rule o
   enumeration needs no such care. Both stay.
 * **Code at the caller's address** (`extcodesize(caller)`, EIP-7702 designators). A who conjunct on the caller's
   code is reported as a condition on the principal ("must be / must not be a contract"); the list comes from the
-  other conjuncts, and the check evaluates the conjunct for each principal by reading its code.
-* **Effect versus return.** The check asks whether the call reverts, not whether it changes state (COVERAGE G3,
+  other conjuncts; the conjunct is evaluated per principal by reading its code.
+* **Effect versus return.** Validation asks whether the call reverts, not whether it changes state (COVERAGE G3,
   decision D3). A no-op `unpause()` while unpaused is therefore open to call and inert; the write set already shows
   the inertness and the row may say so, but no rule depends on it.
-* **Check arguments.** The check's arguments are chosen by the solver to satisfy the argument and state parts at the
-  block. When they cannot be satisfied at the block (a deadline passed, a stage not reached), the check is
-  `skipped:unsatisfiable`, never a disagreement.
+* **Validation arguments.** The harness's replay arguments are chosen by the solver to satisfy the argument and
+  state parts at the block; when they cannot be, the harness skips the row. The engine is unaffected.
 * **Caller-named delegatecall.** A function that delegates to code the caller names has, after its gate, an arbitrary
   effect; the formula is its gate, the effect is reported as `arbitrary`, and nothing about who may call it changes.
 
@@ -141,8 +139,7 @@ Resolved against the inventory (INVENTORY.md §G) so that no case needs a rule o
 address, chain, block, function (signature, selector)
 formula            the lowered term, printed, with its unknowns
 who                the identity part (printed)
-principals         addresses; for each: how it was found (storage word | dump slot | event | supplied fact),
-                   checked (True | False | unanswered)
+principals         addresses; for each: how it was found (storage word | dump slot | event | supplied fact)
 complete           bool
 incomplete_because [ (mapping, unexplained_slots | history_cut | other_writer) ]
 undecided          [ (address, term) ]
@@ -150,7 +147,7 @@ crowd              [ (mapping, key_count) ]            when not materialised
 arguments          [ printed conjuncts ]                what the call must carry
 state              [ (variable, value_at_block, holds: bool) ]
 composition        [ (variable, writers: [(function, principals, complete)], depth, stopped: reason|None) ]
-gaps               [ names from §5 ]
+gaps               [ names from §5 ]            (no field for validation: §2.4)
 openness           open | restricted | not_verified | not_determined   derived (§3.1)
 ```
 
@@ -163,8 +160,8 @@ openness           open | restricted | not_verified | not_determined   derived (
   formula and the principals the rest of the who part yields; what the unverified code admits is unknown until its
   source is supplied and verified against the on-chain code hash (§6). This is a statement about the contract, not
   about the engine, and is reported as such.
-* `not_determined` — the formula has an `unknown` construct in the who part, a read the who part needs failed, or
-  the check disagreed.
+* `not_determined` — the formula has an `unknown` construct in the who part, named from the coverage table. This is
+  the only cause.
 
 Openness is a summary of the row for consumers; the row's content is the formula and list.
 
@@ -194,17 +191,17 @@ A candidate from any source becomes a principal only by evaluation of the who pa
 
 Class A (set the row's openness):
 `unknown:<construct>` in the who part (from the coverage table) → `not_determined` · `unfollowed:<address>` in the
-who part (no verified source) → `not_verified` · `engine_chain_disagree:<who>` → `not_determined` ·
-`read_failed:<what>` on a read the who part needs → `not_determined`.
+who part (no verified source) → `not_verified`. Nothing else sets openness.
 
 The node is assumed to serve `debug_storageRangeAt` and `debug_traceTransaction` at the block, as the current
 harness's node does (`corpus_parity.debug`, `Chain.storage_dump`); a mapping is therefore always enumerable from
-its dump, and a dump the node does not answer is `read_failed:dump:<address>`, a transient like any failed read.
+its dump. A read the node does not answer is operational (§2.4), never a gap.
 
 Class B (leave openness; qualify the list or conditions):
 `incomplete:<mapping>:<n>` · `history_cut:<address>` · `crowd:<mapping>` · `budget:<which>` · `undecided:<n>` ·
 `composition_stopped:<variable>:<reason>` · `unknown:<construct>` in an argument or state conjunct ·
 `unfollowed:<callee>` outside the who part · `supplied:<fact kind>` (a list rests on a verified supplied fact).
+`read_failed:*` and `engine_chain_disagree` are not gaps (§2.4).
 
 No other gap names exist. Every name is listed in COVERAGE.md with the code that emits it, enforced by
 `test_ir_coverage`.
@@ -225,8 +222,8 @@ Only these constants exist, and each bounds materialisation, never a claim:
 `LIST_LIMIT` (keys materialised per mapping), `ACCOUNT_SLOTS` (dump accounting computations), `LOG_WINDOW`,
 `LOG_SECONDS`, `LOG_TOTAL_SECONDS`, `READ_CAP` (chain reads per function), `COMPOSE_DEPTH`, `CALLEE_DEPTH`
 (followed-callee nesting, a lowering budget). `test_failsafe` sweeps each: halving a budget may only add class B
-gaps and remove principals from an incomplete list; it may never add a principal, complete a list, or turn
-`not_determined` into anything else.
+gaps and remove principals from an incomplete list; it may never add a principal, complete a list, or change
+openness.
 
 ## 8. Removed from the engine
 
@@ -237,7 +234,7 @@ now/later/conditional, `requires`, the `conditions` dictionary (business, holdin
 and `_rests_on_code_not_followed`; `_proven_by_code` and `World.assumed`; `callee_code_list/_pass/_refutation` and
 every hint list drawn from logged words or depth; `_run_rest`, `UNPROVEN_*`, `_RUN_CANDIDATES`,
 `_EXECUTED_CANDIDATES`; `scope.py` and `SCOPE.md`; the origin opcode walk (`_reachable_code`, `_opcodes`, `_instructions`,
-`caller_bound`'s bytecode scan, `hidden`) — an `unknown` in the who part is class A and the check catches a misread,
+`caller_bound`'s bytecode scan, `hidden`) — an `unknown` in the who part is class A and validation catches a misread,
 so no bytecode heuristic stands in for either (decided 2026-10-27); the opcode reader stays only as far as proxy
 detection (`_delegate_ops`) needs it to recognise delegating code; batch retry beyond one re-ask; `too_many_candidates`,
 `identity_use`, `depth`, `others_unproven`, `unrepresentative`, `inert_when_allowed`, `state_blocks_everyone`,
@@ -248,12 +245,12 @@ detection (`_delegate_ops`) needs it to recognise delegating code; batch retry b
 * Oracle tests (`_oracle.check`, `sound`, anvil truth) are the specification and stay. Their expectations are
   re-expressed in the §3 record: `open_at` → openness and principals; `later`/`after` → composition chain content.
 * `test_failsafe` stays, re-pointed at §7's constants and §2.4's faults (callee lowered wrong, storage read failing,
-  history halved, node unanswered): the property is §1's fail-safe clause plus "a fault produces a class A/B gap or
-  a disagreement, never a bolder row".
+  history halved): the property is §1's fail-safe clause: a fault produces a class A/B gap or an aborted row, never
+  a bolder row.
 * `test_ir_coverage` stays and additionally enforces §5's closed gap vocabulary.
 * New: `test_composition` (pause/unpause, register, renounced owner with a setter, depth stop, cycle);
-  `test_enumeration` (dump accounting incl. composite keys, history, crowd, zero signer); `test_check` (a
-  deliberately mis-lowered callee produces a disagreement row, never a bolder one).
+  `test_enumeration` (dump accounting incl. composite keys, history, crowd, zero signer); `test_validation` (a
+  deliberately mis-lowered callee makes the harness report a disagreement; the engine row is unchanged).
 * Deleted: every test pinning the vocabulary in §8.
 
 ## 10. Phases
@@ -264,11 +261,13 @@ detection (`_delegate_ops`) needs it to recognise delegating code; batch retry b
 3. **List.** Candidates from dump + history only; composite-key accounting; completeness per §2.2.3; crowds.
    Remove hint lists and the callee-code rule. Commit; sweep green.
 4. **Composition.** Replace arranged/after/state-blocked with §2.3. Commit; `test_composition` green.
-5. **Check.** Replace strangers and confirmation with §2.4. Remove witnessed/proven. Commit; `test_check` green.
+5. **Validation out.** Remove strangers and confirmation from the engine; move the replay into the harness
+   (`corpus_parity`) and `test_validation` (a deliberately mis-lowered callee makes the harness report a
+   disagreement, and the engine's row is unchanged). Remove witnessed/proven. Commit.
 6. **Signatures.** Fold round eleven's lowering (signer term, assembly staticcall shape, typed short returns) from
    `scratchpad/round11/round11.diff`; drop its decision code; zero signer per §2.2. Commit.
 7. **Prune.** Delete everything in §8 still reachable; budgets per §7; COVERAGE.md rewritten to this spec. Commit.
 8. **Measure.** Corpus rerun on the warm cache; compare with v53 and main on: rows with a formula (expect all),
-   rows with a complete list, disagreements (expect a short list, each a filed bug), class A gaps by name.
+   rows with a complete list, harness disagreements (expect a short list, each a filed bug), class A gaps by name.
 
 Each phase is independently reviewed with anvil probes before the next starts. No phase may leave the sweep red.
