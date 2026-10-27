@@ -445,6 +445,33 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   (``test_witnessed``). Cost: an open on a callee's answer, an action (``sink.poke()``) or an ordering of addresses is
   witnessed even where it holds for everyone.
 
+* **G12. Signature-recovered identities** (2026-10-26, from v51). KNOWN GAP: the next build item, no engine change
+  this round. ``ecrecover`` in the source lowers to ``("signer", digest, v, r, s)``, an identity beside the caller
+  (listed in ``Verdict.signers``; A53 leaves the digest unchecked). The corpus's signature gates mostly don't reach
+  it: OpenZeppelin's ``SignatureChecker``/``ECDSA`` recover through assembly and ask a contract account by ERC-1271
+  (``staticcall`` with ``gas()``, ``returndatasize()``, ``mload``), which the lowering refuses by name, so the row
+  carries ``unknown:unsupported:gas()`` + ``unknown:unsupported:returndatasize()`` + ``unknown:staticcall(...)`` +
+  ``unknown:memory`` together: v51 Aave 140 rows (``depositWithSig``, ``mintWithSig``, ``redeemWithSig``,
+  ``withdrawWithSig`` 30 each, ``setUserPositionManagersWithSig`` 11, ``grantRole``/``revokeRole``/``setRole``), Lido
+  and Maple none. Rows that were "open" and are now not determined carrying ``chosen_identity`` + ``now_unknown`` +
+  ``read_failed:*`` + ``unknown:*``: Aave 188, Lido 4, Maple 7. ``permit``-shaped rows (the signer compared with the
+  ``owner`` argument, a nonce consumed) are ``open_unconfirmed``: Aave 63, Maple 21. They stay so under G13, which
+  keeps an open only where an action the code assumes succeeds could have refused the stranger: here nothing was
+  assumed, the stranger's run fails because its witness carries no signature that recovers to the account it names,
+  and the engine holds no key for the addresses it makes up.
+  A sound lowering gives one of three verdicts, each a construct the engine already has:
+  (1) the signer is read in a stored set (``isGuardian[signer]``, a signer list): restricted to that set, the members
+  listed as ``signers`` (holders of the keys), with the set's completeness as for any lookup (G1-G5);
+  (2) the signer is compared with an argument the caller picks (``permit(owner, ...)``, ``*WithSig(user, ...)``):
+  open, for the account whose key signs, with a business condition (``valid_signature``, like G13's
+  ``stranger_run_failed``) rather than ``open_unconfirmed``; the ERC-1271 branch is a view call
+  ``isValidSignature(bytes32,bytes)`` handed that account, followed or named like any call target;
+  (3) the signature only has to be well formed (checked against nothing stored and no argument that gates): open.
+  Build: lower ``SignatureChecker``'s assembly shape as that view call and ``ECDSA.recover`` as ``signer`` (the
+  assembly ``staticcall`` to the precompile at 1 is ``ecrecover``); give the strangers keys (an address derived from
+  a known private key for ``FRESH`` and the samples) so the witness can carry a signature of the digest the code
+  hashes (the ``hash``/``enc`` terms, evaluated at the witness), which confirms (2) on the chain and closes A53.
+
 * **G13. A proved open turned not determined by the stranger's business** (2026-10-26, user decision). FIXED.
   Every "open now" is confirmed by the stranger's own call on the chain (G7); one the chain refuses was
   ``open_unconfirmed`` even where the formula is the contract's own code alone and the refusal could only be the
