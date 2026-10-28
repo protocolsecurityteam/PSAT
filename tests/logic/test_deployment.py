@@ -1,126 +1,77 @@
-"""The logic engine's production edges: event history from ``indexed_event_logs``, and the resolution switch."""
+"""The production boundary publishes formulas, while input failures abort it."""
 
-from __future__ import annotations
+import importlib
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import delete
 
-from tests.conftest import requires_postgres
-
-EMITTER = "0x" + "ab" * 20
-TOPIC = "0x" + "11" * 32
-OTHER_TOPIC = "0x" + "22" * 32
+from services.logic import deployment
+from services.logic.model import ReadError
 
 
-def _seed(db_session, count: int, topic0: str = TOPIC, indexed_to: int | None = 1_000_000) -> None:
-    from db.models import IndexedEventCursor, IndexedEventLog
-
-    if indexed_to is not None:
-        db_session.add(
-            IndexedEventCursor(
-                chain_id=1,
-                event_address=EMITTER,
-                topic0=topic0,
-                last_indexed_block=indexed_to,
-                backfill_complete=True,
-            )
-        )
-
-    for i in range(count):
-        db_session.add(
-            IndexedEventLog(
-                chain_id=1,
-                event_address=EMITTER,
-                topic0=topic0,
-                tx_hash=bytes([i % 256, i // 256, *topic0.encode()[:30]]),
-                log_index=i,
-                block_number=100 + i,
-                block_hash=b"\xbb" * 32,
-                transaction_index=0,
-                topics=[topic0, "0x" + format(i, "064x")],
-                data_words=["0x" + format(1000 + i, "064x")],
-            )
-        )
-    db_session.commit()
+def test_missing_source_is_not_verified_not_an_empty_complete_result(monkeypatch):
+    monkeypatch.setattr(importlib.import_module("services.discovery.fetch"), "fetch", lambda *a, **kw: None)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", lambda *a, **kw: "0x7b")
+    session = SimpleNamespace(execute=lambda *a, **kw: SimpleNamespace(first=lambda: None))
+    result = deployment.deployment_formulas(session, "0x" + "01" * 20, 1, "http://127.0.0.1")
+    assert result["schema"] == 2 and result["block"] == 123
+    assert result["status"] == "not_verified" and result["functions"] == {}
 
 
-@pytest.fixture()
-def logs(db_session):
-    from db.models import IndexedEventCursor, IndexedEventLog
+def test_source_transport_failure_does_not_publish_not_verified(monkeypatch, tmp_path):
+    def source(address):
+        raise ReadError("source server unavailable")
 
-    yield db_session
-    db_session.execute(delete(IndexedEventLog).where(IndexedEventLog.event_address == EMITTER))
-    db_session.execute(delete(IndexedEventCursor).where(IndexedEventCursor.event_address == EMITTER))
-    db_session.commit()
-
-
-def _chain(session, block: int, rpc=lambda method, params: None):
-    from services.logic.deployment import IndexedChain
-
-    return IndexedChain(session, 1, rpc, block)
+    builds = deployment.Builds(source, lambda address: None, tmp_path)
+    with pytest.raises(ReadError):
+        builds.get(1)
+    assert builds._built == {}
 
 
-@requires_postgres
-def test_logs_come_in_chain_order_up_to_the_pinned_block(logs):
-    _seed(logs, 5)
-    _seed(logs, 2, OTHER_TOPIC)
-    chain = _chain(logs, 102)
-    got = chain.logs(int(EMITTER, 16), frozenset({TOPIC}))
-    assert [topics[1] for topics, _ in got] == [0, 1, 2]
-    assert [data[0] for _, data in got] == [1000, 1001, 1002]
-    assert int(EMITTER, 16) not in chain.truncated
+def test_a_build_error_is_not_silently_converted_to_missing_source(monkeypatch, tmp_path):
+    monkeypatch.setattr(importlib.import_module("services.discovery.fetch"), "scaffold", lambda *a: None)
+
+    def parse(*a):
+        raise KeyError("compiler failure")
+
+    monkeypatch.setattr(deployment, "parse_project", parse)
+    builds = deployment.Builds(
+        lambda address: {"ContractName": "C", "SourceCode": "code"}, lambda address: None, tmp_path
+    )
+    with pytest.raises(KeyError, match="compiler failure"):
+        builds.get(1)
+    assert builds._built == {}
 
 
-@requires_postgres
-def test_a_history_too_long_to_read_keeps_both_ends_and_is_marked_partial(logs, monkeypatch):
-    import services.logic.deployment as deployment
+def test_resolution_uses_the_new_artifact_producer(monkeypatch):
+    from workers import resolution_worker
 
-    monkeypatch.setattr(deployment, "LOG_ROWS", 4)
-    _seed(logs, 9)
-    chain = _chain(logs, 10_000)
-    got = chain.logs(int(EMITTER, 16), frozenset({TOPIC}))
-    assert [topics[1] for topics, _ in got] == [0, 1, 7, 8]
-    assert int(EMITTER, 16) in chain.truncated
+    calls = []
+    session = SimpleNamespace(__enter__=lambda self: self, __exit__=lambda *a: None)
 
+    class Session:
+        def __enter__(self):
+            return session
 
-@requires_postgres
-def test_a_history_the_indexer_has_not_finished_is_used_but_marked_partial(logs):
-    _seed(logs, 3, indexed_to=None)  # logs without a finished backfill
-    chain = _chain(logs, 102)
-    assert [topics[1] for topics, _ in chain.logs(int(EMITTER, 16), frozenset({TOPIC}))] == [0, 1, 2]
-    assert int(EMITTER, 16) in chain.truncated
+        def __exit__(self, *args):
+            return False
 
-
-@requires_postgres
-def test_a_history_never_indexed_is_read_from_the_chain(logs):
-    def rpc(method, params):
-        assert method == "eth_getLogs"
-        return [{"topics": [TOPIC, "0x" + format(7, "064x")], "data": "0x"}]
-
-    chain = _chain(logs, 102, rpc)
-    assert [topics[1] for topics, _ in chain.logs(int(EMITTER, 16), frozenset({TOPIC}))] == [7]
-    assert int(EMITTER, 16) not in chain.truncated
+    monkeypatch.setattr("db.models.SessionLocal", Session)
+    monkeypatch.setattr(deployment, "deployment_formulas", lambda *args: calls.append(args) or {"schema": 2})
+    assert resolution_worker._logic_verdicts_isolated("0xABC", 1, "local") == {"schema": 2}
+    assert calls == [(session, "0xabc", 1, "local")]
 
 
-@requires_postgres
-def test_an_index_that_lags_the_block_is_partial(logs):
-    _seed(logs, 3, indexed_to=50)
-    chain = _chain(logs, 10_000)
-    chain.logs(int(EMITTER, 16), frozenset({TOPIC}))
-    assert int(EMITTER, 16) in chain.truncated
+def test_runtime_has_no_execution_or_override_rpc():
+    import ast
+    from pathlib import Path
 
-
-@requires_postgres
-def test_every_word_an_address_emitted_is_a_candidate_source(logs):
-    _seed(logs, 3)
-    words = _chain(logs, 10_000).all_log_words(int(EMITTER, 16))
-    assert {0, 1, 2, 1000, 1001, 1002} <= words
-
-
-def test_the_logic_engine_is_off_unless_switched_on(monkeypatch):
-    from workers.resolution_worker import logic_engine_enabled
-
-    monkeypatch.delenv("PSAT_LOGIC_ENGINE", raising=False)
-    assert not logic_engine_enabled()
-    monkeypatch.setenv("PSAT_LOGIC_ENGINE", "1")
-    assert logic_engine_enabled()
+    root = Path(deployment.__file__).parent
+    forbidden = {"eth_call", "anvil_setStorageAt", "evm_snapshot", "evm_revert"}
+    for path in [*root.glob("*.py"), root.parent / "clients" / "logic_reads.py"]:
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                assert not any(
+                    isinstance(a, ast.Constant) and isinstance(a.value, str) and a.value in forbidden for a in node.args
+                ), (path, node.lineno)

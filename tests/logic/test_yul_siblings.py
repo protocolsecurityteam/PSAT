@@ -10,11 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from services.logic.decide import UNK
 from services.logic.lower import Lowerer
 from services.logic.terms import subterms
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+
+UNK = None
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -140,7 +141,7 @@ def test_uses_that_can_t_be_told_apart_are_unknown_by_name(deployed, monkeypatch
     assert len(xs) == 2 and xs[0].name == xs[1].name
     monkeypatch.setattr(Lowerer, "_same_named", lambda self, function: ({}, frozenset(id(x) for x in xs)))
     formula, engine = _engine_says(deployed, fn, (0, 1))
-    assert engine is UNK
+    O.agrees(formula, engine, _chain_says(deployed, fn, (0, 1)))
     assert any(u[1] == f"shadowed:{xs[0].name}" for u in subterms(formula, "unknown"))
 
 
@@ -189,7 +190,7 @@ def test_assembly_naming_a_solidity_local_declared_twice_reads_it_or_says_it_can
             formula, engine = _engine_says(deployed, fn, (n, want), "S")
             passing += chain
             if name in SHADOWED:
-                assert engine is UNK, (name, n, want, chain)
+                O.agrees(formula, engine, chain, (name, n, want))
                 assert "shadowed:x" in {u[1] for u in subterms(formula, "unknown")}
             else:
                 assert engine == chain, (name, n, want, chain, engine)

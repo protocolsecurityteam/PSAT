@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import pytest
 
-from services.logic.decide import UNK
 from services.logic.lower import Lowerer
 from services.logic.terms import reset_terms, subterms
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+
+UNK = None
 
 SOURCE = """
 pragma solidity 0.8.27;

@@ -133,6 +133,11 @@ def unknown(reason: str) -> Term:
     return mk("unknown", reason)
 
 
+def _unmodelled(term: Term) -> bool:
+    """A diagnostic label is not a value identity: two rejected reads may share its text."""
+    return contains(term, frozenset({"unknown", "opaque", "assumed", "delegate", "call"}))
+
+
 def is_const(term: Term) -> bool:
     return term[0] == "const"
 
@@ -160,7 +165,7 @@ def _parts(op: str, items: Any) -> list[Term]:
 def mk_and(items: Any) -> Term:
     parts = set(_parts("and", items))
     parts.discard(TRUE)
-    if FALSE in parts or any(mk_not(p) in parts for p in parts):
+    if FALSE in parts or any(not _unmodelled(p) and mk_not(p) in parts for p in parts):
         return FALSE
     if not parts:
         return TRUE
@@ -177,12 +182,14 @@ def conjuncts(term: Term) -> frozenset:
 def mk_or(items: Any) -> Term:
     parts = set(_parts("or", items))
     parts.discard(FALSE)
-    if TRUE in parts or any(mk_not(p) in parts for p in parts):
+    if TRUE in parts or any(not _unmodelled(p) and mk_not(p) in parts for p in parts):
         return TRUE
     if not parts:
         return FALSE
     if len(parts) == 1:
         return next(iter(parts))
+    if any(_unmodelled(p) for p in parts):
+        return mk("or", frozenset(parts))
     # Factor shared conjuncts: (P and A) or (P and B) is P and (A or B); a residual that is empty means the branch
     # adds nothing over P, so the whole disjunction is P.
     conj = [conjuncts(p) for p in parts]
@@ -227,9 +234,9 @@ def mk_cmp(op: str, a: Term, b: Term) -> Term:
         return TRUE if {"eq": x == y, "lt": x < y, "le": x <= y}[op] else FALSE
     if op == "eq" and is_const(a) and is_const(b) and isinstance(a[1], str) and isinstance(b[1], str) and a[2] == b[2]:
         return TRUE if a[1] == b[1] else FALSE  # two literals of one type: equal exactly when their text is
-    if op in ("eq", "le") and a == b:
+    if op in ("eq", "le") and a == b and not _unmodelled(a):
         return TRUE
-    if op == "lt" and a == b:
+    if op == "lt" and a == b and not _unmodelled(a):
         return FALSE
     if op == "eq":
         for x, y in ((a, b), (b, a)):

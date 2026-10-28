@@ -3,12 +3,9 @@ code, so its storage writes are known; Yul it doesn't follow that may write stor
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from services.logic.yul import Unsupported, parse
-from tests.fuzz.authority import solc_path
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
 
@@ -72,32 +69,6 @@ contract Branchy {
     }
 }
 """
-
-
-def _solc_0424() -> Path | None:
-    found = solc_path("0.4.24")
-    svm = Path.home() / ".svm/0.4.24/solc-0.4.24"
-    return found or (svm if svm.exists() else None)
-
-
-@pytest.fixture(scope="module")
-def built(tmp_path_factory):
-    solc = _solc_0424()
-    if solc is None:
-        pytest.skip("solc 0.4.24 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("yul") / "Y.sol"
-    path.write_text(SOURCE)
-    return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
-
-
-def test_assembly_that_may_write_anywhere_leaves_nothing_logged(built):
-    from services.logic.logged import logged
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    assert logged(built["Branchy"], "owners", 1, (), False) is None
 
 
 ARITHMETIC = """

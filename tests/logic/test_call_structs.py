@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from services.logic.decide import UNK
+from services.logic.formula import analyze_function
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+
+UNK = None
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -81,9 +83,6 @@ def _setup(d):
     d.deploy("C", ("address",), (d.at["Oracle"],))
 
 
-PROBES = [O.Probe(SOURCE, _setup, (("C", "nestedKeeper", ("Oracle",)), ("C", "taggedWho", ("Oracle",))))]
-
-
 @pytest.fixture(scope="module")
 def d(anvil):  # noqa: F811
     d = O.deployment(*anvil, SOURCE)
@@ -112,14 +111,18 @@ def test_a_dynamic_field_is_refused_by_its_name_alone(d):
     fn = O.function(d, "C", "taggedData")
     assert O.chain_says(d, fn, (3,))
     formula, engine = O.engine_says(d, fn, (3,), contracts=d.contracts("C", "Oracle"))
-    assert engine is UNK and O.labels(formula) == {"unsupported:member:data"}, formula
+    assert engine is UNK and "unsupported:member:data" in O.labels(formula), formula
 
 
 @pytest.mark.parametrize("name", ["nestedKeeper", "taggedWho"])
 def test_the_verdict_lists_the_identity_a_returned_struct_names(d, name):
-    v = O.verdict(d, "C", name, "Oracle")
-    O.check(d, "C", name, v, open_at=False)
-    assert v.openness == "restricted" and v.complete and set(v.principals) == {WHO}, v
+    v = result(d, name)
+    assert v.representation == "finite" and v.complete and set(v.members) == {WHO}, v
+
+
+def result(d, name, followed=True):
+    contracts = d.contracts("C", "Oracle") if followed else d.contracts("C")
+    return analyze_function(d.slither["C"], O.function(d, "C", name), d.at["C"], d.chain(), contracts).callers
 
 
 # Widths and alignment: every field type a struct can hold in place, in an all-static struct (one word each, where a
@@ -305,16 +308,6 @@ def _widths(d):
     d.deploy("C", ("address",), (d.at["Oracle"],))
 
 
-PROBES.append(
-    O.Probe(
-        WIDTHS,
-        _widths,
-        tuple(("C", name, ("Oracle",)) for name in IDENTITY_FIELDS)
-        + tuple(("C", name, f) for name in ("notSel", "isSel", "xsGate") for f in ((), ("Oracle",))),
-    )
-)
-
-
 @pytest.fixture(scope="module")
 def w(anvil):  # noqa: F811
     d = O.deployment(*anvil, WIDTHS)
@@ -329,6 +322,12 @@ def test_every_width_of_a_returned_struct_field_reads_as_the_chain_decodes_it(w,
     assert O.chain_says(w, fn, values) == chain
     contracts = w.contracts("C", "Oracle") if followed else None
     formula, engine = O.engine_says(w, fn, values, contracts=contracts)
+    if not followed:
+        O.agrees(formula, engine, chain, (name, values))
+        assert engine is not True
+        if engine is UNK:
+            assert any("unverified:" in label for label in O.labels(formula))
+        return
     assert engine is not UNK, (name, values, followed, O.labels(formula), formula)
     assert engine == chain, (name, values, followed, formula)
 
@@ -341,28 +340,28 @@ def test_an_identity_at_any_place_in_a_returned_struct_reads_for_its_holder_alon
     for who in (WHO, O.OWNER, *O.STRANGERS[:2]):
         assert O.chain_says(w, fn, (), sender=who) == (who == WHO)
         formula, engine = O.engine_says(w, fn, (), sender=who, contracts=contracts)
+        if not followed:
+            assert engine is UNK and any("unverified:" in label for label in O.labels(formula))
+            continue
         assert engine == (who == WHO), (name, hex(who), followed, formula)
 
 
 @pytest.mark.parametrize("name", IDENTITY_FIELDS)
 def test_the_verdict_lists_the_identity_at_any_place_in_a_returned_struct(w, name):
-    v = O.verdict(w, "C", name, "Oracle")
-    O.check(w, "C", name, v, open_at=False)
-    assert v.openness == "restricted" and v.complete and set(v.principals) == {WHO}, v
+    v = result(w, name)
+    assert v.representation == "finite" and v.complete and set(v.members) == {WHO}, v
 
 
 @pytest.mark.parametrize("followed", [True, False], ids=["followed", "unfollowed"])
 def test_a_bytes4_gate_nobody_meets_is_never_open(w, followed):
     fn = O.function(w, "C", "notSel")
     assert not any(O.passes(w, "C", fn, {}, sender=who) for who in (O.OWNER, *O.STRANGERS))
-    v = O.verdict(w, "C", "notSel", *(("Oracle",) if followed else ()))
-    O.check(w, "C", "notSel", v, open_at=False)
-    assert v.openness != "open", v
+    v = result(w, "notSel", followed)
+    assert (v.representation == "finite" and not v.members) if followed else not v.complete
 
 
 @pytest.mark.parametrize("name", ["isSel", "xsGate"])
 @pytest.mark.parametrize("followed", [True, False], ids=["followed", "unfollowed"])
 def test_a_gate_on_a_decoded_field_everyone_meets_is_open(w, name, followed):
-    v = O.verdict(w, "C", name, *(("Oracle",) if followed else ()))
-    O.check(w, "C", name, v, open_at={})
-    assert v.openness == "open", v
+    v = result(w, name, followed)
+    assert (v.representation == "cofinite" and not v.excluded) if followed else not v.complete

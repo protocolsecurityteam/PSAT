@@ -7,10 +7,11 @@ from __future__ import annotations
 import pytest
 from eth_utils import keccak
 
-from services.logic.decide import UNK
 from services.logic.terms import subterms
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+
+UNK = None
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -218,7 +219,7 @@ def test_a_low_level_call_is_the_call_its_data_encodes(calls, name, who):
     assert chain == (who == O.OWNER)
     formula, engine = O.engine_says(calls, fn, [target], sender=who, contracts=calls.contracts("C", "Target"))
     if name == "viaCall":
-        assert engine is UNK and ("call", "allow(address)") in {c[::2][:2] for c in subterms(formula, "call")}
+        assert engine is UNK and any("stateful_callee" in str(u[1]) for u in subterms(formula, "unknown"))
     else:
         assert engine == chain, (name, hex(who), chain, engine, formula)
 

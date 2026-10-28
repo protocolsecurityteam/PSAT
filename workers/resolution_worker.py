@@ -79,10 +79,10 @@ def logic_engine_enabled() -> bool:
 def _logic_verdicts_isolated(address: str, chain_id: int, rpc_url: str) -> dict:
     """In the budgeted child: its own session, never the parent's connection."""
     from db.models import SessionLocal
-    from services.logic.deployment import deployment_verdicts
+    from services.logic.deployment import deployment_formulas
 
     with SessionLocal() as session:
-        return deployment_verdicts(session, address.lower(), chain_id, rpc_url)
+        return deployment_formulas(session, address.lower(), chain_id, rpc_url)
 
 
 def _rpc_url_for_job(job: Job) -> str:
@@ -446,7 +446,7 @@ class ResolutionWorker(BaseWorker):
         read by nothing yet, so it can be compared before anything relies on it."""
         if not address:
             return
-        self.update_detail(session, job, "Deciding authority with the logic engine")
+        self.update_detail(session, job, "Deriving authorization formulas")
         try:
             data = run_isolated(
                 _logic_verdicts_isolated, address, chain_id, rpc_url, budget=static_budget(), label="logic_engine"

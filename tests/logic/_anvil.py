@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from eth_abi.abi import encode
 
-from services.logic.decide import Chain
+from services.clients.logic_reads import ChainReads as Chain
 from tests.fuzz.authority import solc_path
 from tests.support.anvil import ACCOUNT0, _start_anvil, _terminate, rpc, send
 
@@ -50,16 +50,7 @@ class Deployment:
     def chain(self) -> Chain:
         block = int(rpc(self.url, "eth_blockNumber", []), 16)
 
-        def batch(calls: list) -> list:
-            out = []
-            for method, params in calls:
-                try:
-                    out.append(rpc(self.url, method, params))
-                except RuntimeError:
-                    out.append(None)
-            return out
-
-        return Chain(lambda method, params: rpc(self.url, method, params), block, batch)
+        return Chain(lambda method, params: rpc(self.url, method, params), block)
 
     def contracts(self, *names: str) -> dict[int, Any]:
         return {self.at[n]: self.slither[n] for n in names}

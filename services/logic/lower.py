@@ -205,7 +205,7 @@ HANDLED_BUILTINS = frozenset(
         "revert(uint256,uint256)", "selfdestruct(uint256)", "invalid()", "stop()", "log0(uint256,uint256)",
         "log1(uint256,uint256,uint256)", "log2(uint256,uint256,uint256,uint256)",
         "log3(uint256,uint256,uint256,uint256,uint256)", "log4(uint256,uint256,uint256,uint256,uint256,uint256)",
-        "chainid()", "origin()", "coinbase()", "timestamp()", "number()", "difficulty()", "gaslimit()",
+        "chainid()", "origin()", "coinbase()", "timestamp()", "number()", "difficulty()", "gaslimit()", "gas()",
     ]
 )  # fmt: skip
 # Vyper's builtins: its semantics (bounds, checked arithmetic, calls that revert on failure) aren't this lowering's.
@@ -216,7 +216,6 @@ _VYPER = (
 ).split()
 REJECTED_BUILTINS = {
     "gasleft()": "gasleft()",  # the gas the caller sends
-    "gas()": "unsupported:gas()",
     "msize(uint256)": "unsupported:msize(uint256)",
     "pc()": "unsupported:pc()",
     "blockhash(uint256)": "unsupported:blockhash(uint256)",
@@ -468,6 +467,28 @@ def _packed_item(pointer: Term, width: int) -> Term | None:
             return item if size == width else None
         position += size
     return None
+
+
+def _dynamic_bytes(t: Any) -> bool:
+    """A ``bytes``/``string`` argument: a memory value whose length word is followed by its bytes."""
+    return isinstance(t, tuple) and bool(t) and t[0] == "arg" and t != CALLDATA and t[2] in ("bytes", "string")
+
+
+def _bytes_word(pointer: Term) -> Term | None:
+    """``mload`` inside a ``bytes``/``string`` argument: its length (``mload(signature)``), or the word ``k`` bytes
+    past the length (``mload(add(signature, 0x20))``: a packed signature's ``r``), as ``("word", signature, k - 32)``
+    (OpenZeppelin's ``ECDSA.tryRecover(bytes32, bytes)``)."""
+    if _dynamic_bytes(pointer):
+        return mk("len", pointer)
+    if not (isinstance(pointer, tuple) and pointer[:2] == ("op", "add") and len(pointer[2]) == 2):
+        return None
+    data, offset = pointer[2]
+    if _small_const(data) is not None:
+        data, offset = offset, data
+    at = _small_const(offset)
+    if at is None or at < 32 or not _dynamic_bytes(data):
+        return None
+    return mk("word", data, const(at - 32))
 
 
 def _memory_word(mem: tuple, offset: int | None) -> Any:
@@ -1051,6 +1072,7 @@ class Lowerer:
         env = {id(p): a for p, a in zip(function.parameters, args)}
         self._arguments = tuple(args)
         exits = self.paths(function, State(pc, env))
+        self.exits = exits
         if not exits:
             return FALSE, ()
         merged = merge([State(e.pc, {}, e.store, e.ret) for e in exits])
@@ -1986,17 +2008,6 @@ class Lowerer:
         if isinstance(ir, SolidityCall):
             return self._solidity_call(ir, st)
         if isinstance(ir, (InternalCall, LibraryCall)) and isinstance(ir.function, Function):
-            # A ``storage`` parameter is the caller's location, not a copy (``EnumerableSet.contains(set, x)``).
-            # A ``memory`` one is the caller's object, which the callee may write into.
-            args = [
-                ("loc", loc)
-                if getattr(p, "location", None) == "storage" and (loc := self._location(a, st)) is not None
-                else self._value(a, st)
-                if self._memory_var(p)
-                else self.val(a, st)
-                for p, a in zip(ir.function.parameters, ir.arguments)
-            ]
-            env = {id(p): a for p, a in zip(ir.function.parameters, args)}
             target = ir.function
             if target.entry_point is None and isinstance(ir, InternalCall):
                 written = str(getattr(self._node, "expression", "") or "")
@@ -2004,6 +2015,18 @@ class Lowerer:
                     self._stack[-1].contract_declarer if f"super.{target.name}(" in written and self._stack else None
                 )
                 target = self._implementation(target, above) or target
+            # A ``storage`` parameter is the caller's location, not a copy (``EnumerableSet.contains(set, x)``).
+            # A ``memory`` one is the caller's object, which the callee may write into.
+            # Bind the resolved body's parameter objects, not the bodiless declaration's objects.
+            args = [
+                ("loc", loc)
+                if getattr(p, "location", None) == "storage" and (loc := self._location(a, st)) is not None
+                else self._value(a, st)
+                if self._memory_var(p)
+                else self.val(a, st)
+                for p, a in zip(target.parameters, ir.arguments)
+            ]
+            env = {id(p): a for p, a in zip(target.parameters, args)}
             node, sliced = self._node, self._sliced
             try:
                 exits = self.run(target, State(st.pc, env, st.store), depth + 1)
@@ -2147,10 +2170,11 @@ class Lowerer:
             lvalue = getattr(ir, "lvalue", None)  # ``Send`` returns a bool, ``Transfer`` nothing
             return self._write(lvalue, unknown(type(ir).__name__), st) if lvalue is not None else st
         if isinstance(ir, LowLevelCall):
-            st = _assumed(st, f"lowlevel:{id(ir)}")
+            name = str(getattr(ir.function_name, "value", ir.function_name))
+            if name != "staticcall":
+                st = _assumed(st, f"lowlevel:{id(ir)}")
             if ir.lvalue is None:
                 return st
-            name = str(getattr(ir.function_name, "value", ir.function_name))
             target = self.val(ir.destination, st)
             data = self.val(ir.arguments[0], st) if ir.arguments else CALLDATA
             inputs = (target, *(self.val(a, st) for a in ir.arguments))
@@ -2163,6 +2187,7 @@ class Lowerer:
             elif name == "staticcall":
                 # A query, not an action: the view call its data encodes, or unknown.
                 call = self._encoded_call(target, data, True)
+                self._last_call, self._last_returns = call, None  # what ``returndatasize()`` asks about next
                 if call is None:
                     label = "unsupported:staticcall"
                     st = replace(st, pc=mk_and([st.pc, unknown(label)])) if contains(data, IDENTITY_KINDS) else st
@@ -2335,6 +2360,7 @@ class Lowerer:
             value = (
                 _memory_word(st.mem, _small_const(args[0]))
                 or _packed_item(args[0], 32)
+                or _bytes_word(args[0])
                 or (const(_FREE_MEMORY) if _small_const(args[0]) == 0x40 else None)
                 or _lost_word(name, args)
             )
@@ -2405,6 +2431,10 @@ class Lowerer:
                 value = decoded[0] if len(decoded) == 1 else ("tuple", tuple(decoded))
         elif base == "ecrecover":
             value = mk("signer", *args)
+        elif base == "gas" and not args:
+            # The gas left: a word the caller steers (what it sent, less what ran), never who calls. Opaque, so a
+            # condition on it is unknown by name (``unknown:gas()``), and singles out nobody.
+            value = mk("opaque", "gas()", ())
         elif base == "sload":
             value = read_store(st.store, ("raw", self.this, args[0]))
         elif base == "sstore":
@@ -2490,6 +2520,8 @@ class Lowerer:
             if len(encoded) == 1 and any(a[0] == "const" and a[1] == 32 for a in data[2]):
                 call = self._from_here(_view_call(args[1], encoded[0]))
         out, size = _small_const(args[4]), _small_const(args[5])
+        # What ``returndatasize()`` and ``returndatacopy`` ask about next: this call, or nothing it can name.
+        self._last_call, self._last_returns = call, None
         if call is None or out is None or size is None or size % 32:
             cleared = State(st.pc, st.env, st.store, st.ret)  # whatever it returned is somewhere in memory
             value = mk("opaque", ir.function.name, tuple(args))
@@ -2527,6 +2559,11 @@ class Lowerer:
         st = State(mk_and([st.pc, mk("ok", value, self._last_returns)]), st.env, st.store, st.ret)
         if len(returns) > 1:
             value = _returned_items(value, returns)
+        elif len(returns) == 1 and _fixed_bytes_abi(_abi_type(returns[0].type)):
+            # A ``bytesN`` return sits at the left of its word: the typed item (decoded by its type, as the lowering
+            # holds a ``bytesN`` constant), never the raw word (``isValidSignature(...) == IERC1271...selector``).
+            abi = str(_abi_type(returns[0].type))
+            value = mk("abi", value, f"({abi})", (0,), abi)
         return self._write(ir.lvalue, value, st)
 
     def _returned(self, function: Function, index: int, var: Any, st: State) -> Any:
@@ -2900,6 +2937,8 @@ class Lowerer:
     def _length(self, container: Term, type_: Any = None) -> Term:
         if container == CALLDATA:
             return mk("calldatasize", self._calldata_min)
+        if container[:2] == ("opaque", "returndata") and container[2] and container[2][0][0] == "call":
+            return mk("retsize", container[2][0])  # ``result.length`` of a low-level call: the bytes it returned
         if _bytes_typed(type_) and container[0] == "load":
             return mk("len", container)  # a ``bytes``/``string`` copied from storage: its length is in its encoding
         found = length_of(container)
@@ -3889,6 +3928,11 @@ def _abi_step(whole: Any, index: int, leaf: str, struct: str) -> Term | None:
     return None
 
 
+def _fixed_bytes_abi(abi: str | None) -> bool:
+    """``bytes1`` .. ``bytes32``: a value the ABI puts at the left of its word, which the lowering holds as a number."""
+    return isinstance(abi, str) and abi.startswith("bytes") and abi[5:].isdigit()
+
+
 def _returned_items(call: Term, returns: list) -> tuple:
     """The values of a call returning several, by position. Word ``i`` of the return data where every value is one
     head word (a one-word type, or a dynamic one encoded elsewhere behind its offset word); otherwise (a struct or a
@@ -3896,7 +3940,15 @@ def _returned_items(call: Term, returns: list) -> tuple:
     (``abi``), a dynamic value then refused by its type."""
     abis = [_abi_type(r.type) for r in returns]
     if all(a is not None and (_abi_word(a) or not _abi_static(a)) for a in abis):
-        return ("tuple", tuple(mk("item", call, i) for i in range(len(returns))))
+        whole = "(" + ",".join(str(a) for a in abis) + ")"
+        # A ``bytesN`` among them is the typed item (left-aligned in its word, held right-aligned), the rest raw words.
+        return (
+            "tuple",
+            tuple(
+                mk("abi", call, whole, (i,), str(a)) if _fixed_bytes_abi(a) else mk("item", call, i)
+                for i, a in enumerate(abis)
+            ),
+        )
     whole = "(" + ",".join(a or "?" for a in abis) + ")"
     items = []
     for i, a in enumerate(abis):
@@ -4009,7 +4061,7 @@ def _extend(loc: tuple, step: tuple) -> tuple:
 
 
 # What a caller steers: who they are and what they send.
-_STEERING = frozenset({"caller", "origin", "signer", "arg", "len", "elem", "callvalue", "calldatasize", "sig"})
+_STEERING = frozenset({"caller", "origin", "signer", "arg", "len", "elem", "word", "callvalue", "calldatasize", "sig"})
 _IDENTITIES = frozenset({"caller", "origin", "signer"})
 
 
