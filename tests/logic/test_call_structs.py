@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from services.logic.formula import analyze_function
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+from tests.logic._oracle import analyze_function
 
 UNK = None
 

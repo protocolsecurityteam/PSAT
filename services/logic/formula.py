@@ -8,14 +8,15 @@ from eth_utils.crypto import keccak
 
 from .immutables import immutable_offsets, immutable_value
 from .lower import Lowerer, parameter, unwritten
-from .model import Analysis, BudgetExceeded, Effect, Formula, Limits, Reads, Transition, Update
-from .solver import Translation, number, project
+from .model import BudgetExceeded, Effect, Formula, Limits, Reads, Transition, Update
+from .solver import Translation, number
 from .terms import (
     CALLDATA,
     THIS,
     TRUE,
     Term,
     const,
+    contains,
     mk,
     mk_and,
     mk_cmp,
@@ -39,6 +40,34 @@ class Linker:
         self.expanded: dict[tuple[Term, int], Term] = {}
 
     def concrete(self, t: Term) -> int | None:
+        # Linking may read a fixed address, but must not enumerate a caller/argument-keyed
+        # mapping to discover possible call targets. Enumeration belongs to expansion.
+        bound = replace_terms(
+            t,
+            {
+                key: const(value, key[2] if key[0] == "arg" else "uint256")
+                for key, value in (self.bindings or {}).items()
+                if isinstance(value, (int, bool, str, bytes))
+            },
+        )
+        if contains(
+            bound,
+            frozenset(
+                {
+                    "caller",
+                    "origin",
+                    "signer",
+                    "arg",
+                    "callvalue",
+                    "calldatasize",
+                    "unknown",
+                    "opaque",
+                    "call",
+                    "delegate",
+                }
+            ),
+        ):
+            return None
         evaluator = Translation(self.reads, self.contracts, self.address, limits=self.limits, bindings=self.bindings)
         v = evaluator.translate(t)
         if any(i.kind == "budget" for i in evaluator.issues):
@@ -256,14 +285,3 @@ def compile_function(
         tuple(effects),
         tuple(transitions),
     )
-
-
-def analyze_function(
-    contract: Any, function: Any, address: int, reads: Reads, contracts: Any, limits: Limits = Limits(), code_of=None
-) -> Analysis:
-    formula = compile_function(contract, function, address, reads, contracts, limits, code_of)
-
-    def solve(predicate: Term):
-        return project(predicate, Translation(reads, contracts, address, formula.selector, limits))
-
-    return Analysis(formula, solve(formula.success), tuple(solve(e.guard) for e in formula.effects))

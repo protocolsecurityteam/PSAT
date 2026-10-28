@@ -4,9 +4,8 @@ from eth_abi import encode
 from eth_utils import keccak
 
 from services.clients.logic_reads import ChainReads
-from services.logic.formula import analyze_function
 from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.logic._oracle import ACCOUNTS, OWNER, function, passes
+from tests.logic._oracle import ACCOUNTS, OWNER, analyze_function, function, passes
 from tests.support.anvil import rpc
 
 SOURCE = """

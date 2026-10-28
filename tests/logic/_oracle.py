@@ -196,3 +196,14 @@ def agrees(formula, engine, chain, where=None):
         assert labels(formula), (where, "unknown without a reason", formula)
     else:
         assert engine == chain, (where, chain, engine, formula)
+
+
+def analyze_function(contract, fn, address, reads, contracts, limits=None, code_of=None):
+    from services.logic.expansion import Selection, expand_formula
+    from services.logic.model import Limits
+
+    limits = limits or Limits()
+    formula = compile_function(contract, fn, address, reads, contracts, limits, code_of)
+    return expand_formula(
+        formula, reads, contracts, limits=limits, selection=Selection(effect_indices=tuple(range(len(formula.effects))))
+    )

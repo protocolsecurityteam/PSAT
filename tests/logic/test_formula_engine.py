@@ -7,13 +7,14 @@ from eth_abi import encode
 from eth_utils import keccak
 
 from services.clients.logic_reads import ChainReads
-from services.logic.formula import analyze_function, compile_function
+from services.logic.formula import compile_function
 from services.logic.model import Limits, ReadError
 from services.logic.model import encode as encode_analysis
 from services.logic.solver import Translation, project
 from services.logic.terms import CALLER, const, mk, mk_cmp
 from services.resolution.logic_composition import sequence
 from tests.logic._anvil import Deployment, anvil  # noqa: F401
+from tests.logic._oracle import analyze_function
 from tests.support.anvil import ACCOUNT0, rpc
 
 OWNER = int(ACCOUNT0, 16)

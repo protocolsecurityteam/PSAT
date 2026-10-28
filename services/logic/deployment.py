@@ -6,6 +6,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +15,9 @@ from sqlalchemy.orm import Session
 
 from services.clients.logic_reads import ChainReads
 
-from .formula import analyze_function
-from .model import ReadError, encode
+from .expansion import Selection, expand_formula, formula_hash
+from .formula import compile_function
+from .model import Limits, ReadError, decode_formula, encode
 from .terms import reset_terms
 
 logger = logging.getLogger(__name__)
@@ -110,15 +112,8 @@ def _is_getter(contract: Any, fn: Any) -> bool:
     )
 
 
-def deployment_formulas(
-    session: Session,
-    address: str,
-    chain_id: int,
-    rpc_url: str,
-    *,
-    signatures: set[str] | None = None,
-    block: int | None = None,
-) -> dict[str, Any]:
+@contextmanager
+def _deployment_inputs(session: Session, chain_id: int, rpc_url: str, block: int | None):
     from db.models import Contract, Job
     from services.clients.rpc import rpc_request
     from services.discovery.fetch import fetch
@@ -160,17 +155,27 @@ def deployment_formulas(
     workdir = Path(tempfile.mkdtemp(prefix="psat_formula_"))
     try:
         builds = Builds(source, implementation, workdir)
+        yield chain, builds
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def deployment_formulas(
+    session: Session,
+    address: str,
+    chain_id: int,
+    rpc_url: str,
+    *,
+    signatures: set[str] | None = None,
+    block: int | None = None,
+) -> dict[str, Any]:
+    """Generate formulas only. No holder enumeration or address-set queries are scheduled."""
+    with _deployment_inputs(session, chain_id, rpc_url, block) as (chain, builds):
         at = int(address, 16)
+        header = {"schema": 2, "kind": "formulas", "chain_id": chain_id, "address": address, "block": chain.block}
         contract = builds.get(at)
         if contract is None:
-            return {
-                "schema": 2,
-                "chain_id": chain_id,
-                "address": address,
-                "block": block,
-                "status": "not_verified",
-                "functions": {},
-            }
+            return {**header, "status": "not_verified", "functions": {}}
         out = {}
         for fn in contract.functions_entry_points:
             if fn.view or fn.pure or fn.is_constructor or not fn.solidity_signature or _is_getter(contract, fn):
@@ -178,8 +183,43 @@ def deployment_formulas(
             if signatures is not None and fn.solidity_signature not in signatures:
                 continue
             reset_terms()
-            result = analyze_function(contract, fn, at, chain, builds, code_of=builds.code_address)
-            out[fn.solidity_signature] = encode(result)
-        return {"schema": 2, "chain_id": chain_id, "address": address, "block": block, "functions": out}
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+            formula = compile_function(contract, fn, at, chain, builds, code_of=builds.code_address)
+            out[fn.solidity_signature] = encode(formula)
+        return {**header, "functions": out}
+
+
+def deployment_expansions(
+    session: Session, artifact: dict, rpc_url: str, selections: Mapping[str, Selection], *, limits: Limits = Limits()
+) -> dict[str, Any]:
+    """Expand only explicitly selected saved functions/effects, preserving the input artifact."""
+    if artifact.get("schema") != 2 or artifact.get("kind") != "formulas":
+        raise ValueError("expected a formula-only artifact")
+    if not selections:
+        raise ValueError("select at least one function or effect to expand")
+    chain_id, block = artifact["chain_id"], artifact["block"]
+    if type(chain_id) is not int or chain_id <= 0 or type(block) is not int or block < 0:
+        raise ValueError("invalid artifact chain or block")
+    address = int(artifact["address"], 16)
+    chosen = {}
+    # Validate the whole request before obtaining a provider or spending any reads.
+    for signature, selection in selections.items():
+        if signature not in artifact["functions"]:
+            raise ValueError(f"function not present in artifact: {signature}")
+        formula = decode_formula(artifact["functions"][signature])
+        if (formula.address, formula.block, formula.signature) != (address, block, signature):
+            raise ValueError("formula identity does not match artifact")
+        selection.validate(formula)
+        chosen[signature] = formula
+    out = {}
+    with _deployment_inputs(session, chain_id, rpc_url, block) as (reads, builds):
+        for signature, formula in chosen.items():
+            result = expand_formula(formula, reads, builds, selection=selections[signature], limits=limits)
+            out[signature] = {"formula_hash": formula_hash(formula), "expansion": encode(result)}
+    return {
+        "schema": 2,
+        "kind": "address_expansions",
+        "chain_id": chain_id,
+        "address": artifact["address"],
+        "block": block,
+        "functions": out,
+    }

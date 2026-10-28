@@ -1,8 +1,8 @@
 """Ignoring a call result does not make its reentrant state changes disappear."""
 
-from services.logic.formula import analyze_function
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+from tests.logic._oracle import analyze_function
 
 SOURCE = """
 pragma solidity 0.8.27;

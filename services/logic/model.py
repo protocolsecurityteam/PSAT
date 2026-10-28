@@ -91,8 +91,9 @@ class SolutionSet:
 @dataclass(frozen=True)
 class Analysis:
     formula: Formula
-    callers: SolutionSet
+    callers: SolutionSet | None
     effects: tuple[SolutionSet, ...]
+    effect_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,3 +132,72 @@ def encode(value: Any) -> Any:
         return v
 
     return {"schema": 2, "value": visit(value), "terms": nodes}
+
+
+def decode_formula(payload: dict) -> Formula:
+    """Restore a saved formula in another process, without re-running the lowerer."""
+    if payload.get("schema") != 2 or not isinstance(payload.get("terms"), list):
+        raise ValueError("unsupported formula encoding")
+    nodes = payload["terms"]
+    memo: dict[int, Term] = {}
+    active: set[int] = set()
+
+    def visit(value: Any) -> Any:
+        if isinstance(value, dict):
+            if set(value) == {"term"}:
+                index = value["term"]
+                if type(index) is not int or not 0 <= index < len(nodes) or index in active:
+                    raise ValueError("invalid or cyclic term reference")
+                if index not in memo:
+                    node = nodes[index]
+                    if not isinstance(node, list) or not node or not isinstance(node[0], str):
+                        raise ValueError("invalid term")
+                    active.add(index)
+                    from .terms import mk
+
+                    memo[index] = mk(*(visit(v) for v in node))
+                    active.remove(index)
+                return memo[index]
+            if set(value) == {"tuple"}:
+                return tuple(visit(v) for v in value["tuple"])
+            if set(value) == {"set"}:
+                return frozenset(visit(v) for v in value["set"])
+            if set(value) == {"bytes"}:
+                return bytes.fromhex(value["bytes"])
+            return {k: visit(v) for k, v in value.items()}
+        if value is None or isinstance(value, (int, str, bool)):
+            return value
+        raise ValueError("invalid formula value")
+
+    try:
+        data = visit(payload["value"])
+        data["effects"] = tuple(Effect(**effect) for effect in data["effects"])
+        data["transitions"] = tuple(
+            Transition(t["guard"], tuple(Update(**u) for u in t["updates"])) for t in data["transitions"]
+        )
+        formula = Formula(**data)
+        if (
+            type(formula.address) is not int
+            or not 0 <= formula.address < 2**160
+            or type(formula.block) is not int
+            or formula.block < 0
+            or type(formula.selector) is not int
+            or not 0 <= formula.selector < 2**32
+            or not isinstance(formula.signature, str)
+            or not isinstance(formula.success, Term)
+            or not isinstance(formula.parameters, tuple)
+            or not all(isinstance(p, Term) for p in formula.parameters)
+            or any(
+                not isinstance(e.guard, Term) or not isinstance(e.value, Term) or not isinstance(e.target, tuple)
+                for e in formula.effects
+            )
+            or any(
+                not isinstance(t.guard, Term)
+                or any(not isinstance(u.value, Term) or not isinstance(u.location, tuple) for u in t.updates)
+                for t in formula.transitions
+            )
+        ):
+            raise ValueError("invalid formula fields")
+        return formula
+    except (KeyError, TypeError, AttributeError, RecursionError) as exc:
+        raise ValueError("invalid formula payload") from exc

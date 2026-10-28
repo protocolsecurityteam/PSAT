@@ -7,14 +7,36 @@ make a caller pass, and no caller sample proves an unrestricted or complete set.
 ## Boundary
 
 The core accepts verified compiler inputs, deployment addresses, a pinned block and a read interface.
-It emits a function formula, per-effect guards, guarded state updates and optional caller-set projections.
+The default job emits function formulas, per-effect guards and guarded state updates only.
+Address expansion is a separate, explicitly requested process over saved formulas.
 It makes no `eth_call`, signs nothing, changes no chain state, and runs no fork or arranged transaction.
 
 `clients/logic_reads.py` owns transport, retries, pagination, caching, read budgets and trace retrieval.
 `resolution/logic_composition.py` composes explicitly supplied sequences of rows symbolically.
 The test harness owns transactions, replays and differential checks. Presentation labels belong to consumers.
 The existing opt-in resolution-worker integration stores schema-2 results as an auxiliary artifact; it does
-not replace production principal rows or the UI.
+not replace production principal rows or the UI. Its artifact now has `kind: formulas` and contains no caller lists.
+
+`expansion.expand_formula` accepts a previously compiled `Formula`, a reader pinned to its block, and an explicit
+selection. By default, an explicit expansion request expands that function's callers only; effects must be selected
+by index. It never re-lowers the function. The deployment wrapper can load verified storage layouts as needed.
+The old combined `analyze_function` production entry point has been removed.
+
+Run the separate process against an exported formula artifact:
+
+```sh
+python -m scripts.logic_expand formulas.json --function 'setOwner(address)' --rpc-url "$RPC_URL" --output addresses.json
+# Or expand only one effect, with no function-wide caller expansion:
+python -m scripts.logic_expand formulas.json --effect 'setOwner(address):0' --rpc-url "$RPC_URL" --output addresses.json
+```
+
+The command requires a selection and writes a separate `address_expansions` artifact. It preserves the input
+formula, chain, block and signature, and links each result to a hash of its saved formula. Missing or invalid
+selections fail before reads. Expansion has its own materialisation/solver limits. A later run at another block
+requires new formulas, rather than mixing old resolved callees with new state.
+
+Formula generation makes only concrete reads needed for linking. It does not dump storage, scan candidate logs,
+trace keys or query the solver for callers; symbolic callee targets remain unresolved instead of triggering enumeration.
 
 ## Relations, not independent pieces
 
@@ -140,3 +162,9 @@ must identify the schema, exact source revision, input block and any unresolved 
 - Ruff checks/formatting pass. New runtime modules pass Pyright. The inherited lowerer/term/parser files still
   have baseline typing diagnostics; an older-tree check reproduced 27 diagnostics in those files.
 - No metered RPC, new full-corpus comparison, deployment or production-pipeline replacement was performed.
+
+## Separate expansion validation (2026-10-28)
+
+823 logic, script and vocabulary checks pass. Changed runtime modules pass Pyright and Ruff. Tests verify
+formula-only default jobs, no enumeration during linking, saved-formula round trips, explicit function/effect
+selection, block matching, input preservation and expansion in a fresh Python process. No live corpus was run.
