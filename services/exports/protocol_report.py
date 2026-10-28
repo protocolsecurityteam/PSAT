@@ -3,7 +3,9 @@
 JSON carries the full overview, score document and audit coverage, losslessly. The other formats render a curated set
 of sections from that same report, so CSV, PDF and DOCX cannot disagree with each other.
 
-Three-state fields stay three-state: an unread ``is_pausable`` renders as "Not determined", never "No".
+The tool publishes a value only when evidence proves it, so an unread value renders as "Not determined", never as a
+default ("No", "0") or an empty cell, which a reader takes as "nothing here". A cell is left empty only where the column
+doesn't apply to the row (a multisig threshold on a timelock).
 """
 
 from __future__ import annotations
@@ -27,6 +29,19 @@ EXPORT_FORMATS: dict[str, str] = {
 }
 
 NOT_DETERMINED = "Not determined"
+NOT_APPLICABLE = ""
+# An empty list is the absence of a witness, not proof of absence.
+NONE_FOUND = "None found"
+
+# XML 1.0 forbids most C0 controls and U+FFFE/FFFF, so DOCX rejects them; csv rejects NUL. Audit text extracted from
+# third-party PDFs carries them.
+_UNWRITABLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff]")
+# Spreadsheets evaluate a cell starting with these as a formula (OWASP CSV injection).
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+_PLAIN_NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
+# Rows of a PDF table can't split across pages; a cell taller than the frame raises LayoutError.
+_PDF_CELL_MAX_LINES = 40
+_PDF_FONT_SIZE = 6.5
 
 
 class UnsupportedExportFormat(ValueError):
@@ -70,31 +85,50 @@ def _tri(value: Any) -> str:
     return NOT_DETERMINED
 
 
+def _clean(text: str) -> str:
+    return _UNWRITABLE.sub("", text)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _text(value: Any) -> str:
-    if value is None:
-        return ""
+    if isinstance(value, str):
+        value = _clean(value)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return NOT_DETERMINED
     if isinstance(value, bool):
         return "Yes" if value else "No"
     if isinstance(value, float):
         return f"{value:,.4f}".rstrip("0").rstrip(".")
     if isinstance(value, (list, tuple, set)):
-        return ", ".join(_text(v) for v in value if v is not None)
+        return _list(value)
     if isinstance(value, dict):
-        return ", ".join(f"{k}: {_text(v)}" for k, v in value.items())
+        return ", ".join(f"{k}: {_text(v)}" for k, v in value.items()) or NOT_DETERMINED
     return str(value)
 
 
+def _list(values: Any) -> str:
+    if values is None:
+        return NOT_DETERMINED
+    items = [_text(v) for v in values if v is not None and v != ""]
+    return ", ".join(items) or NONE_FOUND
+
+
 def _usd(value: Any) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return ""
-    return f"${value:,.2f}"
+    return f"${value:,.2f}" if _is_number(value) else NOT_DETERMINED
+
+
+def _pct(value: Any) -> str:
+    return f"{_text(value)}%" if _is_number(value) else NOT_DETERMINED
 
 
 def _duration(seconds: Any) -> str:
     if isinstance(seconds, str) and seconds.isdigit():
         seconds = int(seconds)
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
-        return ""
+    if not _is_number(seconds):
+        return NOT_DETERMINED
     seconds = int(seconds)
     days, rem = divmod(seconds, 86400)
     hours, rem = divmod(rem, 3600)
@@ -111,13 +145,26 @@ def _timelock_delay(details: dict[str, Any]) -> Any:
 
 
 def _multisig_threshold(details: dict[str, Any]) -> str:
-    owners = details.get("owners") or []
     threshold = details.get("threshold")
     if isinstance(threshold, dict):
         threshold = threshold.get("m")
-    if threshold is None and not owners:
-        return ""
-    return f"{threshold if threshold is not None else '?'} of {len(owners) if owners else '?'}"
+    if not _is_number(threshold):
+        return NOT_DETERMINED
+    owners = details.get("owners")
+    if not isinstance(owners, list) or not owners:
+        return f"{threshold} of ? (signer count not determined)"
+    return f"{threshold} of {len(owners)}"
+
+
+def _source_text(source: dict[str, Any] | None) -> str:
+    kind = (source or {}).get("kind")
+    prepared_at = (source or {}).get("prepared_at")
+    if kind == "live":
+        return "Built from the database when this file was generated"
+    if kind in ("prepared", "prepared-stale") and prepared_at:
+        stale = " (newer data was still being prepared)" if kind == "prepared-stale" else ""
+        return f"Prepared snapshot of {prepared_at}{stale}"
+    return NOT_DETERMINED
 
 
 def _summary(
@@ -167,13 +214,16 @@ def build_report(
     score_status: str,
     audit_coverage: dict[str, Any] | None,
     generated_at: datetime,
+    source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``score_status`` is ``available``, ``not_scored`` or ``unavailable`` (the document couldn't be read): a missing
-    score must say which.
+    score must say which. ``source`` says where the overview came from: ``{"kind": "live" | "prepared" |
+    "prepared-stale", "prepared_at": iso | None}``.
     """
     report = {
         "export_version": EXPORT_VERSION,
         "generated_at": generated_at.isoformat(),
+        "source": source,
         "protocol": {"name": company, "protocol_id": overview.get("protocol_id")},
         "summary": _summary(overview, score, audit_coverage),
         "score_status": score_status,
@@ -204,7 +254,7 @@ def _score_section(report: dict[str, Any]) -> Section:
         ("Grade state", _text(score.get("grade_state"))),
         ("Grade (λ)", _text(score.get("grade_lambda")) if determined else NOT_DETERMINED),
         ("Exposure", _text(score.get("grade_exposure")) if determined else NOT_DETERMINED),
-        ("Confidence", f"{_text(score.get('confidence_pct'))}%" if determined else NOT_DETERMINED),
+        ("Confidence", _pct(score.get("confidence_pct")) if determined else NOT_DETERMINED),
         ("Perimeter", _text(score.get("perimeter_state"))),
         ("Model version", _text(score.get("model_version"))),
         ("Computed at", _text(score.get("computed_at"))),
@@ -229,7 +279,7 @@ def _findings_section(report: dict[str, Any]) -> Section:
                 _usd(f.get("value_at_stake_usd")),
                 _text(f.get("n_functions")),
                 _text(f.get("n_entities")),
-                _text((f.get("example_functions") or [])[:3]),
+                _list((f.get("example_functions") or [])[:3] if "example_functions" in f else None),
             ]
         )
     return Section(
@@ -251,17 +301,25 @@ def _findings_section(report: dict[str, Any]) -> Section:
 
 
 def _contracts_section(report: dict[str, Any]) -> Section:
+    loaded = report.get("audit_coverage")
     coverage = {
         ((row.get("chain") or "").lower(), (row.get("address") or "").lower()): row
-        for row in (report.get("audit_coverage") or {}).get("coverage") or []
+        for row in (loaded or {}).get("coverage") or []
     }
     rows = []
     for c in report.get("contracts") or []:
         key = ((c.get("chain") or "").lower(), (c.get("address") or "").lower())
-        audits = coverage.get(key, {}).get("audit_count")
+        # Unloaded coverage, or a contract it doesn't list, is unknown; "0 audits" would be a claim.
+        audits = coverage.get(key, {}).get("audit_count") if loaded is not None else None
         proxy = _tri(c.get("is_proxy"))
         if c.get("is_proxy") and c.get("proxy_type"):
             proxy = f"Yes ({c['proxy_type']})"
+        if c.get("is_proxy") is False:
+            implementation = NOT_APPLICABLE
+        elif c.get("is_proxy") is True:
+            implementation = _text(c.get("implementation"))
+        else:
+            implementation = NOT_DETERMINED
         rows.append(
             [
                 _text(c.get("name")),
@@ -270,15 +328,15 @@ def _contracts_section(report: dict[str, Any]) -> Section:
                 _text(c.get("role")),
                 _tri(c.get("source_verified")),
                 proxy,
-                _text(c.get("implementation")),
+                implementation,
                 _text(c.get("owner")),
                 _tri(c.get("is_pausable")),
                 _tri(c.get("has_timelock")),
                 _text(c.get("upgrade_count")),
                 _text(c.get("last_upgrade_timestamp")),
-                _text(c.get("capabilities")),
+                _list(c.get("capabilities")),
                 _usd(c.get("total_usd")),
-                _text(audits if audits is not None else 0),
+                _text(audits),
             ]
         )
     return Section(
@@ -317,11 +375,11 @@ def _principals_section(report: dict[str, Any]) -> Section:
                 _text(p.get("address")),
                 _text(p.get("chain")),
                 _text(p.get("type")),
-                _multisig_threshold(details) if p.get("type") == "safe" else "",
-                _duration(_timelock_delay(details)) if p.get("type") == "timelock" else "",
+                _multisig_threshold(details) if p.get("type") == "safe" else NOT_APPLICABLE,
+                _duration(_timelock_delay(details)) if p.get("type") == "timelock" else NOT_APPLICABLE,
                 str(len(p.get("primary_for") or [])),
                 str(len(p.get("co_controls") or [])),
-                _text(capabilities),
+                _list(capabilities),
             ]
         )
     return Section(
@@ -348,16 +406,20 @@ def _audits_section(report: dict[str, Any]) -> Section:
         return Section("Audit coverage", note="Audit coverage could not be loaded when this export was generated.")
     rows = []
     for row in coverage.get("coverage") or []:
-        last = row.get("last_audit") or {}
+        last = row.get("last_audit")
+        if isinstance(last, dict):
+            latest = [_text(last.get("auditor")), _text(last.get("title")), _text(last.get("date"))]
+        elif row.get("audit_count") == 0:
+            latest = [NOT_APPLICABLE] * 3
+        else:
+            latest = [NOT_DETERMINED] * 3
         rows.append(
             [
                 _text(row.get("contract_name")),
                 _text(row.get("address")),
                 _text(row.get("chain")),
                 _text(row.get("audit_count")),
-                _text(last.get("auditor")),
-                _text(last.get("title")),
-                _text(last.get("date")),
+                *latest,
             ]
         )
     return Section(
@@ -378,6 +440,7 @@ def _summary_section(report: dict[str, Any]) -> Section:
     pairs = [
         ("Protocol", _text((report.get("protocol") or {}).get("name"))),
         ("Generated at", _text(report.get("generated_at"))),
+        ("Data source", _source_text(report.get("source"))),
         ("Contracts", _text(s.get("contract_count"))),
         ("Proxies", _text(s.get("proxy_count"))),
         ("Source verified", tri_counts("source_verified")),
@@ -387,16 +450,27 @@ def _summary_section(report: dict[str, Any]) -> Section:
         ("Multisigs", _text(s.get("multisig_count"))),
         ("Timelock principals", _text(s.get("timelock_principal_count"))),
         ("EOA principals", _text(s.get("eoa_principal_count"))),
-        ("Audit reports on file", _text(s.get("audit_report_count")) or NOT_DETERMINED),
-        ("Contracts with audit coverage", _text(s.get("contracts_with_audit_coverage")) or NOT_DETERMINED),
-        ("TVL (observed holdings)", _usd(s.get("tvl_usd")) or NOT_DETERMINED),
-        ("TVL (DefiLlama)", _usd(s.get("defillama_tvl_usd")) or NOT_DETERMINED),
+        ("Audit reports on file", _text(s.get("audit_report_count"))),
+        ("Contracts with audit coverage", _text(s.get("contracts_with_audit_coverage"))),
+        ("TVL (observed holdings)", _usd(s.get("tvl_usd"))),
+        ("TVL (DefiLlama)", _usd(s.get("defillama_tvl_usd"))),
     ]
     return Section("Summary", pairs=pairs)
 
 
+def _cleaned(section: Section) -> Section:
+    return Section(
+        _clean(section.title),
+        pairs=[(_clean(k), _clean(v)) for k, v in section.pairs],
+        columns=[_clean(c) for c in section.columns],
+        rows=[[_clean(v) for v in row] for row in section.rows],
+        note=_clean(section.note) if section.note else None,
+    )
+
+
 def report_sections(report: dict[str, Any]) -> list[Section]:
-    return [
+    """The readable sections every non-JSON format renders, with unwritable characters already removed."""
+    sections = [
         _summary_section(report),
         _score_section(report),
         _findings_section(report),
@@ -404,32 +478,46 @@ def report_sections(report: dict[str, Any]) -> list[Section]:
         _principals_section(report),
         _audits_section(report),
     ]
+    return [_cleaned(section) for section in sections]
 
 
 def _title(report: dict[str, Any]) -> str:
-    return f"{(report.get('protocol') or {}).get('name') or 'Protocol'} — PSAT security report"
+    return _clean(f"{(report.get('protocol') or {}).get('name') or 'Protocol'} — PSAT security report")
 
 
 def render_json(report: dict[str, Any]) -> bytes:
     return json.dumps(report, indent=2, ensure_ascii=False).encode("utf-8")
 
 
+def _csv_safe(value: str) -> str:
+    """Prefix a would-be formula with ``'`` so a spreadsheet shows it as text; plain numbers stay numeric."""
+    if value.startswith(_FORMULA_START) and not _PLAIN_NUMBER.fullmatch(value):
+        return "'" + value
+    return value
+
+
 def render_csv(report: dict[str, Any]) -> bytes:
     """One file, one block per section: a ``# Title`` line, a header row, then rows, separated by a blank line."""
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\r\n")
+
+    def write(row: list[str]) -> None:
+        writer.writerow([_csv_safe(value) for value in row])
+
     for index, section in enumerate(report_sections(report)):
         if index:
             writer.writerow([])
-        writer.writerow([f"# {section.title}"])
+        write([f"# {section.title}"])
         if section.is_table:
-            writer.writerow(section.columns)
-            writer.writerows(section.rows)
-        else:
-            writer.writerow(["Field", "Value"])
-            writer.writerows([list(pair) for pair in section.pairs])
+            write(section.columns)
+            for row in section.rows:
+                write(row)
+        elif section.pairs:
+            write(["Field", "Value"])
+            for pair in section.pairs:
+                write(list(pair))
         if section.note:
-            writer.writerow([section.note])
+            write([section.note])
     # BOM so Excel reads UTF-8 (λ, —) instead of the system code page.
     return ("﻿" + buffer.getvalue()).encode("utf-8")
 
@@ -458,10 +546,15 @@ def render_pdf(report: dict[str, Any]) -> bytes:
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     styles = getSampleStyleSheet()
-    cell = styles["BodyText"].clone("cell", fontSize=6.5, leading=8)
+    cell = styles["BodyText"].clone("cell", fontSize=_PDF_FONT_SIZE, leading=8)
     head = cell.clone("head", fontName="Helvetica-Bold")
     # The built-in Helvetica is WinAnsi-encoded: no λ glyph.
     ascii_safe = lambda s: escape(s.replace("λ", "lambda"))  # noqa: E731
+
+    def clipped(text: str, width: float) -> str:
+        # Generous per-character estimate, so a clipped cell always fits; JSON, CSV and DOCX keep the full text.
+        limit = max(1, int((width - 6) / (_PDF_FONT_SIZE * 0.45))) * _PDF_CELL_MAX_LINES
+        return text if len(text) <= limit else text[: limit - 1] + "…"
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -486,15 +579,23 @@ def render_pdf(report: dict[str, Any]) -> bytes:
     for section in report_sections(report):
         story.append(Paragraph(ascii_safe(section.title), styles["Heading2"]))
         if section.is_table and section.rows:
+            widths = _column_widths(section, doc.width)
             data = [[Paragraph(ascii_safe(c), head) for c in section.columns]]
-            data += [[Paragraph(ascii_safe(v), cell) for v in row] for row in section.rows]
-            table = Table(data, repeatRows=1, colWidths=_column_widths(section, doc.width))
+            data += [
+                [Paragraph(ascii_safe(clipped(v, w)), cell) for v, w in zip(row, widths, strict=True)]
+                for row in section.rows
+            ]
+            table = Table(data, repeatRows=1, colWidths=widths)
             table.setStyle(grid)
             table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0"))]))
             story.append(table)
         elif section.pairs:
-            data = [[Paragraph(ascii_safe(k), head), Paragraph(ascii_safe(v), cell)] for k, v in section.pairs]
-            table = Table(data, colWidths=[doc.width * 0.25, doc.width * 0.5], hAlign="LEFT")
+            key_width, value_width = doc.width * 0.25, doc.width * 0.5
+            data = [
+                [Paragraph(ascii_safe(k), head), Paragraph(ascii_safe(clipped(v, value_width)), cell)]
+                for k, v in section.pairs
+            ]
+            table = Table(data, colWidths=[key_width, value_width], hAlign="LEFT")
             table.setStyle(grid)
             story.append(table)
         if section.note:

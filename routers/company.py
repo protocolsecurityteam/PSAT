@@ -30,7 +30,13 @@ from services.aggregations.company_overview import (
 from services.aggregations.company_overview.entity_keys import _entity_key
 from services.aggregations.company_overview.jobs import eligible_company_names
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
-from services.company_pages import cache_tag, enabled, prepared_or_pending
+from services.company_pages import (
+    cache_tag,
+    enabled,
+    not_found_or_preparing,
+    prepared_or_pending,
+    prepared_section,
+)
 from services.exports import EXPORT_FORMATS, build_report, export_filename, render_report
 
 from . import deps
@@ -449,7 +455,9 @@ def company_summary(company_name: str, request: Request) -> Response | dict:
 def company_export(company_name: str, fmt: str = Query("json", alias="format")) -> Response:
     """The protocol's latest results as a downloadable file: overview, score and audit coverage.
 
-    Always built live, never from prepared pages: an export is a point-in-time record and is stamped as one.
+    Reads the same source as the page and answers under the same conditions: with prepared pages on, the overview is
+    the prepared snapshot (an anonymous caller can never force a live build) and an unservable name gets the page's
+    own 404 or 503. A name the page wouldn't list (a first analysis still running) never exports partial counts.
     """
     started = time.monotonic()
     fmt = fmt.lower()
@@ -457,12 +465,32 @@ def company_export(company_name: str, fmt: str = Query("json", alias="format")) 
         allowed = ", ".join(EXPORT_FORMATS)
         raise HTTPException(status_code=400, detail=f"Unsupported export format; use one of: {allowed}")
     generated_at = datetime.now(timezone.utc)
+    route = "/api/company/{name}/export"
     with deps.SessionLocal() as session:
-        try:
-            overview = build_company_overview(session, company_name)
-        except CompanyNotFound:
-            _log_endpoint("/api/company/{name}/export", company=company_name, started=started, outcome="not_found")
-            raise HTTPException(status_code=404, detail="Company not found")
+        if enabled():
+            prepared = prepared_section(session, company_name)
+            if prepared is None:
+                _log_endpoint(route, company=company_name, started=started, outcome="unprepared")
+                return not_found_or_preparing(session, company_name)
+            overview = dict(prepared.payload)
+            # The prepared overview is built without its summary half (TVL); that is its own section.
+            summary = prepared_section(session, company_name, section="summary")
+            if summary is not None and isinstance(summary.payload, dict):
+                overview.update(summary.payload)
+            source = {
+                "kind": "prepared" if prepared.fresh else "prepared-stale",
+                "prepared_at": prepared.prepared_at.isoformat(),
+            }
+        else:
+            if company_name not in eligible_company_names(session):
+                _log_endpoint(route, company=company_name, started=started, outcome="not_found")
+                raise HTTPException(status_code=404, detail="Company not found")
+            try:
+                overview = dict(build_company_overview(session, company_name))
+            except CompanyNotFound:
+                _log_endpoint(route, company=company_name, started=started, outcome="not_found")
+                raise HTTPException(status_code=404, detail="Company not found")
+            source = {"kind": "live", "prepared_at": None}
 
     # The protocol exists, so a score 404 means "not scored yet"; a 503 means the document couldn't be read.
     score: Any = None
@@ -480,7 +508,8 @@ def company_export(company_name: str, fmt: str = Query("json", alias="format")) 
 
     report = build_report(
         company=company_name,
-        overview=dict(overview),
+        overview=overview,
+        source=source,
         score=score,
         score_status=score_status,
         audit_coverage=coverage,
@@ -488,10 +517,11 @@ def company_export(company_name: str, fmt: str = Query("json", alias="format")) 
     )
     content = render_report(report, fmt)
     _log_endpoint(
-        "/api/company/{name}/export",
+        route,
         company=company_name,
         started=started,
         outcome="success",
+        source=source["kind"],
         export_format=fmt,
         size_bytes=len(content),
     )

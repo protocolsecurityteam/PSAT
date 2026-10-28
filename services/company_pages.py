@@ -14,7 +14,7 @@ import io
 import json
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -237,12 +237,16 @@ def revisions_current(section: str = "overview"):
     return and_(*required, ~exists(changed))
 
 
-def read_response(
-    session: Session, request: Request, name: str, *, functions: bool = False, section: str | None = None
-) -> Response | None:
-    if not enabled():
-        return None
-    section = section or ("functions" if functions else "overview")
+class _ServableRow(NamedTuple):
+    body: bytes
+    source_at: datetime
+    now: datetime
+    fresh: bool
+    same_data: bool
+
+
+def _servable_row(session: Session, name: str, section: str) -> _ServableRow | None:
+    """The stored section if a reader may serve it; ``None`` means unprepared, unservable or oversize."""
     columns = section_columns(section)
     row = session.execute(
         select(
@@ -272,6 +276,44 @@ def read_response(
         return None
     if len(body) > MAX_GZIP_BYTES:
         return None
+    return _ServableRow(body, source_at, now, fresh, bool(same_data))
+
+
+class PreparedSection(NamedTuple):
+    payload: Any
+    prepared_at: datetime
+    fresh: bool
+
+
+def prepared_section(session: Session, name: str, *, section: str = "overview") -> PreparedSection | None:
+    """A servable section decoded for in-process use, under exactly the rules ``read_response`` serves by."""
+    if not enabled():
+        return None
+    row = _servable_row(session, name, section)
+    if row is None:
+        return None
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(row.body)) as compressed:
+            body = compressed.read(MAX_JSON_BYTES + 1)
+        if len(body) > MAX_JSON_BYTES:
+            return None
+        payload = json.loads(body)
+    except (OSError, EOFError, ValueError):
+        logger.warning("Invalid prepared company gzip", extra={"company": name})
+        return None
+    return PreparedSection(payload, row.source_at, row.fresh)
+
+
+def read_response(
+    session: Session, request: Request, name: str, *, functions: bool = False, section: str | None = None
+) -> Response | None:
+    if not enabled():
+        return None
+    section = section or ("functions" if functions else "overview")
+    row = _servable_row(session, name, section)
+    if row is None:
+        return None
+    body, source_at, now, fresh, same_data = row
     headers = {
         "Cache-Tag": cache_tag(name),
         "Vary": "Accept-Encoding",
@@ -306,12 +348,17 @@ def prepared_or_pending(session: Session, request: Request, name: str, *, sectio
     served labelled stale. The builder discovers due work without reader
     writes or locks on an in-progress preparation.
     """
-    from fastapi import HTTPException
-    from starlette.responses import JSONResponse
-
     response = read_response(session, request, name, section=section)
     if response is not None:
         return response
+    return not_found_or_preparing(session, name)
+
+
+def not_found_or_preparing(session: Session, name: str) -> Response:
+    """The answer when nothing is servable: 404 for a name with no eligible page, else 503 while it is prepared."""
+    from fastapi import HTTPException
+    from starlette.responses import JSONResponse
+
     from services.aggregations.company_overview.jobs import eligible_company_names
 
     if name not in eligible_company_names(session):
