@@ -29,6 +29,7 @@ def _import_in_fresh_interpreter(module: str) -> None:
     "module",
     [
         "workers.policy_worker",
+        "workers.logic_worker",
         "services.policy",
         "workers.company_pages",
         "workers.web_runtime",

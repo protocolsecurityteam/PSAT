@@ -128,6 +128,7 @@ done
 # (PSAT_EFFECTS_JOB_CONCURRENCY=1 — anvil snapshot/revert is
 # process-global).
 SPECS+=("effects_worker|$HEAVY_CAP_MB|workers.effects_worker")
+SPECS+=("logic_worker|$HEAVY_CAP_MB|workers.logic_worker")
 SPECS+=("coverage_worker|$WORKER_CAP_MB|workers.coverage_worker")
 # Drains audit_contract_coverage rows where equivalence_status='pending'.
 # Single instance is enough — concurrency is intentionally low (default 2

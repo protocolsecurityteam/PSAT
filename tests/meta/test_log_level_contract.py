@@ -17,6 +17,7 @@ PIPELINE_WORKERS: tuple[str, ...] = (
     "workers/coverage_worker.py",
     "workers/effects_worker.py",
     "workers/selection_worker.py",
+    "workers/logic_worker.py",
     "workers/dapp_crawl_worker.py",
     "workers/defillama_worker.py",
 )

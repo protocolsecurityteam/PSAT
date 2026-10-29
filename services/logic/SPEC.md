@@ -32,6 +32,49 @@ load verified layouts to read storage. All reads use the saved block. Outputs ca
 The old `logic_select`, `logic_impact` and `logic_expand` command wrappers have been removed; their useful operations
 are in the three jobs above. The offline `logic_impact_evaluate` command compares function ratings with supplied labels.
 
+## Asynchronous API
+
+The same services are exposed through authenticated API jobs. Use the existing admin session or
+`X-PSAT-Admin-Key` authentication. HTTP handlers submit work; they do not compile, call Jev or enumerate.
+
+| Request | Body | Result |
+| --- | --- | --- |
+| `POST /api/logic/generate` | `address`, `chain_id`; optional `block`, `related_addresses`, `context_chars` | 202, generation job ID |
+| `POST /api/logic/assess` | `formula_job_id`; optional `max_requests`, `cache_only`, direct-read/solver budgets | 202, assessment job ID |
+| `POST /api/logic/enumerate` | `assessment_job_id`, explicit `functions`; optional member/solver limits | 202, enumeration job ID |
+| `GET /api/logic/jobs/{id}` | none | Execution status, operation, pinned block when available, result state, status/result URLs |
+| `GET /api/logic/jobs/{id}/result` | none | Stored result after completion; 409 while not completed |
+
+For example, after generation finishes, submit `{"formula_job_id":"<generation UUID>","max_requests":8}`.
+Inspect the assessment's `suggested_expansions`, then explicitly submit
+`{"assessment_job_id":"<assessment UUID>","functions":["setOwner(address)"]}` to enumerate.
+No stage automatically submits the next. Inputs are completed server-owned jobs, not uploaded formulas,
+caller-supplied RPC URLs, filesystem paths or API credentials. Pending/wrong-stage/stale inputs are rejected.
+New submissions honor the existing chain allowlist; older results remain readable when a chain is disabled.
+
+`status=completed` means the requested computation finished. `result_state=incomplete` still means required
+assessment judgments are missing; `not_verified` is also retained. Operational failures use the existing
+queued retry/backoff and `failed_terminal` states and produce no semantic result. Required RPC reads retry;
+invalid inputs or changed artifacts fail. The ordinary `/api/jobs/{id}` diagnostics/retry routes also work.
+
+Jobs reuse PostgreSQL `jobs`, the shared artifact store (`logic_result`), claims, leases, heartbeats and worker
+recovery. A dedicated `logic` stage ends at `done` after one operation. These auxiliary jobs intentionally leave
+`jobs.address` and `protocol_id` unset, storing target identity in the request, so they cannot displace production
+address analyses or trigger grading/enrollment. Generation pins its block before compute; retries keep that block.
+Input hashes are checked again in the worker and results are published under the current lease.
+
+Jev uses server credentials and `PSAT_LOGIC_JEV_CACHE` (default `.cache/logic-jev`). Configure a persistent worker
+path to retain cached judgments; cache sharing across machines depends on that storage. PostgreSQL tracks
+`jev_requests_reserved` before inference so crashes and retries cannot reset a job's request cap. Reservations
+may include a call that never reached the service; they are not a billing count. An incomplete assessment can be
+resubmitted as a new explicit job with a new budget; successful cached answers are reused where available.
+
+Apply migration `a38e901c6d72` before starting the updated API/workers. Rollback retires pending logic jobs
+and retains the unused enum member to preserve existing stage-dependent triggers. Stop/drain logic workers first. `deploy/start_workers.sh` now launches
+`workers.logic_worker`, and fleet wake/readiness includes its queue. Heavy work uses the existing isolated compute
+budgets; `PSAT_LOGIC_JOB_CONCURRENCY` controls concurrent jobs. The API is implemented locally, not deployed by
+this change. The CLI remains a direct development tool using the same engine/assessment services.
+
 ## Assessment boundary
 
 `logic_selection` supplies per-effect access evidence, potential authority dependencies, structural attention and
@@ -203,3 +246,14 @@ The local-chain generation/assessment/expansion test still returns the independe
 is mocked. No new live Jev inference, metered chain RPC, full corpus run or deployment was performed. The earlier
 `effect-impact-v2` recorded responses remain tests of distribution policy and historical evaluation data, not
 validation of the new `function-impact-v1` prompt. Real-protocol impact accuracy remains to be measured.
+
+## API validation (2026-10-29)
+
+HTTP integration tests use the real PostgreSQL queue, claim leases and artifact persistence, with RPC, source
+acquisition and Jev transport stubbed. They cover all three explicit operations, an exact finite expansion result,
+admin authentication, unsupported chains, invalid input references, partial/unverified results, request budgets
+across reclaim, stale lease publication, changed inputs, and operational retry with the original pinned block.
+A broad backend run passed 1,487 checks; its route-inventory mismatch was corrected, then all 52 focused API,
+boundary and metadata checks passed. The 33 job-monitor tests, changed-module typing/lint checks, shell syntax,
+and a fresh-database migration upgrade/rollback/re-upgrade passed. No live inference/RPC spend or deployment
+was needed for this integration. Existing production assessment/grade consumers are unchanged.

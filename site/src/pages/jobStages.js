@@ -16,6 +16,7 @@ export const JOB_STAGE_ORDER = [
   "policy",
   "effects",
   "coverage",
+  "logic",
   "done",
 ];
 
@@ -29,6 +30,7 @@ export const STAGE_COLORS = {
   policy: "#7c3aed",
   effects: "#c026d3",
   coverage: "#059669",
+  logic: "#4f46e5",
   done: "#16a34a",
 };
 

@@ -70,7 +70,7 @@ def snapshot(session: Session) -> Workload:
                     OR j.updated_at < now()-(:coverage_timeout * interval '1 second'))) OR
                 (j.stage='selection' AND ({SELECTION_READY}
                     OR j.updated_at < now()-(:selection_timeout * interval '1 second'))) OR
-                (j.stage IN ('discovery','static','resolution','policy','effects','defillama_scan')
+                (j.stage IN ('discovery','static','resolution','policy','effects','defillama_scan','logic')
                     AND {NORMAL_READY})
             )) AS jobs,
             EXISTS(SELECT 1 FROM audit_reports WHERE text_extraction_status IS NULL) AS audit_text,

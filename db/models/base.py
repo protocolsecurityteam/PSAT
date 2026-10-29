@@ -46,6 +46,7 @@ class JobStage(str, enum.Enum):
     # PSAT_EFFECTS_STAGE; off, policy goes straight to coverage.
     effects = "effects"
     coverage = "coverage"
+    logic = "logic"  # Auxiliary generate/assess/enumerate jobs; not a production-analysis stage.
     done = "done"
 
 

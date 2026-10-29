@@ -25,6 +25,7 @@ from routers import (
     company,
     fleet,
     jobs,
+    logic,
     me,
     meta,
     monitored,
@@ -325,6 +326,7 @@ spa.mount_static_assets(app)
 
 app.include_router(meta.router)
 app.include_router(jobs.router)
+app.include_router(logic.router)
 app.include_router(fleet.router)
 app.include_router(analyses.router)
 app.include_router(company.router)

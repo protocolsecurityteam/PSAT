@@ -25,6 +25,7 @@ from services.compute_isolation import ChildProcessKilled, ResourceExhausted
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import CompilerUnavailableError
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
+from services.logic.model import ReadError
 
 # Neon idle disconnects surface as OperationalError; don't terminally fail the job for them.
 try:
@@ -67,6 +68,7 @@ _TRANSIENT_HTTP: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 
 
 # ``HTTPError`` is excluded: its status code drives the verdict.
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
+    ReadError,  # Required logic inputs were not obtained; never a semantic refusal.
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ChunkedEncodingError,
