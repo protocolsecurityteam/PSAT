@@ -38,6 +38,49 @@ requires new formulas, rather than mixing old resolved callees with new state.
 Formula generation makes only concrete reads needed for linking. It does not dump storage, scan candidate logs,
 trace keys or query the solver for callers; symbolic callee targets remain unresolved instead of triggering enumeration.
 
+## Selection reports (first pass)
+
+`services.resolution.logic_selection` consumes saved formula artifacts and writes a separate
+`expansion_selection` report. It never enumerates callers, executes a call, calls Jev, or schedules expansion.
+
+```sh
+python -m scripts.logic_select formulas.json --output selection.json
+# Optional bounded direct state reads, at the formula artifact's original block:
+python -m scripts.logic_select formulas.json --rpc-url "$RPC_URL" --direct-reads 64 --output selection.json
+```
+
+Offline mode requires no RPC or database. State-dependent access remains unresolved. With a provider, the service
+permits bounded direct reads; symbolic membership lookups remain `state_required`. A hard provider boundary blocks
+dumps, event scans and trace/preimage enumeration. Failed reads abort the report rather than become low priority.
+
+For each effect it checks the complete guard. Ordinary arguments are existential choices; observed caller/origin
+identity dimensions are considered jointly, so a privileged origin cannot be borrowed to prove unrestricted access.
+Unmodelled signature feasibility remains unresolved. These are call-frame classifications, not proof of transaction
+admission or control of someone else's key. The existing caller-only expansion API cannot enumerate origin/signing
+authority, so those dimensions route to review. Inactive-at-block is separate from access and never means low severity.
+
+Structural evidence links writes to guard reads within the supplied deployment. For a required identity equality or
+Boolean identity lookup, a write at a potentially aliasing location is marked as a **potential** authority change.
+Boolean implication covers the whole guard, including alternate paths; source identifiers are not a classifier.
+Possible aliasing is not proof that the writer can establish a particular permission. Other guard dependencies stay
+ordinary dependency evidence. External/unmodelled effects and raw storage writes receive high attention. Numeric
+upper bounds, when proved under a reachable full guard, describe storage values only, not asset loss.
+
+This version deliberately leaves economic impact `unknown`. `high` attention is a transparent selection policy
+applied to structural concerns, not a proven financial severity score. It does not claim transfers/deposits are benign,
+and does not infer low impact from caller-keyed writes, small numbers, missing evidence or a function name.
+
+Decisions are `expand` (recommendation only), `review`, `report_unrestricted` (keep visible without a holder list),
+and `defer` for a formula with no successful path. Paused effects retain their attention and need enabling conditions
+reviewed. High-attention restricted effects, or those missing only membership state, can recommend effect-level
+expansion. Unknown code/semantics go to review. Every input function remains represented, including functions without
+reported effects. Limits on queries, direct reads, assessed effects and dependency scans are recorded explicitly.
+
+Reports retain chain, block, function, effect index, formula hash, policy version, evidence links, issues and decisions.
+They include suggested expansion requests, but nothing consumes them automatically. Jev/domain-context enrichment,
+calibrated economic severity and automatic scheduling remain subsequent work. The earlier Jev pilot is not a labeled
+severity oracle; new judgments must be evaluated against independently reviewed examples before enabling expenditure.
+
 ## Relations, not independent pieces
 
 A function has a complete success predicate over caller, origin, arguments, value and the state at the block.
@@ -168,3 +211,11 @@ must identify the schema, exact source revision, input block and any unresolved 
 823 logic, script and vocabulary checks pass. Changed runtime modules pass Pyright and Ruff. Tests verify
 formula-only default jobs, no enumeration during linking, saved-formula round trips, explicit function/effect
 selection, block matching, input preservation and expansion in a fresh Python process. No live corpus was run.
+
+## Selection-report validation (2026-10-28)
+
+849 logic, script and vocabulary/logging checks pass; Ruff and changed-module Pyright checks pass.
+An independent local Anvil example selected owner reassignment and membership granting, kept a paused owner
+change under review, and retained unrestricted owner reassignment as high attention without holder enumeration.
+That fixture report used three distinct direct reads and eighteen solver queries; these are fixture measurements,
+not corpus cost estimates. No Jev request, metered RPC, automatic expansion or live corpus run was performed.

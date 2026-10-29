@@ -9,6 +9,7 @@ is `tests/logic/test_ir_coverage.py`; the compiler's declarations remain in `low
 | Loop control and memory carried across iterations | `test_loop_control.py` | Unroll/depth limits yield named unknowns |
 | Declaration/modifier scope | `test_declaration_scope.py`, multiple solc versions | Unreadable compiler versions remain unsupported |
 | Yul name binding | `test_yul_siblings.py` | Ambiguous reads are unknown; equal diagnostic names are not equal values |
+| Selection reports | `test_selection_report.py`, `test_logic_select.py` | Structural priority only; economic severity remains unknown; no automatic expansion |
 | Caller projection | `test_projection.py`, exhaustive finite caller/argument domains | Samples never certify complete sets |
 | State and delegated gates | `test_formula_engine.py` | Stateful calls, unresolved proxy dispatch and unknown call targets remain qualified |
 | Composite keys | `test_hashed_storage.py`, a hash of two addresses with no events | Verified preimages and explicit cryptographic assumptions required |
