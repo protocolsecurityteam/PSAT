@@ -18,6 +18,7 @@ from services.clients.logic_reads import ChainReads
 from .expansion import Selection, expand_formula, formula_hash
 from .formula import compile_function
 from .model import Limits, ReadError, decode_formula, encode
+from .source_context import ContextContracts, build_context
 from .terms import reset_terms
 
 logger = logging.getLogger(__name__)
@@ -176,16 +177,18 @@ def deployment_formulas(
         contract = builds.get(at)
         if contract is None:
             return {**header, "status": "not_verified", "functions": {}}
-        out = {}
+        out, contexts = {}, {}
         for fn in contract.functions_entry_points:
             if fn.view or fn.pure or fn.is_constructor or not fn.solidity_signature or _is_getter(contract, fn):
                 continue
             if signatures is not None and fn.solidity_signature not in signatures:
                 continue
             reset_terms()
-            formula = compile_function(contract, fn, at, chain, builds, code_of=builds.code_address)
+            tracked = ContextContracts(builds, at, contract)
+            formula = compile_function(contract, fn, at, chain, tracked, code_of=builds.code_address)
             out[fn.solidity_signature] = encode(formula)
-        return {**header, "functions": out}
+            contexts[fn.solidity_signature] = build_context(formula, fn, tracked.used)
+        return {**header, "functions": out, "contexts": contexts}
 
 
 def deployment_expansions(

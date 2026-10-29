@@ -1,0 +1,236 @@
+{
+  "date": "2026-10-28",
+  "model": "jev-1.14.0",
+  "rubric": "effect-impact-v2",
+  "development": {
+    "cases": [
+      {
+        "function": "deposit()",
+        "effect_index": 0,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "Funding and new credits match in the same atomic operation.",
+        "estimated_level": "unknown",
+        "matched": false,
+        "abstained": true,
+        "raw_ranking_signal": 0.4,
+        "uncertainty": [
+          "impact distribution is not sufficiently concentrated"
+        ],
+        "model_status": "rated"
+      },
+      {
+        "function": "withdrawOwn(uint256)",
+        "effect_index": 1,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "The caller's own credit is debited before paying the caller.",
+        "estimated_level": "unknown",
+        "matched": false,
+        "abstained": true,
+        "raw_ranking_signal": 0.71,
+        "uncertainty": [
+          "impact distribution is not sufficiently concentrated"
+        ],
+        "model_status": "rated"
+      },
+      {
+        "function": "seize(address)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner can redirect the vault's entire balance without debiting user claims.",
+        "estimated_level": "high",
+        "matched": true,
+        "abstained": false,
+        "raw_ranking_signal": 2.91,
+        "uncertainty": [],
+        "model_status": "rated"
+      },
+      {
+        "function": "issue(address,uint256)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner can create arbitrary redeemable credits without funding them.",
+        "estimated_level": "high",
+        "matched": true,
+        "abstained": false,
+        "raw_ranking_signal": 2.91,
+        "uncertainty": [],
+        "model_status": "rated"
+      },
+      {
+        "function": "nominate(address)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner can transfer root authority over shared vault assets.",
+        "estimated_level": "high",
+        "matched": true,
+        "abstained": false,
+        "raw_ranking_signal": 2.87,
+        "uncertainty": [],
+        "model_status": "rated"
+      },
+      {
+        "function": "halt(bool)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner alone can sustain a block on user withdrawals indefinitely.",
+        "estimated_level": "high",
+        "matched": true,
+        "abstained": false,
+        "raw_ranking_signal": 2.95,
+        "uncertainty": [],
+        "model_status": "rated"
+      },
+      {
+        "function": "boundedFee(uint16)",
+        "effect_index": 0,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "Fee is bounded to 10/10000 of a withdrawal; the cap is not caller-changeable.",
+        "estimated_level": "unknown",
+        "matched": false,
+        "abstained": true,
+        "raw_ranking_signal": 1.67,
+        "uncertainty": [
+          "impact distribution is not sufficiently concentrated"
+        ],
+        "model_status": "rated"
+      },
+      {
+        "function": "changeCaption(string)",
+        "effect_index": 0,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "In the supplied system the string is only returned by its public getter.",
+        "estimated_level": "none",
+        "matched": true,
+        "abstained": false,
+        "raw_ranking_signal": 0.12,
+        "uncertainty": [],
+        "model_status": "rated"
+      }
+    ],
+    "total": 8,
+    "matched": 5,
+    "abstained": 3,
+    "incorrect": 0,
+    "high_impact_underestimates": 0,
+    "high_impact_abstentions": 0,
+    "note": "Development labels, not proof of general accuracy or a calibration guarantee.",
+    "impact_assessment": {
+      "model": "jev-1.14.0",
+      "rubric_version": "effect-impact-v2",
+      "statistics": {
+        "cache_hits": 0,
+        "live_answers": 8,
+        "missing_context": 0,
+        "pending": 0,
+        "errors": 0,
+        "reported_live_input_tokens": 23083,
+        "reported_live_output_tokens": 1012
+      },
+      "wire_requests": 8,
+      "automatic_execution": false
+    },
+    "legacy_pilot": {
+      "records": 28,
+      "unique_functions": 27,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "median_severity_confidence": 0.5800000000000001,
+      "at_source_character_cap": 0,
+      "accuracy": null,
+      "note": "No independent severity labels; different rubric, context and model. These outputs cannot establish accuracy or an improvement percentage."
+    }
+  },
+  "renamed_comment_stress": {
+    "cases": [
+      {
+        "function": "emergencyDrain(uint256)",
+        "effect_index": 1,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "Misleading name does not change debit-before-payment of the caller own credit.",
+        "estimated_level": "unknown",
+        "matched": false,
+        "abstained": true,
+        "raw_ranking_signal": 0.85,
+        "uncertainty": [
+          "impact distribution is not sufficiently concentrated"
+        ],
+        "model_status": "rated"
+      },
+      {
+        "function": "harmlessRefresh(address)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Misleading name and adversarial comment do not change unrestricted reserve disposition by owner.",
+        "estimated_level": "high",
+        "matched": true,
+        "abstained": false,
+        "raw_ranking_signal": 2.81,
+        "uncertainty": [],
+        "model_status": "rated"
+      }
+    ],
+    "total": 2,
+    "matched": 1,
+    "abstained": 1,
+    "incorrect": 0,
+    "high_impact_underestimates": 0,
+    "high_impact_abstentions": 0,
+    "note": "Development labels, not proof of general accuracy or a calibration guarantee.",
+    "impact_assessment": {
+      "model": "jev-1.14.0",
+      "rubric_version": "effect-impact-v2",
+      "statistics": {
+        "cache_hits": 0,
+        "live_answers": 2,
+        "missing_context": 0,
+        "pending": 0,
+        "errors": 0,
+        "reported_live_input_tokens": 5397,
+        "reported_live_output_tokens": 254
+      },
+      "wire_requests": 2,
+      "automatic_execution": false
+    }
+  },
+  "cache_replay": {
+    "model": "jev-1.14.0",
+    "rubric_version": "effect-impact-v2",
+    "statistics": {
+      "cache_hits": 8,
+      "live_answers": 0,
+      "missing_context": 0,
+      "pending": 0,
+      "errors": 0,
+      "reported_live_input_tokens": 0,
+      "reported_live_output_tokens": 0
+    },
+    "wire_requests": 0,
+    "automatic_execution": false
+  },
+  "limits": "One synthetic native-asset vault and two renamed/comment variants. These are development cases, not an independent protocol holdout or calibrated accuracy measurement. Expected severity labels are review judgments, not chain-proven severity.",
+  "earlier_rubric": {
+    "version": "effect-impact-v1",
+    "total": 8,
+    "matched": 1,
+    "abstained": 7,
+    "incorrect": 0
+  },
+  "total_live_usage": {
+    "post_requests": 19,
+    "judgments": 18,
+    "smoke_requests": 1,
+    "reported_input_tokens": 54580,
+    "reported_output_tokens": 2298
+  }
+}

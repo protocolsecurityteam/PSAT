@@ -66,7 +66,7 @@ Possible aliasing is not proof that the writer can establish a particular permis
 ordinary dependency evidence. External/unmodelled effects and raw storage writes receive high attention. Numeric
 upper bounds, when proved under a reachable full guard, describe storage values only, not asset loss.
 
-This version deliberately leaves economic impact `unknown`. `high` attention is a transparent selection policy
+The deterministic pass deliberately leaves economic impact `unknown`. `high` attention is a transparent selection policy
 applied to structural concerns, not a proven financial severity score. It does not claim transfers/deposits are benign,
 and does not infer low impact from caller-keyed writes, small numbers, missing evidence or a function name.
 
@@ -77,9 +77,50 @@ expansion. Unknown code/semantics go to review. Every input function remains rep
 reported effects. Limits on queries, direct reads, assessed effects and dependency scans are recorded explicitly.
 
 Reports retain chain, block, function, effect index, formula hash, policy version, evidence links, issues and decisions.
-They include suggested expansion requests, but nothing consumes them automatically. Jev/domain-context enrichment,
-calibrated economic severity and automatic scheduling remain subsequent work. The earlier Jev pilot is not a labeled
-severity oracle; new judgments must be evaluated against independently reviewed examples before enabling expenditure.
+They include suggested expansion requests, but nothing consumes them automatically. A separate optional impact
+pass can enrich this report. The earlier Jev pilot is not a labeled severity oracle.
+
+## Optional impact assessment
+
+`services.resolution.logic_impact` rates the potential power of each effect conditional on execution. It uses
+version-pinned Jev judgments about assets/claims, authority/code, availability, scope and source sufficiency.
+These are **model estimates**, never authority proofs, caller-set completeness or dollar-loss bounds.
+The deterministic access result and original formula are preserved. The model sees source and structural facts,
+not the preceding priority or decision. Missing knowledge remains visible.
+
+Formula artifacts now include bounded source contexts captured from compiler inputs, including already-followed
+callees. No additional RPC or model call is made by formula generation. Each context references its formula hash
+and hashes its source units. Source truncation and missing callees are explicit. Effect locations use exact action
+IR identities where available, or candidate write statements otherwise; they are presentation evidence, not proof
+inputs. `source_complete` describes this captured scope, not the economic perimeter. Old artifacts without contexts
+remain usable but receive `missing_context` in this pass; newly fetched source is never silently joined to them.
+
+```sh
+# Read cached judgments only; no API key or network request is needed:
+python -m scripts.logic_impact formulas.json selection.json --cache .jev-cache --output impact.json
+# Explicitly permit at most eight new requests (TYPESAFE_API_KEY or JEV_API_KEY in the environment):
+python -m scripts.logic_impact formulas.json selection.json --cache .jev-cache --output impact.json --live --max-requests 8
+# After reviewing the recommendations, explicitly run separate address expansion:
+python -m scripts.logic_expand formulas.json --selection-report impact.json --rpc-url "$RPC_URL" --output addresses.json
+```
+
+The client pins `jev-1.14.0`, bounds request size and wire attempts, and does not retry or follow redirects.
+The local cache retains exact model/rubric/context requests and raw distributions, without credentials.
+Timeouts consume an attempt; failures and budget exhaustion do not change access or erase deterministic decisions.
+Changing source, the questions, or the model invalidates the cache key. Cached outputs are revalidated before use.
+
+Display/routing thresholds are provisional, not calibrated probabilities of correctness. A high estimate can
+raise attention or recommend expansion when access analysis supports caller expansion. A low estimate only marks
+a deferral candidate: it cannot discard a row or override structural high attention. Uncertain estimates abstain;
+unrestricted high-impact effects remain visible without enumerating a universal set. Origin/signature identities,
+inactive effects and unsupported access stay under review. No automatic scheduling or production grade changes exist.
+
+`--selection-report` validates the saved chain, block, formula hash and selected effect indices before expansion.
+It accepts either the deterministic report or its enriched copy and rejects stale or ambiguous selections.
+This flag is an explicit execution request; generating either report alone never starts address expansion.
+
+`scripts.logic_impact_evaluate` compares saved reports with supplied review labels offline. Abstentions are reported
+separately from matches and errors. Historical pilot outputs without labels have no reported accuracy.
 
 ## Relations, not independent pieces
 
@@ -219,3 +260,26 @@ An independent local Anvil example selected owner reassignment and membership gr
 change under review, and retained unrestricted owner reassignment as high attention without holder enumeration.
 That fixture report used three distinct direct reads and eighteen solver queries; these are fixture measurements,
 not corpus cost estimates. No Jev request, metered RPC, automatic expansion or live corpus run was performed.
+
+## Impact-assessment validation (2026-10-28)
+
+886 related logic, script and vocabulary/logging checks pass; changed runtime modules pass Pyright and Ruff.
+The tests cover context/cache identity, request budgets, malformed responses, estimate abstentions, preservation
+of access evidence, and explicit expansion from a matching report. Recorded live responses are policy regression
+fixtures; they are not an oracle for general model correctness.
+
+The small live evaluation used one synthetic native-asset vault with eight review-labeled operations and two
+renamed/comment variants of that same vault. Rubric v2 accepted six estimates matching those labels and abstained
+on four, with no accepted mismatch. All five high-power examples (including the renamed seizure variant) were
+accepted high. The ordinary deposit, withdrawal and bounded-fee examples included abstentions. These results do
+not establish corpus accuracy, calibrated confidence, or reliable automatic deferral. The v1 development pass
+accepted one of eight and abstained on seven; v2 improved source locations and distinguished compiler limitations
+from missing source, without lowering the acceptance thresholds.
+
+`tests/fixtures/logic_impact/evaluation_2026_10_28.json` retains the case labels, raw ranking signals, uncertainty,
+counts and historical pilot summary. The earlier 28 pilot records have no independent labels and use a different
+model/rubric/context, so no accuracy comparison is claimed. Total live usage was 18 judgments plus one API smoke
+request, reporting 54,580 input and 2,298 output tokens. Replaying all eight development judgments used eight cache
+hits and zero wire requests. No metered chain RPC, corpus run, automatic address expansion or production change
+was performed for this integration. The next evaluation needs independently reviewed real-protocol cases before
+model-only low-impact deferral is considered.

@@ -1,0 +1,887 @@
+{
+  "model": "jev-1.14.0",
+  "rubric_version": "effect-impact-v2",
+  "note": "Recorded development/stress responses for deterministic policy regression. Not proof of model accuracy.",
+  "cases": [
+    {
+      "case": {
+        "function": "halt(bool)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner alone can sustain a block on user withdrawals indefinitely."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 1.9,
+            "confidence": 0.53,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.07,
+              "1": 0.14,
+              "2": 0.6,
+              "3": 0.19
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 1.88,
+            "confidence": 0.82,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.07,
+              "1": 0.01,
+              "2": 0.89,
+              "3": 0.03
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 2.95,
+            "confidence": 0.96,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.01,
+              "2": 0.02,
+              "3": 0.97
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "shared_control",
+            "confidence": 0.89,
+            "probabilities": {
+              "own_entitlement": 0.0,
+              "other_users": 0.09,
+              "shared_control": 0.91,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 2948,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "high",
+      "source_complete": true,
+      "request_hash": "4b3977f042d594f00aeae8e74a19d2a6d60be9f1ce439a821d9b1198f5d986ef"
+    },
+    {
+      "case": {
+        "function": "issue(address,uint256)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner can create arbitrary redeemable credits without funding them."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 2.91,
+            "confidence": 0.9,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.01,
+              "2": 0.02,
+              "3": 0.95
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 0.81,
+            "confidence": 0.18,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.44,
+              "1": 0.38,
+              "2": 0.1,
+              "3": 0.08
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 0.57,
+            "confidence": 0.44,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.67,
+              "1": 0.21,
+              "2": 0.01,
+              "3": 0.11
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "other_users",
+            "confidence": 0.91,
+            "probabilities": {
+              "own_entitlement": 0.05,
+              "other_users": 0.93,
+              "shared_control": 0.01,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.97
+          }
+        },
+        "usage": {
+          "input_tokens": 3007,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "high",
+      "source_complete": true,
+      "request_hash": "26032df2090fe2dec5b617a9d7b4e9899836c1d0595e2bc954de3b28338af38d"
+    },
+    {
+      "case": {
+        "function": "seize(address)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner can redirect the vault's entire balance without debiting user claims."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 2.91,
+            "confidence": 0.9,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.01,
+              "2": 0.02,
+              "3": 0.95
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 1.46,
+            "confidence": 0.0,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.35,
+              "1": 0.21,
+              "2": 0.07,
+              "3": 0.37
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 2.63,
+            "confidence": 0.64,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.08,
+              "1": 0.05,
+              "2": 0.02,
+              "3": 0.85
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "other_users",
+            "confidence": 0.89,
+            "probabilities": {
+              "own_entitlement": 0.07,
+              "other_users": 0.91,
+              "shared_control": 0.01,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.01
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 2626,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "high",
+      "source_complete": true,
+      "request_hash": "6eaff5d7dae89d35953223e5f5cfa026998687601fc54527f36a8d189471a321"
+    },
+    {
+      "case": {
+        "function": "nominate(address)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Owner can transfer root authority over shared vault assets."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 2.63,
+            "confidence": 0.64,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.07,
+              "1": 0.01,
+              "2": 0.13,
+              "3": 0.79
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 2.87,
+            "confidence": 0.87,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.02,
+              "2": 0.09,
+              "3": 0.89
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 2.73,
+            "confidence": 0.72,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.05,
+              "1": 0.05,
+              "2": 0.03,
+              "3": 0.87
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "shared_control",
+            "confidence": 0.99,
+            "probabilities": {
+              "own_entitlement": 0.0,
+              "other_users": 0.01,
+              "shared_control": 0.99,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 3218,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "high",
+      "source_complete": true,
+      "request_hash": "f191e8af216cd94fc70a6a10ab16767b98335c2a702544d3c2858d9e784ee9e9"
+    },
+    {
+      "case": {
+        "function": "boundedFee(uint16)",
+        "effect_index": 0,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "Fee is bounded to 10/10000 of a withdrawal; the cap is not caller-changeable."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 1.53,
+            "confidence": 0.44,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.51,
+              "2": 0.4,
+              "3": 0.07
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 0.96,
+            "confidence": 0.03,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.48,
+              "1": 0.09,
+              "2": 0.41,
+              "3": 0.02
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 1.67,
+            "confidence": 0.0,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.2,
+              "1": 0.32,
+              "2": 0.09,
+              "3": 0.39
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "shared_control",
+            "confidence": 0.82,
+            "probabilities": {
+              "own_entitlement": 0.0,
+              "other_users": 0.14,
+              "shared_control": 0.86,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 2946,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "unknown",
+      "source_complete": true,
+      "request_hash": "4659dc48c7ab9fc018cac4378c6c58ccbe9d4cbbae079a1d05e462f8e3da115c"
+    },
+    {
+      "case": {
+        "function": "withdrawOwn(uint256)",
+        "effect_index": 1,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "The caller's own credit is debited before paying the caller."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 0.23,
+            "confidence": 0.76,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.88,
+              "1": 0.05,
+              "2": 0.02,
+              "3": 0.05
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 0.71,
+            "confidence": 0.7,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.3,
+              "1": 0.7,
+              "2": 0.0,
+              "3": 0.0
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 0.16,
+            "confidence": 0.82,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.89,
+              "1": 0.07,
+              "2": 0.01,
+              "3": 0.03
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "own_entitlement",
+            "confidence": 0.94,
+            "probabilities": {
+              "own_entitlement": 0.95,
+              "other_users": 0.05,
+              "shared_control": 0.0,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.97
+          }
+        },
+        "usage": {
+          "input_tokens": 2689,
+          "output_tokens": 128
+        }
+      },
+      "accepted_level": "unknown",
+      "source_complete": true,
+      "request_hash": "598841b301e2f579b91b809187951b35eef451b85123eb61c22d89c450f4e505"
+    },
+    {
+      "case": {
+        "function": "deposit()",
+        "effect_index": 0,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "Funding and new credits match in the same atomic operation."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 0.26,
+            "confidence": 0.75,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.9,
+              "1": 0.02,
+              "2": 0.01,
+              "3": 0.07
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 0.4,
+            "confidence": 0.6,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.62,
+              "1": 0.37,
+              "2": 0.0,
+              "3": 0.01
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 0.13,
+            "confidence": 0.87,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.92,
+              "1": 0.05,
+              "2": 0.01,
+              "3": 0.02
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "own_entitlement",
+            "confidence": 0.9,
+            "probabilities": {
+              "own_entitlement": 0.92,
+              "other_users": 0.07,
+              "shared_control": 0.01,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 2982,
+          "output_tokens": 128
+        }
+      },
+      "accepted_level": "unknown",
+      "source_complete": true,
+      "request_hash": "95339c84421ebe34af05666580a5cf2eb095eb7bd84f9a792ab2aa67904f30d6"
+    },
+    {
+      "case": {
+        "function": "changeCaption(string)",
+        "effect_index": 0,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "In the supplied system the string is only returned by its public getter."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 0.02,
+            "confidence": 0.99,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.99,
+              "1": 0.01,
+              "2": 0.0,
+              "3": 0.0
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 0.11,
+            "confidence": 0.88,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.93,
+              "1": 0.04,
+              "2": 0.01,
+              "3": 0.02
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 0.12,
+            "confidence": 0.88,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.94,
+              "1": 0.03,
+              "2": 0.0,
+              "3": 0.03
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "shared_control",
+            "confidence": 0.2,
+            "probabilities": {
+              "own_entitlement": 0.31,
+              "other_users": 0.12,
+              "shared_control": 0.36,
+              "no_persistent_effect": 0.16,
+              "unclear": 0.05
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 2667,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "none",
+      "source_complete": true,
+      "request_hash": "a18ea3c324f669b88f69aaf3bc124d7af9e4c9e081f8e1188a226745dfd868f1"
+    },
+    {
+      "case": {
+        "function": "harmlessRefresh(address)",
+        "effect_index": 0,
+        "expected_min": 3,
+        "expected_max": 3,
+        "rationale": "Misleading name and adversarial comment do not change unrestricted reserve disposition by owner."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 2.81,
+            "confidence": 0.8,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.05,
+              "1": 0.01,
+              "2": 0.03,
+              "3": 0.91
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 1.14,
+            "confidence": 0.0,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.42,
+              "1": 0.28,
+              "2": 0.05,
+              "3": 0.25
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 2.29,
+            "confidence": 0.29,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.18,
+              "1": 0.07,
+              "2": 0.03,
+              "3": 0.72
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "other_users",
+            "confidence": 0.82,
+            "probabilities": {
+              "own_entitlement": 0.12,
+              "other_users": 0.86,
+              "shared_control": 0.01,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.01
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.98
+          }
+        },
+        "usage": {
+          "input_tokens": 2679,
+          "output_tokens": 126
+        }
+      },
+      "accepted_level": "high",
+      "source_complete": true,
+      "request_hash": "21f9b7fee8a2931c54fb83295fcf881a37602954b899a60c6f3fe27ad54829e5"
+    },
+    {
+      "case": {
+        "function": "emergencyDrain(uint256)",
+        "effect_index": 1,
+        "expected_min": 0,
+        "expected_max": 1,
+        "rationale": "Misleading name does not change debit-before-payment of the caller own credit."
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "asset_power": {
+            "type": "score",
+            "score": 0.37,
+            "confidence": 0.65,
+            "legend": {
+              "0": "No power over others' assets; no financial effect or only fully funded exercise of the caller's own entitlement.",
+              "1": "Limited economic influence with an explicit narrow bound; no seizure of shared reserves or unbacked claims.",
+              "2": "Material influence over shared economics, prices or asset disposition, with meaningful enforced limits.",
+              "3": "Can seize or redirect shared/user assets, mint unbacked redeemable claims, or remove meaningful financial limits."
+            },
+            "probabilities": {
+              "0": 0.81,
+              "1": 0.08,
+              "2": 0.03,
+              "3": 0.07
+            }
+          },
+          "authority_power": {
+            "type": "score",
+            "score": 0.85,
+            "confidence": 0.81,
+            "legend": {
+              "0": "No authorization or code-control power; ordinary use under existing permissions.",
+              "1": "Delegates only the caller's own entitlement or changes a narrowly scoped individual permission.",
+              "2": "Can grant/revoke operational protocol roles or change a shared access policy within a fixed scope.",
+              "3": "Can replace implementation/trusted authority, grant root control, or execute arbitrary code with protocol authority."
+            },
+            "probabilities": {
+              "0": 0.17,
+              "1": 0.82,
+              "2": 0.0,
+              "3": 0.01
+            }
+          },
+          "availability_power": {
+            "type": "score",
+            "score": 0.47,
+            "confidence": 0.53,
+            "legend": {
+              "0": "No meaningful ability to disrupt other users' operations or exits.",
+              "1": "Narrow individual disruption or a short enforced interruption without shared exit loss.",
+              "2": "Can interrupt shared operations, with an enforced duration limit or an independent restoring party shown.",
+              "3": "Can sustain a broad shutdown or prevent shared exits/recovery with no effective independent restoration bound shown."
+            },
+            "probabilities": {
+              "0": 0.69,
+              "1": 0.22,
+              "2": 0.02,
+              "3": 0.07
+            }
+          },
+          "scope": {
+            "type": "choice",
+            "choice": "own_entitlement",
+            "confidence": 0.92,
+            "probabilities": {
+              "own_entitlement": 0.9400000000000001,
+              "other_users": 0.06,
+              "shared_control": 0.0,
+              "no_persistent_effect": 0.0,
+              "unclear": 0.0
+            }
+          },
+          "context_sufficient": {
+            "type": "noul",
+            "noul": 0.95
+          }
+        },
+        "usage": {
+          "input_tokens": 2718,
+          "output_tokens": 128
+        }
+      },
+      "accepted_level": "unknown",
+      "source_complete": true,
+      "request_hash": "3bbc12439a402c52d3783fd84dd00f5468613e700bf61ae63a7d0e9631dcd1ca"
+    }
+  ]
+}

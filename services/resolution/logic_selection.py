@@ -13,12 +13,48 @@ from typing import Any
 
 import z3
 
-from services.logic.expansion import formula_hash
+from services.logic.expansion import Selection, formula_hash
 from services.logic.model import BudgetExceeded, Formula, Issue, Limits, Reads, decode_formula
 from services.logic.solver import ADDRESS, Translation, boolean, integer
 from services.logic.terms import CALLER, FALSE, IDENTITY_KINDS, Term, conjuncts, contains, mk_not, stable, subterms
 
 POLICY_VERSION = "authority-selection-v1"
+
+
+def selections_from_report(artifact: dict, report: dict) -> dict[str, Selection]:
+    """Validate a reviewed plan for explicit expansion; this function performs no work."""
+    chain, block, address = artifact_identity(artifact)
+    if (
+        report.get("kind") != "expansion_selection"
+        or report.get("chain_id") != chain
+        or report.get("block") != block
+        or int(report.get("address", "0x0"), 16) != address
+    ):
+        raise ValueError("selection report does not match formula artifact")
+    keys = [(r["function"], r["effect_index"]) for r in report["rows"]]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate selection row")
+    approved = {(r["function"], r["effect_index"]): r for r in report["rows"] if r["decision"] == "expand"}
+    selections = {}
+    for request in report["suggested_expansions"]:
+        name = request["function"]
+        if name in selections or name not in artifact["functions"]:
+            raise ValueError("invalid or duplicate expansion request")
+        formula = decode_formula(artifact["functions"][name])
+        fingerprint = formula_hash(formula)
+        if (formula.address, formula.block, formula.signature) != (address, block, name):
+            raise ValueError("formula identity does not match artifact")
+        selection = Selection(request["callers"], tuple(request["effect_indices"]))
+        selection.validate(formula)
+        targets = (*selection.effect_indices, *((None,) if selection.callers else ()))
+        if request.get("formula_hash") != fingerprint or any(
+            approved.get((name, i), {}).get("formula_hash") != fingerprint for i in targets
+        ):
+            raise ValueError("expansion request is not backed by matching selected rows")
+        selections[name] = selection
+    if not selections:
+        raise ValueError("selection report recommends no expansions")
+    return selections
 
 
 @dataclass(frozen=True)
