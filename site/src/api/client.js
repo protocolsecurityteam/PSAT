@@ -66,10 +66,12 @@ async function request(path, options = {}) {
       ? "The server is temporarily unavailable. Please try again."
       : `Request failed (${response.status}). Please try again.`;
     let code;
+    let detail;
     if (type.includes("application/json")) {
       try {
         const body = await response.json();
         code = body.code;
+        detail = body.detail;
         if (typeof body.detail === "string" && body.detail.length <= 300 && !/<[^>]+>/.test(body.detail)) {
           message = body.detail;
         }
@@ -81,6 +83,8 @@ async function request(path, options = {}) {
     const err = new Error(message);
     err.status = response.status;
     err.code = code;
+    // Raw, possibly structured (a 422's field list); callers that render it must format it themselves.
+    err.detail = detail;
     throw err;
   }
   if (asBlob) return { data: await response.blob(), headers: response.headers };

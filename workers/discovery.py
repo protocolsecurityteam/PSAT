@@ -27,6 +27,8 @@ from db.models import (
     SessionLocal,
 )
 from db.queue import (
+    ProxyContextUnsettled,
+    adopt_current_proxy_context,
     advance_job,
     bulk_upsert_discovered_contracts,
     copy_static_cache,
@@ -36,6 +38,7 @@ from db.queue import (
     find_previous_company_inventory,
     get_artifact,
     get_or_create_protocol,
+    merge_job_request,
     store_artifact,
     store_source_files,
 )
@@ -77,7 +80,7 @@ from utils.chains import (
     supported_chain_ids,
 )
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from workers.base import BaseWorker, JobHandledDirectly
+from workers.base import BaseWorker, JobDeferred, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
 
@@ -960,6 +963,13 @@ class DiscoveryWorker(BaseWorker):
             chain=request.get("chain"),
             context=f"discovery for {address}",
         )
+        # Before anything takes the contract row: the current implementation of a known proxy is analysed in that
+        # proxy's context whatever the submission path or order.
+        try:
+            adopt_current_proxy_context(session, job, chain=fetch_chain.name)
+        except ProxyContextUnsettled as unsettled:
+            raise JobDeferred(f"Waiting for proxy analysis to settle: {unsettled}") from unsettled
+        request = job.request if isinstance(job.request, dict) else {}
         # Reuse cached static data from a completed job on the same chain; ``force`` bypasses it (see
         # AnalyzeRequest.force).
         if request.get("force"):
@@ -971,8 +981,7 @@ class DiscoveryWorker(BaseWorker):
             self.update_detail(session, job, f"Reusing cached static data for {address}")
             new_contract_id = copy_static_cache(session, cached_job.id, job.id)
             if new_contract_id is not None:
-                req = job.request if isinstance(job.request, dict) else {}
-                job.request = {**req, "static_cached": True, "cache_source_job_id": str(cached_job.id)}
+                merge_job_request(session, job, {"static_cached": True, "cache_source_job_id": str(cached_job.id)})
                 session.commit()
 
                 if not job.name:
@@ -1129,11 +1138,11 @@ class DiscoveryWorker(BaseWorker):
                 if copied is not None:
                     # ``static_cached`` skips forge+Slither, but without ``cache_source_job_id``, which would validate
                     # the donor's per-chain implementation address. Proxy classification re-resolves here.
-                    job.request = {
-                        **request,
-                        "static_cached": True,
-                        "cross_chain_cache_source_job_id": str(donor.id),
-                    }
+                    merge_job_request(
+                        session,
+                        job,
+                        {"static_cached": True, "cross_chain_cache_source_job_id": str(donor.id)},
+                    )
                     session.commit()
                     logger.info(
                         "Discovery cross-chain code-plane reuse for %s from job %s (source_hash=%s)",

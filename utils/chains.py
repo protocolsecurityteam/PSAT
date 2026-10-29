@@ -450,6 +450,22 @@ def all_chains() -> tuple[ChainInfo, ...]:
     return _CHAINS
 
 
+def accepted_chain_spellings() -> dict[str, str]:
+    """Every normalized spelling :func:`chain_by_name` accepts, mapped to its canonical name.
+
+    ``chain_by_name`` depends only on the normalized input, and every accepted input normalizes to a registry key or an
+    alias-table key, so resolving those keys covers it exactly.
+    """
+    out: dict[str, str] = {}
+    for key in (*_BY_NAME, *_CHAIN_ALIASES):
+        normalized = re.sub(r"[\s_-]+", " ", key.strip()).strip().lower()
+        try:
+            out[normalized] = chain_by_name(normalized).name
+        except UnknownChainError:
+            continue
+    return out
+
+
 def chain_name_to_id_map() -> dict[str, int]:
     out: dict[str, int] = {}
     for info in _CHAINS:
