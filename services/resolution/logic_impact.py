@@ -17,10 +17,12 @@ from services.logic.model import decode_formula
 from services.logic.source_context import digest, validate_context
 from services.resolution.logic_selection import artifact_identity
 
-RUBRIC_VERSION = "effect-impact-v2"
+RUBRIC_VERSION = "effect-impact-v3"
 INSTRUCTIONS = (
     "Assess the potential permitted impact of `target.function` at `target.effect_index`, using `sources` and "
-    "`effect`. Assume a party can satisfy the recorded authority condition and acts adversarially within the code's "
+    "`effect`. When the effect index is null, assess the whole entrypoint: the compiler reported no individual "
+    "effect, which is not evidence of harmlessness. Otherwise assess the selected effect. "
+    "Assume a party can satisfy the recorded authority condition and acts adversarially within the code's "
     "constraints. Keep current inactivity separate from potential power. Respect other users' signatures, balances "
     "and entitlements; do not assume the caller owns their keys. Include repeatable use when no total bound is shown. "
     "Assess the effect within its full atomic operation, including matching debits or funding. Other entrypoints "
@@ -286,9 +288,6 @@ def enrich_impact(
         "reported_live_output_tokens": 0,
     }
     for row in result["rows"]:
-        if row["effect_index"] is None:
-            row["impact"]["model_status"] = "no_effect_selected"
-            continue
         f = formulas[row["function"]]
         context = artifact.get("contexts", {}).get(row["function"])
         if context is None:
@@ -306,12 +305,13 @@ def enrich_impact(
                 "formula_hash": row["formula_hash"],
             },
             "effect": {
-                "kind": f.effects[row["effect_index"]].kind,
+                "kind": f.effects[row["effect_index"]].kind if row["effect_index"] is not None else "whole_function",
                 "source_sites": context.get("effect_sites", {}).get(
                     str(row["effect_index"]), {"basis": "unlocated", "statements": []}
                 ),
             },
             "sources": context["units"],
+            "deployments": context.get("deployments", []),
             "source_gaps": context["source_gaps"],
             "compiler_limitations": context["analysis_gaps"],
             "facts": row["impact"]["facts"],
@@ -362,6 +362,7 @@ def enrich_impact(
             )
             if (
                 estimate["level"] in ("medium", "high")
+                and row["effect_index"] is not None
                 and row["decision"] == "review"
                 and supported_access
                 and row["access"]["activity"] != "inactive_at_block"

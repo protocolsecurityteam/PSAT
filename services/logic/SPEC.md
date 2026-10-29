@@ -38,6 +38,50 @@ requires new formulas, rather than mixing old resolved callees with new state.
 Formula generation makes only concrete reads needed for linking. It does not dump storage, scan candidate logs,
 trace keys or query the solver for callers; symbolic callee targets remain unresolved instead of triggering enumeration.
 
+## Public workflow: generate, assess, enumerate
+
+`python -m scripts.logic` exposes the three separate jobs:
+
+```sh
+python -m scripts.logic generate "$ADDRESS" --chain-id 1 --rpc-url "$RPC_URL" --output formulas.json
+python -m scripts.logic assess formulas.json --rpc-url "$RPC_URL" --cache .jev-cache --output assessment.json
+python -m scripts.logic enumerate formulas.json --assessment assessment.json --rpc-url "$RPC_URL" --output addresses.json
+```
+
+`generate` fetches verified compiler inputs through the existing source-acquisition service, pins the current
+block (or accepts `--block`), and saves formulas without querying holder sets. Source context combines the target's
+whole contract, inheritance, libraries and callees discovered across the generated entrypoints. Repeat
+`--related-address ADDRESS` to include additional associated deployments in the assessment context, up to 32.
+These additions do not create formula rows for those deployments or alter the target's formulas.
+
+The source bundle keeps deployment and code addresses separate, including proxy implementation hints. It does
+not pretend distinct contracts share a storage context. Captured source is bounded by `--context-chars` per function
+(default 48,000); truncation and unavailable related source remain named gaps. This is **not a complete recursive
+dependency graph**: dynamic targets, calls beyond compiler coverage, and wider economic dependencies may be absent.
+Explicit related addresses augment that context without guessing addresses from arbitrary storage words. Proxy
+dispatch proof limitations of the formula engine remain unchanged.
+
+`assess` runs access analysis and then requires a Jev judgment (new or exactly cached) for each reported effect.
+If no effect is reported, rubric v3 asks about the whole entrypoint instead, retaining review rather than inferring
+harmlessness or inventing an effect to enumerate. This changes the cache request from the earlier v2 evaluation.
+With `TYPESAFE_API_KEY` or `JEV_API_KEY` configured, uncached requests run by default, capped by `--max-requests`
+(default 8). `--cache-only` prohibits requests. Without a key, exact cached answers still work; uncached effects
+remain pending. Without `--rpc-url`, access analysis is offline and may require state. No holder enumeration occurs.
+Missing judgments, missing source contexts and exhausted inference budgets produce an `incomplete` artifact and
+CLI exit code 3, after saving partial results. Rerun to reuse cached answers and assess the remaining effects.
+
+The report includes per-function severity from its assessed effects. A known high-impact effect establishes a
+high estimate; otherwise an unassessed/uncertain effect prevents a lower function-level conclusion. Model estimates
+and source gaps remain visible. `judgments_complete` means answers were obtained, not that they were confident or
+correct. Uncertain estimates stay under review. Only medium/high assessed effects with suitable access evidence
+enter this workflow's expansion recommendations; structural concern without a supporting judgment stays under review.
+
+`enumerate` requires this assessment artifact and explicitly executes its recommendations, optionally narrowed
+by repeated `--function SIGNATURE`. Each selected effect must match the saved formula, chain and block. A partially
+assessed contract can still have individually assessed recommendations; a separate explicit invocation may execute
+those. No command automatically invokes the next command. The older `scripts.logic_expand` remains an explicit
+manual path for requesting expansion without assessment. Production worker/UI behavior is unchanged.
+
 ## Selection reports (first pass)
 
 `services.resolution.logic_selection` consumes saved formula artifacts and writes a separate
@@ -283,3 +327,17 @@ request, reporting 54,580 input and 2,298 output tokens. Replaying all eight dev
 hits and zero wire requests. No metered chain RPC, corpus run, automatic address expansion or production change
 was performed for this integration. The next evaluation needs independently reviewed real-protocol cases before
 model-only low-impact deferral is considered.
+
+## Three-job workflow validation (2026-10-29)
+
+901 related logic, script and vocabulary/logging checks pass; changed runtime modules pass Ruff and Pyright.
+Tests exercise the public command sequence, cache reuse without credentials, incomplete assessments, per-function
+aggregation with unassessed effects, stale/manual report rejection and source-context truncation. A local Anvil
+contract passes through real formula generation, deterministic access assessment, a mocked Jev response, and explicit
+saved-formula expansion; the resulting finite effect-caller set is the independently known owner. Enumeration APIs
+are forbidden during its generation and assessment stages. Associated-source tests cover cross-entrypoint sharing,
+explicit extra deployments and unavailable source without changing the formula.
+
+No new live Jev request, metered chain RPC or production/corpus run was made for this workflow change. The earlier
+v2 live evaluations remain historical evidence; v3's whole-function fallback and expanded source context still need
+evaluation on independently reviewed real protocols. The workflow is a CLI/backend interface, not a deployed API/UI.

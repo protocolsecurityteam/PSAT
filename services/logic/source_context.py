@@ -24,11 +24,14 @@ class ContextContracts(Mapping):
     def __init__(self, contracts, address: int, contract):
         self.contracts = contracts
         self.used = {address: contract}
+        self.missing: set[int] = set()
 
     def get(self, address, default=None):
         contract = self.contracts.get(address, default)
         if contract is not None and contract is not default:
             self.used[address] = contract
+        elif isinstance(address, int):
+            self.missing.add(address)
         return contract
 
     def __getitem__(self, address):
@@ -44,7 +47,15 @@ class ContextContracts(Mapping):
         return len(self.used)
 
 
-def build_context(formula: Formula, function, contracts: Mapping, *, max_chars: int = 48_000) -> dict:
+def build_context(
+    formula: Formula,
+    function,
+    contracts: Mapping,
+    *,
+    max_chars: int = 48_000,
+    missing_sources: tuple[str, ...] = (),
+    code_addresses: Mapping | None = None,
+) -> dict:
     """Preserve the target, helpers, declarations, inheritance and already-loaded callees.
 
     Completeness means only the collected source scope, not complete economic understanding.
@@ -52,7 +63,7 @@ def build_context(formula: Formula, function, contracts: Mapping, *, max_chars: 
     not silently joined to newly fetched source for a model judgment.
     """
     units, seen, original_chars, remaining = [], set(), 0, max_chars
-    missing = []
+    missing = list(missing_sources)
 
     def add(obj, label):
         nonlocal original_chars, remaining
@@ -83,9 +94,16 @@ def build_context(formula: Formula, function, contracts: Mapping, *, max_chars: 
     add(function, f"entry point {formula.signature}")
     for modifier in getattr(function, "modifiers", ()):
         add(modifier, f"modifier {modifier.canonical_name}")
-    for address, contract in sorted(contracts.items()):
+    # Keep the target first even when another deployment has a smaller address.
+    ordered = sorted(contracts.items(), key=lambda item: (item[0] != formula.address, item[0]))
+    deployments = []
+    for address, contract in ordered:
+        code_address = (code_addresses or {}).get(address, address)
+        deployments.append(
+            {"address": f"0x{address:040x}", "code_address": f"0x{code_address:040x}", "contract": contract.name}
+        )
         for c in [contract, *getattr(contract, "inheritance", ())]:
-            add(c, f"contract {c.name} at {address:#x}")
+            add(c, f"contract {c.name} at {address:#x}, code {code_address:#x}")
             for fn in getattr(c, "functions", ()):
                 for call in fn.all_library_calls():
                     library_fn = getattr(call, "function", None)
@@ -143,6 +161,7 @@ def build_context(formula: Formula, function, contracts: Mapping, *, max_chars: 
         "source_chars": original_chars,
         "supplied_chars": max_chars - remaining,
         "scope": "compiler inputs; no assertion of economic completeness",
+        "deployments": deployments,
         "effect_sites": sites,
         "site_chars": site_chars,
     }

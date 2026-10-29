@@ -169,15 +169,26 @@ def deployment_formulas(
     *,
     signatures: set[str] | None = None,
     block: int | None = None,
+    related_addresses: tuple[str, ...] = (),
+    context_chars: int = 48_000,
 ) -> dict[str, Any]:
     """Generate formulas only. No holder enumeration or address-set queries are scheduled."""
+    if context_chars <= 0 or len(related_addresses) > 32:
+        raise ValueError("positive context size and at most 32 explicit related addresses required")
+    related = set()
+    for value in related_addresses:
+        address_value = int(value, 16)
+        if not 0 < address_value < 2**160:
+            raise ValueError("invalid related address")
+        related.add(address_value)
     with _deployment_inputs(session, chain_id, rpc_url, block) as (chain, builds):
         at = int(address, 16)
         header = {"schema": 2, "kind": "formulas", "chain_id": chain_id, "address": address, "block": chain.block}
         contract = builds.get(at)
         if contract is None:
             return {**header, "status": "not_verified", "functions": {}}
-        out, contexts = {}, {}
+        out, contexts, compiled = {}, {}, {}
+        associated, missing = {at: contract}, set()
         for fn in contract.functions_entry_points:
             if fn.view or fn.pure or fn.is_constructor or not fn.solidity_signature or _is_getter(contract, fn):
                 continue
@@ -187,8 +198,37 @@ def deployment_formulas(
             tracked = ContextContracts(builds, at, contract)
             formula = compile_function(contract, fn, at, chain, tracked, code_of=builds.code_address)
             out[fn.solidity_signature] = encode(formula)
-            contexts[fn.solidity_signature] = build_context(formula, fn, tracked.used)
-        return {**header, "functions": out, "contexts": contexts}
+            compiled[fn.solidity_signature] = (formula, fn)
+            associated.update(tracked.used)
+            missing.update(tracked.missing)
+        for other in sorted(related - associated.keys()):
+            found = builds.get(other)
+            if found is None:
+                missing.add(other)
+            else:
+                associated[other] = found
+        code_addresses = {other: builds.code_address(other) for other in associated}
+        for signature, (formula, fn) in compiled.items():
+            contexts[signature] = build_context(
+                formula,
+                fn,
+                associated,
+                max_chars=context_chars,
+                code_addresses=code_addresses,
+                missing_sources=tuple(f"unverified:{other:#x}" for other in sorted(missing)),
+            )
+        return {
+            **header,
+            "functions": out,
+            "contexts": contexts,
+            "source_scope": {
+                "discovery": "callees followed while compiling selected entrypoints, plus explicit related addresses",
+                "related_addresses": [_hex20(other) for other in sorted(related)],
+                "unverified_addresses": [_hex20(other) for other in sorted(missing)],
+                "context_chars": context_chars,
+                "complete_dependency_graph": False,
+            },
+        }
 
 
 def deployment_expansions(
