@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import aliased
 
@@ -29,7 +30,14 @@ from services.aggregations.company_overview import (
 from services.aggregations.company_overview.entity_keys import _entity_key
 from services.aggregations.company_overview.jobs import eligible_company_names
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
-from services.company_pages import cache_tag, enabled, prepared_or_pending
+from services.company_pages import (
+    cache_tag,
+    enabled,
+    not_found_or_preparing,
+    prepared_or_pending,
+    prepared_section,
+)
+from services.exports import EXPORT_FORMATS, build_report, export_filename, render_report
 
 from . import deps
 
@@ -448,6 +456,88 @@ def company_summary(company_name: str, request: Request) -> Response | dict:
             return build_company_summary(session, company_name)
         except CompanyNotFound:
             raise HTTPException(404, "Company not found") from None
+
+
+@router.get("/api/company/{company_name}/export", response_model=None)
+def company_export(company_name: str, fmt: str = Query("json", alias="format")) -> Response:
+    """The protocol's latest results as a downloadable file: overview, score and audit coverage.
+
+    Reads the same source as the page and answers under the same conditions: with prepared pages on, the overview is
+    the prepared snapshot (an anonymous caller can never force a live build) and an unservable name gets the page's
+    own 404 or 503. A name the page wouldn't list (a first analysis still running) never exports partial counts.
+    """
+    started = time.monotonic()
+    fmt = fmt.lower()
+    if fmt not in EXPORT_FORMATS:
+        allowed = ", ".join(EXPORT_FORMATS)
+        raise HTTPException(status_code=400, detail=f"Unsupported export format; use one of: {allowed}")
+    generated_at = datetime.now(timezone.utc)
+    route = "/api/company/{name}/export"
+    with deps.SessionLocal() as session:
+        if enabled():
+            prepared = prepared_section(session, company_name)
+            if prepared is None:
+                _log_endpoint(route, company=company_name, started=started, outcome="unprepared")
+                return not_found_or_preparing(session, company_name)
+            overview = dict(prepared.payload)
+            # The prepared overview is built without its summary half (TVL); that is its own section.
+            summary = prepared_section(session, company_name, section="summary")
+            if summary is not None and isinstance(summary.payload, dict):
+                overview.update(summary.payload)
+            source = {
+                "kind": "prepared" if prepared.fresh else "prepared-stale",
+                "prepared_at": prepared.prepared_at.isoformat(),
+            }
+        else:
+            if company_name not in eligible_company_names(session):
+                _log_endpoint(route, company=company_name, started=started, outcome="not_found")
+                raise HTTPException(status_code=404, detail="Company not found")
+            try:
+                overview = dict(build_company_overview(session, company_name))
+            except CompanyNotFound:
+                _log_endpoint(route, company=company_name, started=started, outcome="not_found")
+                raise HTTPException(status_code=404, detail="Company not found")
+            source = {"kind": "live", "prepared_at": None}
+
+    # The protocol exists, so a score 404 means "not scored yet"; a 503 means the document couldn't be read.
+    score: Any = None
+    try:
+        score = company_score(company_name)
+        score_status = "available"
+    except HTTPException as exc:
+        if exc.status_code not in (404, 503):
+            raise
+        score_status = "not_scored" if exc.status_code == 404 else "unavailable"
+    try:
+        coverage: Any = company_audit_coverage(company_name)
+    except HTTPException:
+        coverage = None
+
+    report = build_report(
+        company=company_name,
+        overview=overview,
+        source=source,
+        score=score,
+        score_status=score_status,
+        audit_coverage=coverage,
+        generated_at=generated_at,
+    )
+    content = render_report(report, fmt)
+    _log_endpoint(
+        route,
+        company=company_name,
+        started=started,
+        outcome="success",
+        source=source["kind"],
+        export_format=fmt,
+        size_bytes=len(content),
+    )
+    filename = export_filename(company_name, fmt, generated_at)
+    return Response(
+        content=content,
+        media_type=EXPORT_FORMATS[fmt],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/api/company/{company_name}/refresh", dependencies=[Depends(deps.require_admin)], status_code=202)

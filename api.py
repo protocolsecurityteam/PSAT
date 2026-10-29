@@ -33,7 +33,7 @@ from routers import (
     spa,
 )
 from services.auth.sessions import check_production_admin_config
-from utils.company_limit import CompanyReadLimit
+from utils.company_limit import CompanyExportLimit, CompanyReadLimit
 from utils.compression import NegotiatedGZipMiddleware
 from utils.edge import CloudflareBoundary, EdgeConfig
 from utils.logging import bind_trace_context, configure_logging, trace_id_var
@@ -283,6 +283,7 @@ async def trace_id_middleware(request: Request, call_next):
 app.add_middleware(NegotiatedGZipMiddleware, minimum_size=1024, compresslevel=6)
 # Outside gzip so a slot covers the full compressed response; the Cloudflare boundary authenticates first.
 app.add_middleware(CompanyReadLimit)
+app.add_middleware(CompanyExportLimit)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

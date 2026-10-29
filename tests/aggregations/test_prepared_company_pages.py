@@ -461,3 +461,51 @@ def test_supervised_loop_reports_heartbeat_and_honors_stop(monkeypatch, mode):
     worker.run(stop)
     assert len(beats) == 1
     assert beats[0]["status"] == ("error" if mode == "failure" else "running")
+
+
+def _export_client(monkeypatch, factory):
+    from fastapi.testclient import TestClient
+
+    import api
+    from routers import company, deps
+
+    monkeypatch.setattr(deps, "SessionLocal", factory)
+    monkeypatch.setattr(api.app, "middleware_stack", None)
+    build = MagicMock(side_effect=AssertionError("the export must not build the overview live"))
+    monkeypatch.setattr(company, "build_company_overview", build)
+    return TestClient(api.app), build
+
+
+def test_export_reads_the_prepared_snapshot_and_never_builds(prepared, monkeypatch):
+    session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
+    expected = bodies(session)[0]
+    client, build = _export_client(monkeypatch, factory)
+    response = client.get(f"/api/company/{protocol.name}/export")
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["source"]["kind"] == "prepared"
+    assert report["source"]["prepared_at"]
+    assert report["contracts"] == expected["contracts"]
+    build.assert_not_called()
+    session.execute(update(Page).values(schema_version=Page.schema_version + 1))
+    session.commit()
+    response = client.get(f"/api/company/{protocol.name}/export", params={"format": "pdf"})
+    assert response.status_code == 503
+    assert response.json()["code"] == "company_preparing"
+    build.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["prepared", "live"])
+def test_export_404s_a_protocol_whose_first_analysis_is_unfinished(prepared, monkeypatch, mode):
+    session, protocol, factory = prepared
+    if mode == "live":
+        monkeypatch.setenv("PSAT_PREPARED_COMPANY_PAGES", "0")
+    session.execute(update(Job).where(Job.protocol_id == protocol.id).values(status=JobStatus.queued))
+    session.commit()
+    client, build = _export_client(monkeypatch, factory)
+    response = client.get(f"/api/company/{protocol.name}/export")
+    assert response.status_code == 404
+    build.assert_not_called()
+    if mode == "prepared":
+        assert client.get(f"/api/company/{protocol.name}").status_code == 404, "the page answers the same"

@@ -16,20 +16,33 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _PATH = re.compile(r"/api/company/[^/]+(?:/functions)?/?$")
+# Exports render PDF/DOCX in memory; a separate, smaller pool keeps a download loop from holding page-read slots.
+EXPORT_PATH = re.compile(r"/api/company/[^/]+/export/?$")
 
 
-class CompanyReadLimit:
+class _PathLimit:
+    """Bounded in-flight plus queued GETs for paths matching ``path``; settings read ``<env_prefix>_*``."""
+
     def __init__(
         self,
         app: ASGIApp,
         max_inflight: int | None = None,
         max_queued: int | None = None,
         queue_timeout: float | None = None,
+        *,
+        path: re.Pattern[str],
+        env_prefix: str,
+        defaults: tuple[int, int, float],
     ):
         self.app = app
-        active = int(os.environ.get("PSAT_COMPANY_MAX_INFLIGHT", "2")) if max_inflight is None else max_inflight
-        queued = int(os.environ.get("PSAT_COMPANY_MAX_QUEUED", "8")) if max_queued is None else max_queued
-        timeout = float(os.environ.get("PSAT_COMPANY_QUEUE_TIMEOUT", "30")) if queue_timeout is None else queue_timeout
+        self.path = path
+        default_active, default_queued, default_timeout = defaults
+        env = os.environ
+        active = int(env.get(f"{env_prefix}_MAX_INFLIGHT", default_active)) if max_inflight is None else max_inflight
+        queued = int(env.get(f"{env_prefix}_MAX_QUEUED", default_queued)) if max_queued is None else max_queued
+        timeout = (
+            float(env.get(f"{env_prefix}_QUEUE_TIMEOUT", default_timeout)) if queue_timeout is None else queue_timeout
+        )
         if active < 1 or queued < 0 or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Company limits require inflight >= 1, queued >= 0 and a finite positive timeout")
         self.slots = asyncio.Semaphore(active)
@@ -96,7 +109,7 @@ class CompanyReadLimit:
         )(scope, receive, send)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["method"] != "GET" or not _PATH.fullmatch(scope["path"]):
+        if scope["type"] != "http" or scope["method"] != "GET" or not self.path.fullmatch(scope["path"]):
             await self.app(scope, receive, send)
             return
         if self.admitted >= self.capacity:
@@ -135,3 +148,29 @@ class CompanyReadLimit:
                 self.admitted -= 1
                 if acquired:
                     self.slots.release()
+
+
+class CompanyReadLimit(_PathLimit):
+    def __init__(
+        self,
+        app: ASGIApp,
+        max_inflight: int | None = None,
+        max_queued: int | None = None,
+        queue_timeout: float | None = None,
+    ):
+        limits = (max_inflight, max_queued, queue_timeout)
+        super().__init__(app, *limits, path=_PATH, env_prefix="PSAT_COMPANY", defaults=(2, 8, 30.0))
+
+
+class CompanyExportLimit(_PathLimit):
+    """One export at a time by default (``PSAT_EXPORT_MAX_INFLIGHT``), with a short queue."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        max_inflight: int | None = None,
+        max_queued: int | None = None,
+        queue_timeout: float | None = None,
+    ):
+        limits = (max_inflight, max_queued, queue_timeout)
+        super().__init__(app, *limits, path=EXPORT_PATH, env_prefix="PSAT_EXPORT", defaults=(1, 2, 30.0))

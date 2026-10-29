@@ -5,7 +5,7 @@ import pytest
 from anyio.to_thread import run_sync
 from starlette.responses import JSONResponse
 
-from utils.company_limit import CompanyReadLimit
+from utils.company_limit import CompanyExportLimit, CompanyReadLimit
 
 
 class Call:
@@ -178,6 +178,50 @@ def test_slot_covers_body_send_and_replays_queued_request_messages():
         assert received[0] == received[1]
 
     run(scenario)
+
+
+def test_exports_have_their_own_pool_and_never_hold_page_read_slots():
+    async def scenario():
+        release = asyncio.Event()
+        entries = []
+
+        async def app(scope, receive, send):
+            entries.append(scope["path"])
+            if scope["path"].endswith("/export"):
+                await release.wait()
+            await JSONResponse({})(scope, receive, send)
+
+        reads = CompanyReadLimit(app, max_inflight=1, max_queued=0)
+        # api.py adds the export limit last, so it is the outer layer.
+        exports = CompanyExportLimit(reads, max_inflight=1, max_queued=0)
+        running = Call(exports, "/api/company/example/export")
+        await until(lambda: len(entries) == 1)
+        assert exports.admitted == 1 and reads.admitted == 0
+        overflow = Call(exports, "/api/company/other/export")
+        await overflow.task
+        assert overflow.status == 503
+        for path in ("/api/company/example", "/api/company/example/functions"):
+            page = Call(exports, path)
+            await page.task
+            assert page.status == 200, path
+        release.set()
+        await running.task
+        assert running.status == 200
+        await until(lambda: exports.admitted == 0)
+
+    run(scenario)
+
+
+def test_export_limit_defaults_to_one_slot_and_reads_its_own_settings(monkeypatch):
+    app = JSONResponse({})
+    gate = CompanyExportLimit(app)
+    assert gate.capacity == 3 and gate.slots._value == 1
+    monkeypatch.setenv("PSAT_EXPORT_MAX_INFLIGHT", "2")
+    monkeypatch.setenv("PSAT_EXPORT_MAX_QUEUED", "0")
+    monkeypatch.setenv("PSAT_COMPANY_MAX_INFLIGHT", "5")
+    gate = CompanyExportLimit(app)
+    assert gate.capacity == 2 and gate.slots._value == 2
+    assert CompanyReadLimit(app).slots._value == 5
 
 
 @pytest.mark.parametrize(
