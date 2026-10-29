@@ -18,7 +18,7 @@ from services.clients.logic_reads import ChainReads
 from .expansion import Selection, expand_formula, formula_hash
 from .formula import compile_function
 from .model import Limits, ReadError, decode_formula, encode
-from .source_context import ContextContracts, build_context
+from .source_context import ContextContracts, build_bundle, build_context
 from .terms import reset_terms
 
 logger = logging.getLogger(__name__)
@@ -208,19 +208,19 @@ def deployment_formulas(
             else:
                 associated[other] = found
         code_addresses = {other: builds.code_address(other) for other in associated}
+        bundle = build_bundle(
+            associated,
+            max_chars=context_chars,
+            code_addresses=code_addresses,
+            missing_sources=tuple(f"unverified:{other:#x}" for other in sorted(missing)),
+        )
         for signature, (formula, fn) in compiled.items():
-            contexts[signature] = build_context(
-                formula,
-                fn,
-                associated,
-                max_chars=context_chars,
-                code_addresses=code_addresses,
-                missing_sources=tuple(f"unverified:{other:#x}" for other in sorted(missing)),
-            )
+            contexts[signature] = build_context(formula, fn, bundle)
         return {
             **header,
             "functions": out,
             "contexts": contexts,
+            "source_bundle": bundle,
             "source_scope": {
                 "discovery": "callees followed while compiling selected entrypoints, plus explicit related addresses",
                 "related_addresses": [_hex20(other) for other in sorted(related)],

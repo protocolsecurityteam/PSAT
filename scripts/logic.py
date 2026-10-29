@@ -10,10 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
 from services.clients.jev import DEFAULT_MODEL, JevClient
+from services.logic.expansion import Selection
 from services.logic.model import Limits
 from services.resolution.logic_assessment import assess_formulas
 from services.resolution.logic_impact import JudgmentCache
@@ -56,7 +58,10 @@ def main(argv=None):
 
     enumerate_ = jobs.add_parser("enumerate", help="explicitly execute assessed expansion recommendations")
     enumerate_.add_argument("artifact", type=Path)
-    enumerate_.add_argument("--assessment", type=Path, required=True)
+    mode = enumerate_.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--assessment", type=Path)
+    mode.add_argument("--manual", action="store_true", help="explicitly expand without an impact assessment")
+    enumerate_.add_argument("--effect", action="append", default=[], help="manual: SIGNATURE:ZERO_BASED_INDEX")
     enumerate_.add_argument("--function", action="append", default=[], help="restrict plan to exact signatures")
     enumerate_.add_argument("--rpc-url", required=True)
     enumerate_.add_argument("--members", type=int, default=Limits().members)
@@ -118,14 +123,31 @@ def main(argv=None):
             else:
                 result = assess_saved()
         else:
-            report = json.loads(args.assessment.read_text())
-            if report.get("assessment", {}).get("schema") != 1:
-                parser.error("enumerate requires an assess output; use logic_expand for manual expansion")
-            selections = selections_from_report(artifact, report)
-            if args.function:
-                if set(args.function) - selections.keys():
-                    parser.error("requested function has no assessed expansion recommendation")
-                selections = {name: selections[name] for name in sorted(set(args.function))}
+            if args.manual:
+                selections = {name: Selection() for name in args.function}
+                for entry in args.effect:
+                    try:
+                        name, number = entry.rsplit(":", 1)
+                        index = int(number)
+                        if index < 0:
+                            raise ValueError()
+                    except ValueError:
+                        parser.error("--effect must be SIGNATURE:ZERO_BASED_INDEX")
+                    selection = selections.get(name, Selection(callers=False))
+                    selections[name] = replace(
+                        selection, effect_indices=tuple(sorted({*selection.effect_indices, index}))
+                    )
+                if not selections:
+                    parser.error("manual enumeration requires --function or --effect")
+            else:
+                if args.effect:
+                    parser.error("--effect is only for explicit --manual enumeration")
+                report = json.loads(args.assessment.read_text())
+                selections = selections_from_report(artifact, report)
+                if args.function:
+                    if set(args.function) - selections.keys():
+                        parser.error("requested function has no assessed expansion recommendation")
+                    selections = {name: selections[name] for name in sorted(set(args.function))}
             from db.models import SessionLocal
             from services.logic.deployment import deployment_expansions
 
@@ -138,6 +160,9 @@ def main(argv=None):
                     limits=Limits(members=args.members, solver_ms=args.solver_ms),
                 )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
+    if args.job == "assess" and result["assessment"]["status"] == "not_verified":
+        print("Contract source is not verified; no assessment or enumeration was performed.")
+        raise SystemExit(4)
     if args.job == "assess" and not result["assessment"]["judgments_complete"]:
         print(f"Assessment incomplete; saved pending judgments to {args.output}. No enumeration was started.")
         raise SystemExit(3)

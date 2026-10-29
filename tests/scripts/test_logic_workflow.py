@@ -59,12 +59,12 @@ def test_generate_assess_enumerate_are_three_explicit_jobs(tmp_path, monkeypatch
     result = json.loads(assessment.read_text())
     assert events == ["generate"] and len(wire.calls) == 1
     assert result["assessment"]["status"] == "assessed"
-    assert result["assessment"]["functions"]["change(uint256)"]["severity"] == "high"
+    assert result["assessment"]["functions"]["change(uint256)"]["level"] == "high"
     # Exact cached judgments satisfy the mandatory assessment without keys or new requests.
     monkeypatch.delenv("JEV_API_KEY")
     main(args)
     assert len(wire.calls) == 1
-    assert json.loads(assessment.read_text())["impact_assessment"]["statistics"]["cache_hits"] == 1
+    assert json.loads(assessment.read_text())["assessment"]["statistics"]["cache_hits"] == 1
     main(
         [
             "enumerate",
@@ -127,7 +127,7 @@ def test_inconclusive_judgment_is_not_material_impact(tmp_path):
         artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=Session(response(confidence=0.1)))
     )
     assert result["assessment"]["judgments_complete"] is True
-    assert result["assessment"]["functions"]["change(uint256)"]["needs_review"] is True
+    assert result["assessment"]["functions"]["change(uint256)"]["level"] == "unknown"
     assert result["suggested_expansions"] == []
     assert result["rows"][0]["decision"] == "review"
 
@@ -137,7 +137,7 @@ def test_legacy_selection_is_not_a_completed_assessment(tmp_path):
     source, selection = tmp_path / "f.json", tmp_path / "r.json"
     source.write_text(json.dumps(artifact))
     selection.write_text(json.dumps(report))
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         main(
             [
                 "enumerate",
@@ -158,30 +158,25 @@ def test_assess_cannot_replace_formula_artifact(tmp_path):
         main(["assess", path, "--cache", str(tmp_path / "cache"), "--output", path])
 
 
-@pytest.mark.parametrize("level,expected", [(0, "unknown"), (2, "unknown"), (3, "high")])
-def test_partial_function_impact_does_not_hide_unassessed_effects(tmp_path, level, expected):
+def test_many_effects_cost_one_function_judgment(tmp_path):
     from dataclasses import replace
 
     from services.logic.expansion import formula_hash
     from services.logic.model import encode
     from services.logic.source_context import digest
 
-    formula, artifact, _ = inputs()
-    formula = replace(formula, effects=formula.effects * 2)
-    artifact["functions"][formula.signature] = encode(formula)
-    context = artifact["contexts"][formula.signature]
-    context["formula_hash"] = formula_hash(formula)
+    f, artifact, _ = inputs()
+    f = replace(f, effects=f.effects * 5)
+    artifact["functions"][f.signature] = encode(f)
+    context = artifact["contexts"][f.signature]
+    context["formula_hash"] = formula_hash(f)
     context["context_hash"] = digest({k: v for k, v in context.items() if k != "context_hash"})
+    wire = Session()
     result = assess_formulas(
-        artifact,
-        cache=JudgmentCache(tmp_path),
-        client=JevClient("key", max_requests=1, session=Session(response(level=level))),
+        artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", max_requests=1, session=wire)
     )
-    summary = result["assessment"]["functions"][formula.signature]
-    assert summary["severity"] == expected
-    assert summary["unassessed_effects"] == [1] and summary["needs_review"]
-    assert result["assessment"]["status"] == "incomplete"
-    assert all(1 not in request["effect_indices"] for request in result["suggested_expansions"])
+    assert len(wire.calls) == 1 and result["assessment"]["judgments_complete"]
+    assert result["suggested_expansions"][0]["effect_indices"] == list(range(5))
 
 
 def test_function_without_reported_effects_still_gets_a_judgment(tmp_path):
@@ -201,8 +196,111 @@ def test_function_without_reported_effects_still_gets_a_judgment(tmp_path):
     result = assess_formulas(artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=wire))
     assert len(wire.calls) == 1
     state = json.loads(wire.calls[0][1]["data"])["state"]
-    assert state["effect"]["kind"] == "whole_function" and state["target"]["effect_index"] is None
+    assert "effect_index" not in state["target"] and "entry" in state
     summary = result["assessment"]["functions"][formula.signature]
-    assert summary["judgments_complete"] and summary["needs_review"]
-    assert summary["severity"] == "high"
+    assert summary["model_status"] == "rated" and result["rows"][0]["decision"] == "review"
+    assert summary["level"] == "high"
     assert result["suggested_expansions"] == []
+
+
+def test_manual_enumeration_preserves_explicit_selection(tmp_path, monkeypatch):
+    _, artifact, _ = inputs()
+    source, out = tmp_path / "formulas.json", tmp_path / "out.json"
+    source.write_text(json.dumps(artifact))
+    before = source.read_bytes()
+    monkeypatch.setattr("db.models.SessionLocal", lambda: nullcontext(None))
+
+    def expand(session, saved, rpc_url, selections, **kwargs):
+        assert saved == artifact and selections == {"change(uint256)": Selection(True, (0,))}
+        return {"kind": "address_expansions"}
+
+    monkeypatch.setattr("services.logic.deployment.deployment_expansions", expand)
+    main(
+        [
+            "enumerate",
+            str(source),
+            "--manual",
+            "--function",
+            "change(uint256)",
+            "--effect",
+            "change(uint256):0",
+            "--rpc-url",
+            "unused",
+            "--output",
+            str(out),
+        ]
+    )
+    assert source.read_bytes() == before and json.loads(out.read_text())["kind"] == "address_expansions"
+
+
+def test_missing_block_does_not_reach_provider(tmp_path, monkeypatch):
+    _, artifact, _ = inputs()
+    artifact.pop("block")
+    source = tmp_path / "f.json"
+    source.write_text(json.dumps(artifact))
+
+    def forbidden(*a, **kw):
+        raise AssertionError("invalid artifact reached provider")
+
+    monkeypatch.setattr("services.logic.deployment._deployment_inputs", forbidden)
+    with pytest.raises(ValueError, match="block"):
+        main(
+            [
+                "assess",
+                str(source),
+                "--cache",
+                str(tmp_path / "c"),
+                "--rpc-url",
+                "unused",
+                "--output",
+                str(tmp_path / "out"),
+            ]
+        )
+
+
+@pytest.mark.parametrize("extra", [[], ["--manual"], ["--manual", "--effect", "bad"]])
+def test_manual_selection_is_never_implicit(tmp_path, extra):
+    _, artifact, _ = inputs()
+    source = tmp_path / "f.json"
+    source.write_text(json.dumps(artifact))
+    with pytest.raises(SystemExit):
+        main(["enumerate", str(source), *extra, "--rpc-url", "unused", "--output", str(tmp_path / "out")])
+
+
+def test_cache_only_mode_never_calls_model_even_with_key(tmp_path, monkeypatch):
+    _, artifact, _ = inputs()
+    source = tmp_path / "f.json"
+    source.write_text(json.dumps(artifact))
+    monkeypatch.setenv("JEV_API_KEY", "fake")
+
+    def forbidden(*a, **kw):
+        raise AssertionError("cache-only made request")
+
+    monkeypatch.setattr("requests.Session.post", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        main(["assess", str(source), "--cache-only", "--cache", str(tmp_path / "c"), "--output", str(tmp_path / "out")])
+    assert exc.value.code == 3
+
+
+@pytest.mark.parametrize("unverified,code,status", [(False, 0, "nothing_to_assess"), (True, 4, "not_verified")])
+def test_empty_and_unverified_cli_outcomes(tmp_path, monkeypatch, unverified, code, status):
+    _, artifact, _ = inputs()
+    artifact["functions"] = {}
+    artifact["contexts"] = {}
+    if unverified:
+        artifact["status"] = "not_verified"
+    source, out = tmp_path / "f.json", tmp_path / "out.json"
+    source.write_text(json.dumps(artifact))
+
+    def forbidden(*a, **kw):
+        raise AssertionError("empty deployment attempted inference")
+
+    monkeypatch.setattr("requests.Session.post", forbidden)
+    args = ["assess", str(source), "--cache-only", "--cache", str(tmp_path / "c"), "--output", str(out)]
+    if code:
+        with pytest.raises(SystemExit) as exc:
+            main(args)
+        assert exc.value.code == code
+    else:
+        main(args)
+    assert json.loads(out.read_text())["assessment"]["status"] == status

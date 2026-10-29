@@ -2,12 +2,11 @@
 
 Access is assessed over the complete effect guard and all observed identity dimensions.
 Structural dependency evidence sets attention priority, not an invented economic severity.
-Reports recommend work; they never execute expansion or remove an input formula.
+This layer supplies evidence only; the assessment layer owns expansion selection.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -16,9 +15,10 @@ import z3
 from services.logic.expansion import Selection, formula_hash
 from services.logic.model import BudgetExceeded, Formula, Issue, Limits, Reads, decode_formula
 from services.logic.solver import ADDRESS, Translation, boolean, integer
+from services.logic.source_context import artifact_hash
 from services.logic.terms import CALLER, FALSE, IDENTITY_KINDS, Term, conjuncts, contains, mk_not, stable, subterms
 
-POLICY_VERSION = "authority-selection-v1"
+POLICY_VERSION = "access-evidence-v2"
 
 
 def selections_from_report(artifact: dict, report: dict) -> dict[str, Selection]:
@@ -34,6 +34,8 @@ def selections_from_report(artifact: dict, report: dict) -> dict[str, Selection]
     keys = [(r["function"], r["effect_index"]) for r in report["rows"]]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate selection row")
+    if report.get("assessment", {}).get("schema") != 2 or report.get("artifact_hash") != artifact_hash(artifact):
+        raise ValueError("assessment does not match current formulas and source context")
     approved = {(r["function"], r["effect_index"]): r for r in report["rows"] if r["decision"] == "expand"}
     selections = {}
     for request in report["suggested_expansions"]:
@@ -302,7 +304,7 @@ def artifact_identity(artifact: dict) -> tuple[int, int, int]:
 def selection_report(
     artifact: dict, *, reads: Reads | None = None, contracts: Any = None, limits: ReportLimits = ReportLimits()
 ) -> dict:
-    """Produce recommendations only. Unresolved functions remain in the report."""
+    """Produce access and structural evidence. Unresolved functions remain in the report."""
     chain, block, address = artifact_identity(artifact)
     if any(type(v) is not int or v < 0 for v in asdict(limits).values()):
         raise ValueError("selection budgets must be non-negative integers")
@@ -315,7 +317,7 @@ def selection_report(
             raise ValueError("formula identity does not match artifact")
         formulas[signature] = formula
     limited = _DirectReads(reads, limits.direct_reads) if reads is not None else None
-    contracts = contracts or {}
+    contracts = {} if contracts is None else contracts
     fingerprints = {name: formula_hash(f) for name, f in formulas.items()}
     queries = _Queries(limits)
     references = []
@@ -373,54 +375,22 @@ def selection_report(
                 )
                 else "normal"
             )
-            impact = {
-                "level": "unknown",
-                "basis": "economic_context_not_established",
-                "facts": facts,
-                "dependency_scan_complete": scan_complete,
-                "value_bound": upper,
-            }
-            issues = access["issues"]
-            if effect is None and f.success == FALSE:
-                decision, reason = "defer", "formula has no successful call; no holders to enumerate"
-            elif effect is None:
-                decision, reason = "review", "no reported effects; this is not a harmlessness proof"
-            elif access["activity"] == "inactive_at_block":
-                decision, reason = "review", "blocked now; retain impact and inspect enabling conditions"
-            elif access["status"] == "unrestricted":
-                decision, reason = "report_unrestricted", "keep visible; a universal set needs no holder list"
-            elif any(d != "caller" for d in access["identity_dimensions"]):
-                decision, reason = "review", "origin or signing authority must not be projected away"
-            elif (
-                attention == "high"
-                and scan_complete
-                and (
-                    access["status"] == "restricted" or (issues and all(i["kind"] == "state_required" for i in issues))
-                )
-            ):
-                decision, reason = "expand", "identify controllers of a potential authority change"
-            else:
-                decision, reason = "review", "impact or access unresolved; additional evidence or judgment needed"
             rows.append(
                 {
                     "function": name,
                     "effect_index": index if effect is not None else None,
                     "formula_hash": fingerprints[name],
                     "access": access,
-                    "impact": impact,
+                    "facts": facts,
+                    "dependency_scan_complete": scan_complete,
+                    "value_bound": upper,
                     "priority": attention,
-                    "decision": decision,
-                    "reason": reason,
                 }
             )
     rows.sort(key=lambda row: (row["priority"] != "high", row["function"], row["effect_index"] or 0))
-    requests: dict[str, list[int]] = {}
-    for row in rows:
-        if row["decision"] == "expand":
-            requests.setdefault(row["function"], []).append(row["effect_index"])
     return {
         "schema": 1,
-        "kind": "expansion_selection",
+        "kind": "access_analysis",
         "policy": POLICY_VERSION,
         "automatic_execution": False,
         "input_status": artifact.get("status", "formulas_available"),
@@ -433,9 +403,4 @@ def selection_report(
         "direct_reads": len(limited.memo) if limited is not None else 0,
         "solver_queries": queries.used,
         "rows": rows,
-        "summary": dict(Counter(row["decision"] for row in rows)),
-        "suggested_expansions": [
-            {"function": name, "formula_hash": fingerprints[name], "callers": False, "effect_indices": sorted(indices)}
-            for name, indices in sorted(requests.items())
-        ],
     }

@@ -1,170 +1,80 @@
-# Formula engine
+# Formula, assessment and address expansion
 
-Status: implemented on `test/auth-fuzz-restructure`; local validation only. Supersedes the earlier
-formula/list/check proposal. The whole predicate is authoritative. No conjunction is discarded to
-make a caller pass, and no caller sample proves an unrestricted or complete set.
+Status: local implementation on `test/auth-fuzz-restructure`; no production rollout implied.
+The complete predicate remains authoritative. No sampled caller proves unrestricted or complete access.
 
-## Boundary
-
-The core accepts verified compiler inputs, deployment addresses, a pinned block and a read interface.
-The default job emits function formulas, per-effect guards and guarded state updates only.
-Address expansion is a separate, explicitly requested process over saved formulas.
-It makes no `eth_call`, signs nothing, changes no chain state, and runs no fork or arranged transaction.
-
-`clients/logic_reads.py` owns transport, retries, pagination, caching, read budgets and trace retrieval.
-`resolution/logic_composition.py` composes explicitly supplied sequences of rows symbolically.
-The test harness owns transactions, replays and differential checks. Presentation labels belong to consumers.
-The existing opt-in resolution-worker integration stores schema-2 results as an auxiliary artifact; it does
-not replace production principal rows or the UI. Its artifact now has `kind: formulas` and contains no caller lists.
-
-`expansion.expand_formula` accepts a previously compiled `Formula`, a reader pinned to its block, and an explicit
-selection. By default, an explicit expansion request expands that function's callers only; effects must be selected
-by index. It never re-lowers the function. The deployment wrapper can load verified storage layouts as needed.
-The old combined `analyze_function` production entry point has been removed.
-
-Run the separate process against an exported formula artifact:
-
-```sh
-python -m scripts.logic_expand formulas.json --function 'setOwner(address)' --rpc-url "$RPC_URL" --output addresses.json
-# Or expand only one effect, with no function-wide caller expansion:
-python -m scripts.logic_expand formulas.json --effect 'setOwner(address):0' --rpc-url "$RPC_URL" --output addresses.json
-```
-
-The command requires a selection and writes a separate `address_expansions` artifact. It preserves the input
-formula, chain, block and signature, and links each result to a hash of its saved formula. Missing or invalid
-selections fail before reads. Expansion has its own materialisation/solver limits. A later run at another block
-requires new formulas, rather than mixing old resolved callees with new state.
-
-Formula generation makes only concrete reads needed for linking. It does not dump storage, scan candidate logs,
-trace keys or query the solver for callers; symbolic callee targets remain unresolved instead of triggering enumeration.
-
-## Public workflow: generate, assess, enumerate
-
-`python -m scripts.logic` exposes the three separate jobs:
+## Three explicit jobs
 
 ```sh
 python -m scripts.logic generate "$ADDRESS" --chain-id 1 --rpc-url "$RPC_URL" --output formulas.json
 python -m scripts.logic assess formulas.json --rpc-url "$RPC_URL" --cache .jev-cache --output assessment.json
 python -m scripts.logic enumerate formulas.json --assessment assessment.json --rpc-url "$RPC_URL" --output addresses.json
+# Optional narrowing of an assessed plan:
+python -m scripts.logic enumerate formulas.json --assessment assessment.json --function 'setOwner(address)' --rpc-url "$RPC_URL" --output selected.json
+# Explicit manual expansion without assessment:
+python -m scripts.logic enumerate formulas.json --manual --effect 'setOwner(address):0' --rpc-url "$RPC_URL" --output manual.json
 ```
 
-`generate` fetches verified compiler inputs through the existing source-acquisition service, pins the current
-block (or accepts `--block`), and saves formulas without querying holder sets. Source context combines the target's
-whole contract, inheritance, libraries and callees discovered across the generated entrypoints. Repeat
-`--related-address ADDRESS` to include additional associated deployments in the assessment context, up to 32.
-These additions do not create formula rows for those deployments or alter the target's formulas.
+`generate` fetches verified compiler inputs, pins the current block (or `--block`), follows supported concrete
+callees and saves formulas. It never enumerates keys or callers. The existing worker stores these as auxiliary
+schema-2 artifacts; production principal rows and the UI remain unchanged. Proxy dispatch limitations below apply.
 
-The source bundle keeps deployment and code addresses separate, including proxy implementation hints. It does
-not pretend distinct contracts share a storage context. Captured source is bounded by `--context-chars` per function
-(default 48,000); truncation and unavailable related source remain named gaps. This is **not a complete recursive
-dependency graph**: dynamic targets, calls beyond compiler coverage, and wider economic dependencies may be absent.
-Explicit related addresses augment that context without guessing addresses from arbitrary storage words. Proxy
-dispatch proof limitations of the formula engine remain unchanged.
+`assess` runs deterministic access analysis and requests **one Jev judgment per whole function**, using its source
+span and associated source. A function with many effects does not make many model calls. Ratings concern the greatest
+potential power through the function; they are model estimates, not authorization or financial-loss proofs.
+Effect-specific access relations remain separate, and the rating is not claimed to describe each effect individually.
 
-`assess` runs access analysis and then requires a Jev judgment (new or exactly cached) for each reported effect.
-If no effect is reported, rubric v3 asks about the whole entrypoint instead, retaining review rather than inferring
-harmlessness or inventing an effect to enumerate. This changes the cache request from the earlier v2 evaluation.
-With `TYPESAFE_API_KEY` or `JEV_API_KEY` configured, uncached requests run by default, capped by `--max-requests`
-(default 8). `--cache-only` prohibits requests. Without a key, exact cached answers still work; uncached effects
-remain pending. Without `--rpc-url`, access analysis is offline and may require state. No holder enumeration occurs.
-Missing judgments, missing source contexts and exhausted inference budgets produce an `incomplete` artifact and
-CLI exit code 3, after saving partial results. Rerun to reuse cached answers and assess the remaining effects.
+`enumerate` explicitly expands recommended effect guards from the saved artifact. `--function` narrows recommendations.
+`--manual` instead requires explicit `--function` (whole-call relation) or `--effect` selections. It cannot be combined
+with `--assessment`. Neither generation nor assessment starts this job. Expansion never recompiles predicates; it may
+load verified layouts to read storage. All reads use the saved block. Outputs cannot overwrite input artifacts.
 
-The report includes per-function severity from its assessed effects. A known high-impact effect establishes a
-high estimate; otherwise an unassessed/uncertain effect prevents a lower function-level conclusion. Model estimates
-and source gaps remain visible. `judgments_complete` means answers were obtained, not that they were confident or
-correct. Uncertain estimates stay under review. Only medium/high assessed effects with suitable access evidence
-enter this workflow's expansion recommendations; structural concern without a supporting judgment stays under review.
+The old `logic_select`, `logic_impact` and `logic_expand` command wrappers have been removed; their useful operations
+are in the three jobs above. The offline `logic_impact_evaluate` command compares function ratings with supplied labels.
 
-`enumerate` requires this assessment artifact and explicitly executes its recommendations, optionally narrowed
-by repeated `--function SIGNATURE`. Each selected effect must match the saved formula, chain and block. A partially
-assessed contract can still have individually assessed recommendations; a separate explicit invocation may execute
-those. No command automatically invokes the next command. The older `scripts.logic_expand` remains an explicit
-manual path for requesting expansion without assessment. Production worker/UI behavior is unchanged.
+## Assessment boundary
 
-## Selection reports (first pass)
+`logic_selection` supplies per-effect access evidence, potential authority dependencies, structural attention and
+storage-value bounds. It has no severity labels, expansion decisions or candidate enumeration. Optional direct reads
+are bounded (`--direct-reads`); without `--rpc-url`, state-dependent access stays unresolved. Operational errors abort.
+The full guard and joint caller/origin identities are retained. Source identifiers are not an authorization classifier.
 
-`services.resolution.logic_selection` consumes saved formula artifacts and writes a separate
-`expansion_selection` report. It never enumerates callers, executes a call, calls Jev, or schedules expansion.
+`logic_impact.rate_functions` supplies ratings only. A pinned model, rubric, source context and full exact request key
+the cache. Raw distributions are retained. Changed context/questions invalidate cached requests. Credentials are never
+saved. `TYPESAFE_API_KEY` or `JEV_API_KEY` permits uncached requests by default; `--cache-only` forbids them.
+`--max-requests` bounds wire attempts (default 8), including timeouts. Exact cache replay needs no credential.
 
-```sh
-python -m scripts.logic_select formulas.json --output selection.json
-# Optional bounded direct state reads, at the formula artifact's original block:
-python -m scripts.logic_select formulas.json --rpc-url "$RPC_URL" --direct-reads 64 --output selection.json
-```
+`logic_assessment` contains the **only expansion-selection policy**: retain unrestricted effects visibly; retain
+inactive, origin/signature-dependent, unsupported, unrated and uncertain cases for review; recommend supported caller
+relations when their function has a medium/high estimate. Missing only membership state can be resolved by expansion.
+Low ratings never silently discard a function. A severe function can prioritize several effects conservatively; this
+is not a claim that each of those effects has the function's severity. No maximum-over-effect rating is computed.
 
-Offline mode requires no RPC or database. State-dependent access remains unresolved. With a provider, the service
-permits bounded direct reads; symbolic membership lookups remain `state_required`. A hard provider boundary blocks
-dumps, event scans and trace/preimage enumeration. Failed reads abort the report rather than become low priority.
+The report's `assessment.functions` holds each rating once. `rows` retain effect access evidence and decisions;
+`suggested_expansions` is an execution plan, not an automatic job. `artifact_hash` binds the plan to all saved formulas
+and their source bundle/context references. Enumeration rejects an old assessment after any of those inputs change.
 
-For each effect it checks the complete guard. Ordinary arguments are existential choices; observed caller/origin
-identity dimensions are considered jointly, so a privileged origin cannot be borrowed to prove unrestricted access.
-Unmodelled signature feasibility remains unresolved. These are call-frame classifications, not proof of transaction
-admission or control of someone else's key. The existing caller-only expansion API cannot enumerate origin/signing
-authority, so those dimensions route to review. Inactive-at-block is separate from access and never means low severity.
+An exhausted budget, missing context/key or failed judgment saves partial results with status `incomplete` and exits 3.
+Rerunning reuses the cache. A verified contract with no eligible functions finishes as `nothing_to_assess` (exit 0).
+Unverified source is `not_verified` (exit 4), not a pending inference job. `judgments_complete` records receipt of
+judgments, not confidence or correctness. The thresholds remain provisional and do not justify automatic low-impact deferral.
 
-Structural evidence links writes to guard reads within the supplied deployment. For a required identity equality or
-Boolean identity lookup, a write at a potentially aliasing location is marked as a **potential** authority change.
-Boolean implication covers the whole guard, including alternate paths; source identifiers are not a classifier.
-Possible aliasing is not proof that the writer can establish a particular permission. Other guard dependencies stay
-ordinary dependency evidence. External/unmodelled effects and raw storage writes receive high attention. Numeric
-upper bounds, when proved under a reachable full guard, describe storage values only, not asset loss.
+## Shared source bundle
 
-The deterministic pass deliberately leaves economic impact `unknown`. `high` attention is a transparent selection policy
-applied to structural concerns, not a proven financial severity score. It does not claim transfers/deposits are benign,
-and does not infer low impact from caller-keyed writes, small numbers, missing evidence or a function name.
+Each formula artifact stores one `source_bundle`, deduplicated by file-content hash. It contains complete compiler
+input files, including top-level constants, types, errors and helpers. Function contexts contain a formula hash,
+bundle hash, source-file reference and UTF-8 byte span; they do not duplicate code or guess effect locations by variable name.
+Deployments retain address, code-address hint, contract and source-file references, even when files are shared.
 
-Decisions are `expand` (recommendation only), `review`, `report_unrestricted` (keep visible without a holder list),
-and `defer` for a formula with no successful path. Paused effects retain their attention and need enabling conditions
-reviewed. High-attention restricted effects, or those missing only membership state, can recommend effect-level
-expansion. Unknown code/semantics go to review. Every input function remains represented, including functions without
-reported effects. Limits on queries, direct reads, assessed effects and dependency scans are recorded explicitly.
+Source combines contracts followed across the selected entrypoints. `--related-address` adds explicitly supplied
+associated deployments (up to 32); it does not change formulas or generate their function rows. This is not a complete
+recursive or economic dependency graph: dynamic targets and wider dependencies can remain absent. Missing source is
+reported. Contract boundaries are preserved rather than flattening separate deployed contracts into one storage context.
 
-Reports retain chain, block, function, effect index, formula hash, policy version, evidence links, issues and decisions.
-They include suggested expansion requests, but nothing consumes them automatically. A separate optional impact
-pass can enrich this report. The earlier Jev pilot is not a labeled severity oracle.
-
-## Optional impact assessment
-
-`services.resolution.logic_impact` rates the potential power of each effect conditional on execution. It uses
-version-pinned Jev judgments about assets/claims, authority/code, availability, scope and source sufficiency.
-These are **model estimates**, never authority proofs, caller-set completeness or dollar-loss bounds.
-The deterministic access result and original formula are preserved. The model sees source and structural facts,
-not the preceding priority or decision. Missing knowledge remains visible.
-
-Formula artifacts now include bounded source contexts captured from compiler inputs, including already-followed
-callees. No additional RPC or model call is made by formula generation. Each context references its formula hash
-and hashes its source units. Source truncation and missing callees are explicit. Effect locations use exact action
-IR identities where available, or candidate write statements otherwise; they are presentation evidence, not proof
-inputs. `source_complete` describes this captured scope, not the economic perimeter. Old artifacts without contexts
-remain usable but receive `missing_context` in this pass; newly fetched source is never silently joined to them.
-
-```sh
-# Read cached judgments only; no API key or network request is needed:
-python -m scripts.logic_impact formulas.json selection.json --cache .jev-cache --output impact.json
-# Explicitly permit at most eight new requests (TYPESAFE_API_KEY or JEV_API_KEY in the environment):
-python -m scripts.logic_impact formulas.json selection.json --cache .jev-cache --output impact.json --live --max-requests 8
-# After reviewing the recommendations, explicitly run separate address expansion:
-python -m scripts.logic_expand formulas.json --selection-report impact.json --rpc-url "$RPC_URL" --output addresses.json
-```
-
-The client pins `jev-1.14.0`, bounds request size and wire attempts, and does not retry or follow redirects.
-The local cache retains exact model/rubric/context requests and raw distributions, without credentials.
-Timeouts consume an attempt; failures and budget exhaustion do not change access or erase deterministic decisions.
-Changing source, the questions, or the model invalidates the cache key. Cached outputs are revalidated before use.
-
-Display/routing thresholds are provisional, not calibrated probabilities of correctness. A high estimate can
-raise attention or recommend expansion when access analysis supports caller expansion. A low estimate only marks
-a deferral candidate: it cannot discard a row or override structural high attention. Uncertain estimates abstain;
-unrestricted high-impact effects remain visible without enumerating a universal set. Origin/signature identities,
-inactive effects and unsupported access stay under review. No automatic scheduling or production grade changes exist.
-
-`--selection-report` validates the saved chain, block, formula hash and selected effect indices before expansion.
-It accepts either the deterministic report or its enriched copy and rejects stale or ambiguous selections.
-This flag is an explicit execution request; generating either report alone never starts address expansion.
-
-`scripts.logic_impact_evaluate` compares saved reports with supplied review labels offline. Abstentions are reported
-separately from matches and errors. Historical pilot outputs without labels have no reported accuracy.
+Source is stored in full and cut only for bounded model requests (`--context-chars`, default 48,000). The entry's file
+comes first; cuts are explicit and prevent low-impact conclusions. `source_complete` describes the supplied source
+scope, never the whole protocol. There is no new source fetching during assessment. Legacy schema-1 per-function
+source snippets must be regenerated before assessment; their saved formulas remain usable for explicit manual expansion.
 
 ## Relations, not independent pieces
 
@@ -281,63 +191,15 @@ and old fail-safe matrix no longer describe this API; their historical pass tota
 No complete current corpus comparison or production rollout is implied by this restructure. Those measurements
 must identify the schema, exact source revision, input block and any unresolved qualifications.
 
-## Local validation (2026-10-27)
+## Review fixes and validation (2026-10-29)
 
-- Latest focused run: 809 passed, including the compiler, language, relation, composition, historical comparison
-  and vocabulary checks. This includes the final discarded-call, call-entry-balance and composed-selector regressions.
-- Broader offline run: 7,037 passed, 88 skipped, 105 deselected; its single failure was a solc 0.7.0 cache-path
-  configuration issue. That compiler test passed when rerun using the already-installed home-directory compilers.
-- Ruff checks/formatting pass. New runtime modules pass Pyright. The inherited lowerer/term/parser files still
-  have baseline typing diagnostics; an older-tree check reproduced 27 diagnostics in those files.
-- No metered RPC, new full-corpus comparison, deployment or production-pipeline replacement was performed.
+The five reproduced review issues have permanent coverage in `test_review_regressions.py`: production lazy-layout
+providers, file-level declarations and UTF-8 source spans, different branches rated as one whole function, stale
+source context rejected before expansion, and distinct empty/unverified outcomes. The Solidity reproduction is
+retained in `tests/fixtures/contracts/logic_review_regressions.sol`.
 
-## Separate expansion validation (2026-10-28)
-
-823 logic, script and vocabulary checks pass. Changed runtime modules pass Pyright and Ruff. Tests verify
-formula-only default jobs, no enumeration during linking, saved-formula round trips, explicit function/effect
-selection, block matching, input preservation and expansion in a fresh Python process. No live corpus was run.
-
-## Selection-report validation (2026-10-28)
-
-849 logic, script and vocabulary/logging checks pass; Ruff and changed-module Pyright checks pass.
-An independent local Anvil example selected owner reassignment and membership granting, kept a paused owner
-change under review, and retained unrestricted owner reassignment as high attention without holder enumeration.
-That fixture report used three distinct direct reads and eighteen solver queries; these are fixture measurements,
-not corpus cost estimates. No Jev request, metered RPC, automatic expansion or live corpus run was performed.
-
-## Impact-assessment validation (2026-10-28)
-
-886 related logic, script and vocabulary/logging checks pass; changed runtime modules pass Pyright and Ruff.
-The tests cover context/cache identity, request budgets, malformed responses, estimate abstentions, preservation
-of access evidence, and explicit expansion from a matching report. Recorded live responses are policy regression
-fixtures; they are not an oracle for general model correctness.
-
-The small live evaluation used one synthetic native-asset vault with eight review-labeled operations and two
-renamed/comment variants of that same vault. Rubric v2 accepted six estimates matching those labels and abstained
-on four, with no accepted mismatch. All five high-power examples (including the renamed seizure variant) were
-accepted high. The ordinary deposit, withdrawal and bounded-fee examples included abstentions. These results do
-not establish corpus accuracy, calibrated confidence, or reliable automatic deferral. The v1 development pass
-accepted one of eight and abstained on seven; v2 improved source locations and distinguished compiler limitations
-from missing source, without lowering the acceptance thresholds.
-
-`tests/fixtures/logic_impact/evaluation_2026_10_28.json` retains the case labels, raw ranking signals, uncertainty,
-counts and historical pilot summary. The earlier 28 pilot records have no independent labels and use a different
-model/rubric/context, so no accuracy comparison is claimed. Total live usage was 18 judgments plus one API smoke
-request, reporting 54,580 input and 2,298 output tokens. Replaying all eight development judgments used eight cache
-hits and zero wire requests. No metered chain RPC, corpus run, automatic address expansion or production change
-was performed for this integration. The next evaluation needs independently reviewed real-protocol cases before
-model-only low-impact deferral is considered.
-
-## Three-job workflow validation (2026-10-29)
-
-901 related logic, script and vocabulary/logging checks pass; changed runtime modules pass Ruff and Pyright.
-Tests exercise the public command sequence, cache reuse without credentials, incomplete assessments, per-function
-aggregation with unassessed effects, stale/manual report rejection and source-context truncation. A local Anvil
-contract passes through real formula generation, deterministic access assessment, a mocked Jev response, and explicit
-saved-formula expansion; the resulting finite effect-caller set is the independently known owner. Enumeration APIs
-are forbidden during its generation and assessment stages. Associated-source tests cover cross-entrypoint sharing,
-explicit extra deployments and unavailable source without changing the formula.
-
-No new live Jev request, metered chain RPC or production/corpus run was made for this workflow change. The earlier
-v2 live evaluations remain historical evidence; v3's whole-function fallback and expanded source context still need
-evaluation on independently reviewed real protocols. The workflow is a CLI/backend interface, not a deployed API/UI.
+901 related logic, workflow, vocabulary and logging checks pass. Changed runtime modules pass Ruff and Pyright.
+The local-chain generation/assessment/expansion test still returns the independently known owner; its model response
+is mocked. No new live Jev inference, metered chain RPC, full corpus run or deployment was performed. The earlier
+`effect-impact-v2` recorded responses remain tests of distribution policy and historical evaluation data, not
+validation of the new `function-impact-v1` prompt. Real-protocol impact accuracy remains to be measured.

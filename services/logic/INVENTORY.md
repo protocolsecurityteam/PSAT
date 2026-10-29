@@ -12,8 +12,10 @@ The old decision policy is preserved in Git at `5d7bca54`, not in a second runti
 | `clients/logic_reads.py` | Transport, retries and bounded acquisition outside the core |
 | `resolution/logic_composition.py` | Explicit-sequence symbolic state composition outside the core |
 | `deployment.py` and resolution worker | Formula-only artifact by default; no automatic expansion |
-| `resolution/logic_selection.py`, `scripts/logic_select.py` | Read-only access/evidence/priority reports before expansion; no model calls or automatic execution |
-| `scripts/logic_expand.py` | Separate process for selected functions/effects, pinned to the saved artifact |
+| `resolution/logic_selection.py` | Access evidence only; no selection policy or model calls |
+| `resolution/logic_impact.py`, `logic_assessment.py` | One function rating, then one final expansion-selection policy |
+| `source_context.py` | One compiler-file bundle and function source references |
+| `scripts/logic.py` | Generate, assess, enumerate; explicit manual mode retained |
 | Old `decide.py`, `verdict.py`, `holders.py` | Removed: sampled opens, relaxed conditions, arranged journeys, witness confirmation and provenance policies |
 | `scope.py`, `SCOPE.md`, `taint.py`, `report.py` | Removed old scope/provenance/presentation policy; semantic dependency tracking remains in the translator |
 | `snapshot.py`, `logged.py`, `versions.py`, `writer_events.py` | Replaced for this engine by snapshot/preimage accounting; event words are candidates, never a complete-list proof |

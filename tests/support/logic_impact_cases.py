@@ -7,7 +7,7 @@ from pathlib import Path
 
 from services.logic.formula import compile_function
 from services.logic.model import encode
-from services.logic.source_context import build_context
+from services.logic.source_context import build_bundle, build_context
 from services.resolution.logic_selection import selection_report
 from tests.logic import _oracle as O
 from tests.support.anvil import _start_anvil, _terminate
@@ -34,22 +34,18 @@ def build(directory: Path, *, source: str | None = None, cases: dict | None = No
         d.deploy("ImpactVault")
         assert O.transact(d, "ImpactVault", "deposit()", sender=O.ACCOUNTS[1], value=10**18)
         reads, contracts = d.chain(), d.contracts("ImpactVault")
-        formulas, contexts, expected, chosen = {}, {}, [], {}
+        formulas, contexts, expected = {}, {}, []
+        bundle = build_bundle(contracts)
         for fn in d.slither["ImpactVault"].functions_entry_points:
             if fn.name not in cases:
                 continue
             f = compile_function(d.slither["ImpactVault"], fn, d.at["ImpactVault"], reads, contracts)
             formulas[f.signature] = encode(f)
-            contexts[f.signature] = build_context(f, fn, contracts)
-            # Transfer effects are judged with their matching debit present in the source.
-            index = next((i for i, e in enumerate(f.effects) if e.kind == "call"), 0)
-            assert f.effects
-            chosen[f.signature] = index
+            contexts[f.signature] = build_context(f, fn, bundle)
             low, high, rationale = cases[fn.name]
             expected.append(
                 {
                     "function": f.signature,
-                    "effect_index": index,
                     "expected_min": low,
                     "expected_max": high,
                     "rationale": rationale,
@@ -63,10 +59,9 @@ def build(directory: Path, *, source: str | None = None, cases: dict | None = No
             "block": reads.block,
             "functions": formulas,
             "contexts": contexts,
+            "source_bundle": bundle,
         }
         report = selection_report(artifact, reads=reads, contracts=contracts)
-        report["rows"] = [r for r in report["rows"] if r["effect_index"] == chosen[r["function"]]]
-        report["suggested_expansions"] = []  # This development run rates selected examples only.
         for filename, value in (("formulas.json", artifact), ("selection.json", report), ("expected.json", expected)):
             (directory / filename).write_text(json.dumps(value, indent=2) + "\n")
         return artifact, report, expected

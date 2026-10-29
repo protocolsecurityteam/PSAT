@@ -3,7 +3,7 @@
 from services.clients.jev import JevClient
 from services.logic import deployment
 from services.logic.model import decode_formula
-from services.logic.source_context import validate_context
+from services.logic.source_context import materialize_context
 from services.resolution.logic_assessment import assess_formulas
 from services.resolution.logic_impact import JudgmentCache
 from services.resolution.logic_selection import selections_from_report
@@ -19,7 +19,9 @@ def test_source_discovered_by_one_entrypoint_is_available_to_the_other(monkeypat
         None, f"0x{deployed.at['C']:040x}", 1, "unused", signatures={"delegated()", "selected(uint256)"}
     )
     context = result["contexts"]["selected(uint256)"]
-    validate_context(context, decode_formula(result["functions"]["selected(uint256)"]))
+    context = materialize_context(
+        context, decode_formula(result["functions"]["selected(uint256)"]), result["source_bundle"]
+    )
     assert any("contract Guard" in unit["source"] for unit in context["units"])
     assert {d["address"] for d in context["deployments"]} == {f"0x{deployed.at[n]:040x}" for n in ("C", "Guard")}
     assert result["source_scope"]["complete_dependency_graph"] is False
@@ -37,6 +39,9 @@ def test_explicit_related_source_is_included_without_compiling_its_functions(mon
     )
     assert set(result["functions"]) == {"selected(uint256)"}
     context = result["contexts"]["selected(uint256)"]
+    context = materialize_context(
+        context, decode_formula(result["functions"]["selected(uint256)"]), result["source_bundle"]
+    )
     assert any("contract Guard" in unit["source"] for unit in context["units"])
     assert "unverified:0x99" in context["source_gaps"]
     assert context["source_complete"] is False
@@ -49,8 +54,13 @@ def test_context_limit_is_visible_and_does_not_change_formulas(monkeypatch, depl
     full = deployment.deployment_formulas(*args, signatures={"selected(uint256)"})
     small = deployment.deployment_formulas(*args, signatures={"selected(uint256)"}, context_chars=50)
     assert small["functions"] == full["functions"]
-    assert small["contexts"]["selected(uint256)"]["source_complete"] is False
-    assert any("truncated" in g for g in small["contexts"]["selected(uint256)"]["source_gaps"])
+    resolved = materialize_context(
+        small["contexts"]["selected(uint256)"],
+        decode_formula(small["functions"]["selected(uint256)"]),
+        small["source_bundle"],
+    )
+    assert resolved["source_complete"] is False
+    assert any("truncated" in g for g in resolved["source_gaps"])
 
 
 def test_generated_assessed_plan_expands_the_saved_relation_on_local_chain(monkeypatch, deployed, tmp_path):

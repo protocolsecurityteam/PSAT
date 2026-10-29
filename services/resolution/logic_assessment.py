@@ -1,20 +1,33 @@
-"""Assess saved formulas with deterministic access analysis and required Jev judgments.
-
-This orchestrator does not enumerate. Model availability, uncertainty and source coverage
-remain distinct from the access relation. Only assessed recommendations enter its plan.
-"""
+"""Join access evidence and whole-function impact ratings; select expansion once."""
 
 from __future__ import annotations
 
 from collections import Counter
 
 from services.clients.jev import DEFAULT_MODEL, JevClient
-from services.logic.expansion import formula_hash
-from services.logic.model import decode_formula
-from services.resolution.logic_impact import JudgmentCache, enrich_impact
+from services.logic.source_context import artifact_hash
+from services.resolution.logic_impact import JudgmentCache, rate_functions
 from services.resolution.logic_selection import ReportLimits, selection_report
 
-LEVELS = ("none", "low", "medium", "high")
+
+def _decision(row: dict, impact: dict) -> tuple[str, str]:
+    access = row["access"]
+    if row["effect_index"] is None:
+        return "review", "no reported effects; not a harmlessness proof"
+    if access["activity"] == "inactive_at_block":
+        return "review", "blocked now; inspect enabling conditions"
+    if access["status"] == "unrestricted":
+        return "report_unrestricted", "keep visible; universal callers need no list"
+    if any(d != "caller" for d in access["identity_dimensions"]):
+        return "review", "origin or signing authority must not be projected away"
+    supported = (access["status"] == "restricted" and not access["issues"]) or (
+        access["status"] == "unresolved"
+        and access["issues"]
+        and all(issue["kind"] == "state_required" for issue in access["issues"])
+    )
+    if supported and impact["model_status"] == "rated" and impact["level"] in ("medium", "high"):
+        return "expand", "material function impact; enumerate this effect's supported caller relation"
+    return "review", "access or material function impact unresolved; no automatic deferral"
 
 
 def assess_formulas(
@@ -27,60 +40,38 @@ def assess_formulas(
     contracts=None,
     limits: ReportLimits = ReportLimits(),
 ) -> dict:
-    """Cache-only calls are allowed, but missing judgments never count as assessed."""
-    selected = selection_report(artifact, reads=reads, contracts=contracts, limits=limits)
-    report = enrich_impact(artifact, selected, model=model, cache=cache, client=client)
-    functions = {}
+    report = selection_report(artifact, reads=reads, contracts=contracts, limits=limits)
+    ratings = rate_functions(artifact, cache=cache, client=client, model=model)
     requests = {}
-    for name, encoded in artifact["functions"].items():
-        formula = decode_formula(encoded)
-        rows = [row for row in report["rows"] if row["function"] == name]
-        effects = [row for row in rows if row["effect_index"] is not None]
-        levels = [row["impact"]["level"] for row in rows]
-        unassessed = [row["effect_index"] for row in effects if row["impact"].get("model_status") != "rated"]
-        function_pending = not effects and any(row["impact"].get("model_status") != "rated" for row in rows)
-        missing = sorted(set(range(len(formula.effects))) - {row["effect_index"] for row in effects})
-        unresolved = bool(unassessed or missing or function_pending or not rows or "unknown" in levels)
-        known = [LEVELS.index(level) for level in levels if level in LEVELS]
-        # A known high effect establishes high potential impact even if others are unresolved.
-        # Otherwise unknown effects could exceed the largest estimate already available.
-        severity = "high" if 3 in known else "unknown" if unresolved else LEVELS[max(known)]
-        for row in effects:
-            if row["decision"] == "expand" and (
-                row["impact"].get("model_status") != "rated" or row["impact"]["level"] not in ("medium", "high")
-            ):
-                row["decision"] = "review"
-                row["reason"] = "assessment does not establish material impact; review before enumeration"
-            if row["decision"] == "expand":
-                requests.setdefault(name, []).append(row["effect_index"])
-        source_complete = artifact.get("contexts", {}).get(name, {}).get("source_complete", False)
-        functions[name] = {
-            "formula_hash": formula_hash(formula),
-            "severity": severity,
-            "basis": "model estimate: maximum effect impact, or whole-function judgment when no effects are reported",
-            "judgments_complete": not unassessed and not missing and not function_pending and bool(rows),
-            "needs_review": unresolved or not source_complete or any(row["decision"] == "review" for row in rows),
-            "unassessed_effects": sorted(set(unassessed + missing)),
-            "whole_function_judgment_pending": function_pending,
-            "source_complete": source_complete,
-        }
-    report["suggested_expansions"] = [
-        {
-            "function": name,
-            "formula_hash": functions[name]["formula_hash"],
-            "callers": False,
-            "effect_indices": sorted(indices),
-        }
-        for name, indices in sorted(requests.items())
-    ]
-    complete = bool(functions) and all(value["judgments_complete"] for value in functions.values())
-    report["assessment"] = {
-        "schema": 1,
-        "judgments_complete": complete,
-        "status": "assessed" if complete else "incomplete",
-        "functions": functions,
-        "scope": "potential function impact from its assessed effects and captured associated source",
-        "automatic_execution": False,
-    }
-    report["summary"] = dict(Counter(row["decision"] for row in report["rows"]))
+    for row in report["rows"]:
+        row["decision"], row["reason"] = _decision(row, ratings["functions"][row["function"]])
+        if row["decision"] == "expand":
+            request = requests.setdefault(
+                row["function"],
+                {
+                    "function": row["function"],
+                    "formula_hash": row["formula_hash"],
+                    "callers": False,
+                    "effect_indices": [],
+                },
+            )
+            request["effect_indices"].append(row["effect_index"])
+    verified = artifact.get("status") != "not_verified"
+    complete = verified and all(r["model_status"] == "rated" for r in ratings["functions"].values())
+    status = (
+        "not_verified"
+        if not verified
+        else "nothing_to_assess"
+        if not artifact["functions"]
+        else "assessed"
+        if complete
+        else "incomplete"
+    )
+    report.update(
+        kind="expansion_selection",
+        artifact_hash=artifact_hash(artifact),
+        suggested_expansions=[requests[k] for k in sorted(requests)],
+        summary=dict(Counter(r["decision"] for r in report["rows"])),
+        assessment={"schema": 2, "status": status, "judgments_complete": complete, **ratings},
+    )
     return report

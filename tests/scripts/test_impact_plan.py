@@ -4,15 +4,16 @@ import pytest
 
 from services.clients.jev import JevClient
 from services.logic.expansion import Selection
-from services.resolution.logic_impact import JudgmentCache, enrich_impact
+from services.resolution.logic_assessment import assess_formulas
+from services.resolution.logic_impact import JudgmentCache
 from services.resolution.logic_selection import selections_from_report
 from tests.logic.test_impact import Session, inputs
 
 
 def rated(tmp_path):
     _, artifact, report = inputs()
-    result = enrich_impact(
-        artifact, report, cache=JudgmentCache(tmp_path), client=JevClient("test-secret", session=Session())
+    result = assess_formulas(
+        artifact, cache=JudgmentCache(tmp_path), client=JevClient("test-secret", session=Session())
     )
     return artifact, result
 
@@ -46,7 +47,7 @@ def test_cli_executes_only_the_explicit_plan_and_preserves_inputs(tmp_path, monk
     import json
     from contextlib import nullcontext
 
-    from scripts.logic_expand import main
+    from scripts.logic import main
 
     artifact, report = rated(tmp_path / "cache")
     source, plan, output = (tmp_path / name for name in ("formulas.json", "impact.json", "addresses.json"))
@@ -62,7 +63,7 @@ def test_cli_executes_only_the_explicit_plan_and_preserves_inputs(tmp_path, monk
         return {"kind": "address_expansions"}
 
     monkeypatch.setattr("services.logic.deployment.deployment_expansions", expand)
-    args = [str(source), "--selection-report", str(plan), "--rpc-url", "unused", "--output", str(output)]
+    args = ["enumerate", str(source), "--assessment", str(plan), "--rpc-url", "unused", "--output", str(output)]
     main(args)
     assert calls == [{"change(uint256)": Selection(False, (0,))}]
     assert (source.read_bytes(), plan.read_bytes()) == before

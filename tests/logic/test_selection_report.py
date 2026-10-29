@@ -79,9 +79,9 @@ def test_owner_change_is_selected_on_dependency_evidence(source_bundle, monkeypa
     result = run(source_bundle)
     change = row(result, "setOwner")
     assert change["access"]["status"] == "restricted"
-    assert change["decision"] == "expand" and change["priority"] == "high"
-    assert change["impact"]["level"] == "unknown"  # power evidence isn't a loss estimate
-    assert any(f["kind"] == "may_change_authority_condition" for f in change["impact"]["facts"])
+    assert change["priority"] == "high" and "decision" not in change
+    assert "impact" not in change  # power evidence isn't a loss estimate
+    assert any(f["kind"] == "may_change_authority_condition" for f in change["facts"])
     assert result["automatic_execution"] is False
     assert source_bundle[1] == before
     json.dumps(result)
@@ -94,7 +94,7 @@ def test_owner_change_is_selected_on_dependency_evidence(source_bundle, monkeypa
 def test_unrestricted_power_is_reported_not_hidden(source_bundle):
     public = row(run(source_bundle), "publicOwner")
     assert public["access"]["status"] == "unrestricted"
-    assert public["priority"] == "high" and public["decision"] == "report_unrestricted"
+    assert public["priority"] == "high" and "decision" not in public
 
 
 def test_early_return_does_not_make_the_write_unrestricted(source_bundle):
@@ -107,36 +107,36 @@ def test_early_return_does_not_make_the_write_unrestricted(source_bundle):
 def test_paused_power_keeps_attention_without_inventing_holders(source_bundle):
     result = row(run(source_bundle), "pausedOwner")
     assert result["access"]["activity"] == "inactive_at_block"
-    assert result["impact"]["level"] == "unknown" and result["priority"] == "high"
-    assert result["decision"] == "review"
+    assert result["priority"] == "high" and "impact" not in result
+    assert "decision" not in result
 
 
 def test_value_bound_is_not_called_an_economic_loss_bound(source_bundle):
     result = row(run(source_bundle), "bounded")
-    bound = result["impact"]["value_bound"]
+    bound = result["value_bound"]
     assert bound is not None and bound["upper"] == 10
     assert "not an asset-loss" in bound["meaning"]
-    assert result["impact"]["level"] == "unknown"
+    assert "impact" not in result
 
 
 def test_membership_needs_state_without_scanning_it(source_bundle):
     result = row(run(source_bundle), "guardedMember")
     assert result["access"]["status"] == "unresolved"
     assert any(i["kind"] == "state_required" for i in result["access"]["issues"])
-    assert result["decision"] == "review" and result["impact"]["level"] == "unknown"
+    assert "decision" not in result and "impact" not in result
 
 
 def test_membership_writer_can_be_selected_without_listing_members(source_bundle):
     result = row(run(source_bundle), "grant")
-    assert result["priority"] == "high" and result["decision"] == "expand"
+    assert result["priority"] == "high" and "decision" not in result
     assert result["access"]["status"] == "unresolved"
-    assert any(f["kind"] == "may_change_authority_condition" for f in result["impact"]["facts"])
+    assert any(f["kind"] == "may_change_authority_condition" for f in result["facts"])
 
 
 def test_pure_revert_needs_no_enumeration(source_bundle):
     result = row(run(source_bundle), "impossible")
-    assert result["decision"] == "defer"
-    assert result["impact"]["level"] == "unknown"
+    assert result["access"]["activity"] == "inactive_at_block"
+    assert "impact" not in result
 
 
 def test_offline_report_and_zero_budgets_keep_unknowns_visible(source_bundle):
@@ -146,7 +146,7 @@ def test_offline_report_and_zero_budgets_keep_unknowns_visible(source_bundle):
     assert row(report, "setOwner")["access"]["status"] == "unresolved"
     cut = run(source_bundle, ReportLimits(solver_queries=0, dependency_pairs=0))
     assert cut["solver_queries"] == 0
-    assert all(r["decision"] != "expand" for r in cut["rows"])
+    assert all("decision" not in r for r in cut["rows"])
     assert len(cut["rows"]) == len(report["rows"])
     assert {r["function"] for r in cut["rows"]} == set(saved["functions"])
 
@@ -167,7 +167,7 @@ def test_direct_read_budget_is_enforced_without_losing_rows(source_bundle):
     result = run(source_bundle, ReportLimits(direct_reads=0))
     assert result["direct_reads"] == 0
     assert row(result, "setOwner")["access"]["status"] == "unresolved"
-    assert row(result, "setOwner")["decision"] == "review"
+    assert "decision" not in row(result, "setOwner")
 
 
 def test_report_requires_the_original_block(source_bundle):
@@ -200,7 +200,7 @@ def test_origin_and_signature_authority_cannot_be_existentially_freed():
     signed = function("signed()", mk_cmp("eq", signer, const(7)))
     result = selection_report(bundle(origin, signed))
     assert row(result, "viaOrigin")["access"]["status"] == "restricted"
-    assert row(result, "viaOrigin")["decision"] == "review"
+    assert row(result, "viaOrigin")["access"]["identity_dimensions"] == ("origin",)
     assert row(result, "signed")["access"]["status"] == "unresolved"
 
 
@@ -211,7 +211,7 @@ def test_public_branch_prevents_a_false_required_identity_dependency():
     consumer = function("consumer()", mk_or([gate, public]))
     setter = function("setter()", mk_cmp("eq", CALLER, const(7)), target="owner")
     result = selection_report(bundle(consumer, setter))
-    assert not any(f["kind"] == "may_change_authority_condition" for f in row(result, "setter")["impact"]["facts"])
+    assert not any(f["kind"] == "may_change_authority_condition" for f in row(result, "setter")["facts"])
 
 
 def test_identifier_renaming_does_not_change_priority():
@@ -225,8 +225,8 @@ def test_identifier_renaming_does_not_change_priority():
         )
 
     a, b = report("owner"), report("unremarkable_word")
-    assert [(r["priority"], r["decision"], r["access"]["status"]) for r in a["rows"]] == [
-        (r["priority"], r["decision"], r["access"]["status"]) for r in b["rows"]
+    assert [(r["priority"], r["access"]["status"]) for r in a["rows"]] == [
+        (r["priority"], r["access"]["status"]) for r in b["rows"]
     ]
 
 
@@ -265,7 +265,7 @@ def test_an_unmodelled_effect_remains_high_attention():
     f = function("f()", unknown("unsupported:external_transition"))
     f = replace(f, effects=(Effect("call", ("act", unknown("target"), ()), TRUE, f.success),))
     result = row(selection_report(bundle(f)), "f")
-    assert result["priority"] == "high" and result["decision"] == "review"
+    assert result["priority"] == "high" and "decision" not in result
     assert result["access"]["status"] == "unresolved"
 
 
@@ -278,7 +278,7 @@ def test_different_struct_fields_are_not_aliased():
         setter, effects=(Effect("write", (a, "records", (("k", const(0)), ("f", "note"))), const(1), TRUE),)
     )
     result = row(selection_report(bundle(consumer, setter)), "set")
-    assert not result["impact"]["facts"]
+    assert not result["facts"]
 
 
 def test_not_verified_deployment_is_not_a_clean_empty_result():

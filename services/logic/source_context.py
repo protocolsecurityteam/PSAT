@@ -1,4 +1,8 @@
-"""Source sidecars for judgment, captured from compiler inputs without additional chain reads."""
+"""One complete compiler-source bundle per deployment, with per-function references.
+
+Source is stored once and truncated only when constructing a bounded model request.
+Compilation-unit files include top-level constants, types, errors, and helper functions.
+"""
 
 from __future__ import annotations
 
@@ -18,13 +22,13 @@ def digest(value: Any) -> str:
     ).hexdigest()
 
 
-class ContextContracts(Mapping):
-    """Record which verified contracts the compiler actually accesses."""
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
-    def __init__(self, contracts, address: int, contract):
-        self.contracts = contracts
-        self.used = {address: contract}
-        self.missing: set[int] = set()
+
+class ContextContracts(Mapping):
+    def __init__(self, contracts, address, contract):
+        self.contracts, self.used, self.missing = contracts, {address: contract}, set()
 
     def get(self, address, default=None):
         contract = self.contracts.get(address, default)
@@ -47,136 +51,130 @@ class ContextContracts(Mapping):
         return len(self.used)
 
 
-def build_context(
-    formula: Formula,
-    function,
-    contracts: Mapping,
-    *,
-    max_chars: int = 48_000,
-    missing_sources: tuple[str, ...] = (),
-    code_addresses: Mapping | None = None,
-) -> dict:
-    """Preserve the target, helpers, declarations, inheritance and already-loaded callees.
-
-    Completeness means only the collected source scope, not complete economic understanding.
-    Each unit has a source hash. Cuts are explicit; an older formula without this sidecar is
-    not silently joined to newly fetched source for a model judgment.
-    """
-    units, seen, original_chars, remaining = [], set(), 0, max_chars
-    missing = list(missing_sources)
-
-    def add(obj, label):
-        nonlocal original_chars, remaining
-        text = getattr(getattr(obj, "source_mapping", None), "content", "") or ""
-        if not text:
-            return
-        source_hash = hashlib.sha256(text.encode()).hexdigest()
-        if source_hash in seen:
-            return
-        seen.add(source_hash)
-        original_chars += len(text)
-        supplied = text[: max(remaining, 0)]
-        remaining -= len(supplied)
-        if supplied:
-            units.append(
-                {
-                    "label": label,
-                    "source_hash": source_hash,
-                    "source": supplied,
-                    "truncated": len(supplied) != len(text),
-                }
-            )
-        if len(supplied) != len(text):
-            missing.append(f"source truncated: {label}")
-
-    if not (getattr(getattr(function, "source_mapping", None), "content", "") or "").strip():
-        missing.append("entry source unavailable")
-    add(function, f"entry point {formula.signature}")
-    for modifier in getattr(function, "modifiers", ()):
-        add(modifier, f"modifier {modifier.canonical_name}")
-    # Keep the target first even when another deployment has a smaller address.
-    ordered = sorted(contracts.items(), key=lambda item: (item[0] != formula.address, item[0]))
-    deployments = []
-    for address, contract in ordered:
-        code_address = (code_addresses or {}).get(address, address)
+def build_bundle(contracts: Mapping, *, max_chars=48_000, missing_sources=(), code_addresses=None) -> dict:
+    if type(max_chars) is not int or max_chars <= 0:
+        raise ValueError("positive context size required")
+    files, deployments, missing = {}, [], list(missing_sources)
+    for address, contract in sorted(contracts.items()):
+        sources = contract.compilation_unit.core.source_code
+        refs = []
+        if not sources:
+            missing.append(f"compiler source unavailable:{address:#x}")
+        for path, text in sorted(sources.items()):
+            key = _hash(text)
+            files.setdefault(key, {"name": str(path), "source": text})
+            refs.append(key)
         deployments.append(
-            {"address": f"0x{address:040x}", "code_address": f"0x{code_address:040x}", "contract": contract.name}
+            {
+                "address": f"0x{address:040x}",
+                "code_address": f"0x{(code_addresses or {}).get(address, address):040x}",
+                "contract": contract.name,
+                "files": sorted(set(refs)),
+            }
         )
-        for c in [contract, *getattr(contract, "inheritance", ())]:
-            add(c, f"contract {c.name} at {address:#x}, code {code_address:#x}")
-            for fn in getattr(c, "functions", ()):
-                for call in fn.all_library_calls():
-                    library_fn = getattr(call, "function", None)
-                    library = getattr(library_fn, "contract", None)
-                    if library is not None:
-                        add(library, f"library {library.name}")
-                for call in fn.all_internal_calls():
-                    inner = getattr(call, "function", None)
-                    if inner is not None and getattr(inner, "contract", None) is None:
-                        add(inner, f"internal helper {getattr(inner, 'canonical_name', '')}")
-    terms = [formula.success, *(e.guard for e in formula.effects)]
-    analysis_gaps = sorted(
+    body = {
+        "schema": 2,
+        "files": files,
+        "deployments": deployments,
+        "source_gaps": sorted(set(missing)),
+        "max_chars": max_chars,
+        "scope": "captured compiler files; not a complete economic dependency graph",
+    }
+    return {**body, "bundle_hash": digest(body)}
+
+
+def build_context(formula: Formula, function, bundle: dict) -> dict:
+    source = function.source_mapping
+    text = function.compilation_unit.core.source_code.get(source.filename.absolute)
+    ref = _hash(text) if text is not None else None
+    terms = [formula.success, *(e.guard for e in formula.effects), *(e.value for e in formula.effects)]
+    gaps = sorted(
         {str(t[1]) for term in terms for kind in ("unknown", "opaque", "assumed") for t in subterms(term, kind)}
     )
-    missing.extend(gap for gap in analysis_gaps if gap.startswith(("unverified:", "unresolved:", "budget:callee")))
-    if not units:
-        missing.append("entry source unavailable")
-    action_sites, write_sites = {}, {}
-    nodes = function.all_nodes() if hasattr(function, "all_nodes") else []
-    for node in nodes:
-        text = getattr(node.source_mapping, "content", "") or ""
-        if not text:
-            continue
-        for ir in node.irs:
-            action_sites[id(ir)] = text
-        for var in node.state_variables_written:
-            write_sites.setdefault(var.name, []).append(text)
-    sites, site_chars = {}, 0
-    for index, effect in enumerate(formula.effects):
-        labels = [str(t[1]) for t in subterms(effect.target, "assumed")]
-        ids = {int(label.rsplit(":", 1)[1]) for label in labels if label.rsplit(":", 1)[-1].isdigit()}
-        statements = [action_sites[i] for i in ids if i in action_sites]
-        exact = bool(statements)
-        if effect.kind == "write" and isinstance(effect.target[1], str):
-            statements += write_sites.get(effect.target[1], [])
-        kept = []
-        for statement in dict.fromkeys(statements):
-            if len(statement) + site_chars > 8000:
-                missing.append("effect source sites truncated")
-                break
-            kept.append(statement)
-            site_chars += len(statement)
-        sites[str(index)] = {
-            "statements": kept,
-            "basis": "action_ir_identity" if exact else "write_candidates" if kept else "unlocated",
-        }
-    context = {
-        "schema": 1,
+    body = {
+        "schema": 2,
         "formula_hash": formula_hash(formula),
-        "signature": formula.signature,
-        "units": units,
-        "source_complete": not missing,
-        "source_gaps": sorted(set(missing)),
-        "analysis_gaps": analysis_gaps,
-        "source_chars": original_chars,
-        "supplied_chars": max_chars - remaining,
-        "scope": "compiler inputs; no assertion of economic completeness",
-        "deployments": deployments,
-        "effect_sites": sites,
-        "site_chars": site_chars,
+        "bundle_hash": bundle["bundle_hash"],
+        "entry": {"file": ref, "start": source.start, "length": source.length},
+        "analysis_gaps": gaps,
     }
-    return {**context, "context_hash": digest(context)}
+    return {**body, "context_hash": digest(body)}
 
 
-def validate_context(context: dict, formula: Formula) -> None:
-    if context.get("schema") != 1 or context.get("formula_hash") != formula_hash(formula):
-        raise ValueError("source context does not match saved formula")
+def validate_bundle(bundle: dict) -> None:
+    if bundle.get("schema") != 2 or bundle.get("bundle_hash") != digest(
+        {k: v for k, v in bundle.items() if k != "bundle_hash"}
+    ):
+        raise ValueError("source bundle hash mismatch; regenerate legacy source contexts")
+    if type(bundle.get("max_chars")) is not int or bundle["max_chars"] <= 0:
+        raise ValueError("invalid context size")
+    for key, value in bundle["files"].items():
+        if not isinstance(value.get("source"), str) or _hash(value["source"]) != key:
+            raise ValueError("source file hash mismatch")
+    if any(ref not in bundle["files"] for deployment in bundle["deployments"] for ref in deployment["files"]):
+        raise ValueError("source deployment references missing file")
+
+
+def materialize_context(context: dict, formula: Formula, bundle: dict) -> dict:
+    """Resolve one entry into the shared source, preserving byte offsets and explicit cuts."""
+    validate_bundle(bundle)
+    if (
+        context.get("schema") != 2
+        or context.get("formula_hash") != formula_hash(formula)
+        or context.get("bundle_hash") != bundle["bundle_hash"]
+    ):
+        raise ValueError("source context does not match formula/bundle")
     if context.get("context_hash") != digest({k: v for k, v in context.items() if k != "context_hash"}):
         raise ValueError("source context hash mismatch")
-    if not isinstance(context.get("units"), list) or not context["units"]:
-        raise ValueError("source context has no code")
-    for unit in context["units"]:
-        if not isinstance(unit.get("source"), str) or not unit["source"].strip():
-            raise ValueError("invalid source unit")
-        if not unit.get("truncated") and hashlib.sha256(unit["source"].encode()).hexdigest() != unit.get("source_hash"):
-            raise ValueError("source unit hash mismatch")
+    entry = context["entry"]
+    start, length, ref = entry["start"], entry["length"], entry["file"]
+    gaps = list(bundle["source_gaps"])
+    gaps.extend(g for g in context["analysis_gaps"] if g.startswith(("unverified:", "unresolved:", "budget:callee")))
+    if type(start) is not int or type(length) is not int or min(start, length) < 0:
+        raise ValueError("invalid source span")
+    if ref not in bundle["files"]:
+        gaps.append("entry source unavailable")
+    else:
+        raw = bundle["files"][ref]["source"].encode()
+        if start + length > len(raw):
+            raise ValueError("source span outside file")
+    # Keep the complete entry's file first; do not duplicate the entrypoint or modifier text.
+    units, remaining = [], bundle["max_chars"]
+    for key in sorted(bundle["files"], key=lambda k: (k != ref, k)):
+        file = bundle["files"][key]
+        text = file["source"][:remaining]
+        remaining -= len(text)
+        truncated = len(text) != len(file["source"])
+        if text:
+            units.append({"source_hash": key, "name": file["name"], "source": text, "truncated": truncated})
+        if truncated:
+            gaps.append(f"source truncated:{file['name']}:{key}")
+    return {
+        "units": units,
+        "entry": entry,
+        "deployments": bundle["deployments"],
+        "analysis_gaps": context["analysis_gaps"],
+        "source_gaps": sorted(set(gaps)),
+        "source_complete": not gaps,
+        "context_hash": context["context_hash"],
+    }
+
+
+def artifact_hash(artifact: dict) -> str:
+    """Bind selection to all formulas and assessment context, not just one function's formula."""
+    return digest(
+        {
+            key: artifact.get(key)
+            for key in (
+                "schema",
+                "kind",
+                "chain_id",
+                "address",
+                "block",
+                "status",
+                "functions",
+                "contexts",
+                "source_bundle",
+            )
+        }
+    )

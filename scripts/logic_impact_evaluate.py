@@ -33,22 +33,20 @@ def legacy_pilot_summary(paths: list[Path]) -> dict:
 
 
 def evaluate(report: dict, expected: list[dict]) -> dict:
-    rows = {(r["function"], r["effect_index"]): r for r in report["rows"]}
-    if len(rows) != len(report["rows"]):
-        raise ValueError("duplicate report row")
+    ratings = report["assessment"]["functions"]
     cases, correct, abstained, missed_high, abstained_high = [], 0, 0, 0, 0
     seen = set()
     for label in expected:
-        key = (label["function"], label["effect_index"])
+        key = label["function"]
         if key in seen:
             raise ValueError("duplicate expected case")
         seen.add(key)
         if not 0 <= label["expected_min"] <= label["expected_max"] <= 3:
             raise ValueError("invalid expected impact range")
-        row = rows.get((label["function"], label["effect_index"]))
+        row = ratings.get(key)
         if row is None:
             raise ValueError("expected case missing from report")
-        level = row["impact"]["level"]
+        level = row["level"]
         value = LEVELS.get(level)
         passed = value is not None and label["expected_min"] <= value <= label["expected_max"]
         correct += int(passed)
@@ -61,9 +59,9 @@ def evaluate(report: dict, expected: list[dict]) -> dict:
                 "estimated_level": level,
                 "matched": passed,
                 "abstained": value is None,
-                "raw_ranking_signal": row["impact"].get("estimate", {}).get("ranking_signal"),
-                "uncertainty": row["impact"].get("estimate", {}).get("uncertainty", []),
-                "model_status": row["impact"].get("model_status"),
+                "raw_ranking_signal": row.get("estimate", {}).get("ranking_signal"),
+                "uncertainty": row.get("estimate", {}).get("uncertainty", []),
+                "model_status": row.get("model_status"),
             }
         )
     return {
@@ -75,7 +73,7 @@ def evaluate(report: dict, expected: list[dict]) -> dict:
         "high_impact_underestimates": missed_high,
         "high_impact_abstentions": abstained_high,
         "note": "Development labels, not proof of general accuracy or a calibration guarantee.",
-        "impact_assessment": report.get("impact_assessment"),
+        "assessment": report.get("assessment"),
     }
 
 
