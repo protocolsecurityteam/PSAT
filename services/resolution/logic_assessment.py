@@ -25,7 +25,7 @@ def _decision(row: dict, impact: dict) -> tuple[str, str]:
         and access["issues"]
         and all(issue["kind"] == "state_required" for issue in access["issues"])
     )
-    if supported and impact["model_status"] == "rated" and impact["level"] in ("medium", "high"):
+    if supported and impact["model_status"] == "rated" and impact.get("estimate", {}).get("material_impact", False):
         return "expand", "material function impact; enumerate this effect's supported caller relation"
     return "review", "access or material function impact unresolved; no automatic deferral"
 

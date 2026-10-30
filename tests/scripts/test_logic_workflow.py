@@ -11,7 +11,7 @@ from services.clients.jev import JevClient
 from services.logic.expansion import Selection
 from services.resolution.logic_assessment import assess_formulas
 from services.resolution.logic_impact import JudgmentCache
-from tests.logic.test_impact import Session, inputs, response
+from tests.logic.test_impact import Session, inputs, uncertain_response
 
 
 def test_generate_assess_enumerate_are_three_explicit_jobs(tmp_path, monkeypatch):
@@ -124,7 +124,7 @@ def test_missing_judgment_stays_incomplete_and_cannot_recommend_expansion(tmp_pa
 def test_inconclusive_judgment_is_not_material_impact(tmp_path):
     _, artifact, _ = inputs()
     result = assess_formulas(
-        artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=Session(response(confidence=0.1)))
+        artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=Session(uncertain_response()))
     )
     assert result["assessment"]["judgments_complete"] is True
     assert result["assessment"]["functions"]["change(uint256)"]["level"] == "unknown"

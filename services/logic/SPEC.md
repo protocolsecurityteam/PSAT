@@ -89,7 +89,10 @@ saved. `TYPESAFE_API_KEY` or `JEV_API_KEY` permits uncached requests by default;
 
 `logic_assessment` contains the **only expansion-selection policy**: retain unrestricted effects visibly; retain
 inactive, origin/signature-dependent, unsupported, unrated and uncertain cases for review; recommend supported caller
-relations when their function has a medium/high estimate. Missing only membership state can be resolved by expansion.
+relations when any impact dimension assigns at least the policy threshold to medium-or-high impact.
+Uncertainty between those two levels, or in other dimensions, does not erase that evidence. Exact severity may
+remain unknown; insufficient context or conflicting scope still blocks selection. Probabilities across dimensions
+are never summed or assumed independent. Missing only membership state can be resolved by expansion.
 Low ratings never silently discard a function. A severe function can prioritize several effects conservatively; this
 is not a claim that each of those effects has the function's severity. No maximum-over-effect rating is computed.
 

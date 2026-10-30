@@ -36,6 +36,13 @@ def response(level=3, scope="other_users", confidence=1):
     return {"model": DEFAULT_MODEL, "answers": scores, "usage": {"input_tokens": 100, "output_tokens": 25}}
 
 
+def uncertain_response():
+    answer = response(confidence=0)
+    for name in DIMENSIONS:
+        answer["answers"][name].update(score=1.5, probabilities={str(i): 0.25 for i in range(4)})
+    return answer
+
+
 class Session:
     def __init__(self, answer=None, status=200, error=None):
         self.answer, self.status, self.error, self.calls = answer or response(), status, error, []
@@ -121,7 +128,7 @@ def test_cache_replays_without_key_or_spend(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "answer,expected", [(response(0, "own_entitlement"), "none"), (response(confidence=0.2), "unknown")]
+    "answer,expected", [(response(0, "own_entitlement"), "none"), (uncertain_response(), "unknown")]
 )
 def test_low_or_uncertain_model_never_discards_a_function(tmp_path, answer, expected):
     _, artifact, _ = inputs()

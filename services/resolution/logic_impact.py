@@ -7,6 +7,7 @@ import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,20 @@ def _estimate(response: dict, context: dict, policy: ImpactPolicy) -> dict:
         uncertainty.append("incomplete source cannot support a low-impact conclusion")
     if a["scope"]["choice"] in ("own_entitlement", "no_persistent_effect") and maximum >= 2:
         uncertainty.append("scope and impact answers disagree")
+    # Selection asks whether the function is materially consequential, not which exact
+    # severity wins. Mass split between medium and high still supports that question.
+    # Do not sum across dimensions: their judgments need not be independent.
+    material_dimensions = [
+        k
+        for k in DIMENSIONS
+        if Decimal(str(a[k]["probabilities"]["2"])) + Decimal(str(a[k]["probabilities"]["3"]))
+        >= Decimal(str(policy.min_level_probability))
+    ]
+    material = (
+        bool(material_dimensions)
+        and a["context_sufficient"]["noul"] >= policy.min_context
+        and (a["scope"]["choice"] not in ("unclear", "own_entitlement", "no_persistent_effect"))
+    )
     return {
         "level": "unknown" if uncertainty else LEVELS[maximum],
         "basis": "model_estimate",
@@ -206,6 +221,8 @@ def _estimate(response: dict, context: dict, policy: ImpactPolicy) -> dict:
         "scope": a["scope"],
         "context_sufficient": a["context_sufficient"]["noul"],
         "uncertainty": uncertainty,
+        "material_impact": material,
+        "material_dimensions": material_dimensions,
         "ranking_signal": max(a[k]["score"] for k in DIMENSIONS),
         "high_tail_signal": severe_tail,
         "source_complete": context["source_complete"],
