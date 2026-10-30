@@ -9,7 +9,9 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+import rlp
 from eth_utils.crypto import keccak
+from trie import HexaryTrie
 
 from services.logic.model import BudgetExceeded, ReadError
 
@@ -37,7 +39,16 @@ class ChainReads:
         self.memo: dict[tuple, Any] = {}
 
     def _read(self, method: str, params: list, *, debug: bool = False) -> Any:
-        key = (method, repr(params))
+        if debug and self.debug is not self.rpc and method != "eth_chainId":
+            primary = self._read("eth_chainId", [])
+            archive = self._read("eth_chainId", [], debug=True)
+            try:
+                same_chain = int(primary, 16) == int(archive, 16)
+            except (ValueError, TypeError):
+                raise ReadError("malformed debug-provider chain identity") from None
+            if not same_chain:
+                raise ReadError("debug provider is on a different chain")
+        key = (debug, method, repr(params))
         if key in self.memo:
             return self.memo[key]
         last = None
@@ -92,6 +103,25 @@ class ChainReads:
 
     def storage_dump(self, address: int) -> dict[int, int]:
         header = self._read("eth_getBlockByNumber", [hex(self.block), False])
+        try:
+            if int(header["number"], 16) != self.block or not isinstance(header["transactions"], list):
+                raise ValueError()
+            if any(len(bytes.fromhex(header[k][2:])) != 32 for k in ("hash", "stateRoot")):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise ReadError("malformed pinned block header") from None
+        proof = self._read("eth_getProof", [self.address(address), [], header["hash"]], debug=True)
+        try:
+            account = HexaryTrie.get_from_proof(
+                bytes.fromhex(header["stateRoot"][2:]),
+                keccak(address.to_bytes(20, "big")),
+                tuple(rlp.decode(bytes.fromhex(node[2:])) for node in proof["accountProof"]),
+            )
+            expected = rlp.decode(account)[2] if account else HexaryTrie({}).root_hash
+            if expected != bytes.fromhex(proof["storageHash"][2:]):
+                raise ValueError("account/storage proof disagree")
+        except Exception as exc:
+            raise ReadError("account proof does not verify against pinned state root") from exc
         start, result, seen = "0x" + "00" * 32, {}, set()
         while start:
             if start in seen:
@@ -102,15 +132,49 @@ class ChainReads:
                 [header["hash"], len(header["transactions"]), self.address(address), start, 1000],
                 debug=True,
             )
-            if not isinstance(page, dict) or not isinstance(page.get("storage"), dict):
+            if (
+                not isinstance(page, dict)
+                or "storage" not in page
+                or (page["storage"] is not None and not isinstance(page["storage"], dict))
+            ):
                 raise ReadError("malformed storage dump")
-            for item in page["storage"].values():
-                if not isinstance(item.get("key"), str):
+            for hashed, item in (page["storage"] or {}).items():
+                if not isinstance(item, dict) or not isinstance(item.get("key"), str):
                     raise ReadError("storage trie key preimages unavailable")
-                slot, value = int(item["key"], 16), int(item["value"], 16)
-                if value:
-                    result[slot] = value
+                try:
+                    slot, value = int(item["key"], 16), int(item["value"], 16)
+                    if not isinstance(hashed, str):
+                        raise ValueError()
+                except (KeyError, ValueError, TypeError):
+                    raise ReadError("malformed storage entry") from None
+                if not 0 <= slot < 2**256 or not 0 <= value < 2**256:
+                    raise ReadError("malformed storage word")
+                if keccak(slot.to_bytes(32, "big")).hex() != hashed.removeprefix("0x").lower():
+                    raise ReadError("storage slot preimage does not match trie key")
+                if slot in result:
+                    raise ReadError("storage pagination repeated a slot")
+                if not value:
+                    raise ReadError("noncanonical zero storage leaf")
+                result[slot] = value
+                if len(result) > self.word_limit:
+                    raise BudgetExceeded("storage dump words")
             start = page.get("nextKey")
+            if start is not None:
+                try:
+                    if not isinstance(start, str) or not start.startswith("0x") or len(bytes.fromhex(start[2:])) != 32:
+                        raise ValueError()
+                except ValueError:
+                    raise ReadError("malformed storage cursor") from None
+        # Providers differ on transaction-index semantics. Accept only a complete dump whose
+        # reconstructed root matches the account proof at the exact requested block hash.
+        try:
+            trie = HexaryTrie({})
+            for slot, value in result.items():
+                trie[keccak(slot.to_bytes(32, "big"))] = rlp.encode(value)
+            if trie.root_hash != expected:
+                raise ValueError("incomplete or different-block storage dump")
+        except Exception as exc:
+            raise ReadError("storage dump does not verify against pinned state root") from exc
         return result
 
     def key_words(self, address: int) -> set[int]:

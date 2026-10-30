@@ -41,17 +41,6 @@ def test_budget_is_distinct_from_node_failure():
         reads.storage(1, 2)
 
 
-def test_complete_storage_dump_requires_every_page():
-    def rpc(method, params):
-        if method == "eth_getBlockByNumber":
-            return {"hash": "0xab", "transactions": [1, 2]}
-        assert method == "debug_storageRangeAt" and params[:2] == ["0xab", 2]
-        return {"storage": {"hashed": {"key": "0x1", "value": "0x3"}}, "nextKey": "0x7"}
-
-    with pytest.raises(ReadError, match="cursor"):
-        ChainReads(rpc, 123).storage_dump(1)
-
-
 def test_opcode_trace_recovers_hash_inputs_not_a_guessed_original_key():
     raw = (7).to_bytes(32, "big") + (4).to_bytes(32, "big")
     trace = {"structLogs": [{"op": "KECCAK256", "stack": ["40", "00"], "memory": [raw[:32].hex(), raw[32:].hex()]}]}

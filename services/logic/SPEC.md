@@ -160,6 +160,14 @@ label, or the precise subset of witnesses a solver happens to find first.
 
 ## State inputs and enumeration
 
+Production debug requests use `QUICK_NODE_ETH` on Ethereum, or the server override
+`PSAT_DEBUG_RPC_URL_<chain_id>`. Ordinary reads and log scans remain on the normal RPC route. Debug and
+primary provider identities are checked independently and cached separately. Storage dumps are accepted only
+after their complete reconstructed trie matches an account proof anchored to the requested header's state root.
+This detects incomplete pages and wrong transaction-state snapshots without trusting provider-specific index
+semantics. Zero leaves, invalid slot preimages/cursors and invalid proofs are rejected. The dump word budget
+bounds materialization. Other ordinary reads still use pinned block numbers and trust their configured provider.
+
 Concrete reads use compiler-derived storage locations and packing. Symbolic reads use a complete snapshot
 only after its occupied slots have been attributed to layout locations and verified keys. Candidate words may
 come from constants, storage, events or traces; candidates do not establish membership by themselves.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
@@ -132,7 +133,12 @@ def _deployment_inputs(session: Session, chain_id: int, rpc_url: str, block: int
         if not isinstance(raw, str):
             raise ReadError("block number unanswered")
         block = int(raw, 16)
-    chain = ChainReads(rpc, block)
+    debug_url = os.getenv(f"PSAT_DEBUG_RPC_URL_{chain_id}") or (os.getenv("QUICK_NODE_ETH") if chain_id == 1 else None)
+
+    def debug_rpc(method, params):
+        return rpc_request(debug_url or rpc_url, method, params, retries=0, chain_id=chain_id)
+
+    chain = ChainReads(rpc, block, debug=debug_rpc if debug_url else None)
     implementations = {}
 
     def implementation(hexaddr):
