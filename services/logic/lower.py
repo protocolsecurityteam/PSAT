@@ -4532,6 +4532,8 @@ class Lowerer:
             return substitute(value, "stackword", lambda t: t[1] if self._in_yul() else stack_value(t[1], t[2])[0])
         if self._in_yul() and isinstance(value, Term):
             name = str(getattr(var, "type", None))
+            if not isinstance(var, TemporaryVariable) and not _clean_register(value, frozenset(self._arguments)):
+                return unknown("unsupported:yul_narrow_register")
             fixed = re.fullmatch(r"bytes(\d+)", name)
             if fixed and not isinstance(var, TemporaryVariable):
                 return mk_op("shl", (value, const(256 - 8 * int(fixed[1]))))
@@ -5713,6 +5715,31 @@ def _convert(type_: str, value: Term, source: Any = None) -> Term:
     if type_ == "int256" and src is not None and re.fullmatch(r"int\d*", str(src)):
         return value
     return mk("conv", type_, value)
+
+
+def _clean_register(value: Term, decoded: frozenset = frozenset()) -> bool:
+    """Whether a Solidity value is held as its type's canonical word. A narrowing conversion may leave the high bits
+    of its operand in the register (legacy codegen does, after ``uint8(a)``, unchecked ``+``/``*``, ``<<`` and ``~``),
+    which assembly then reads. ``decoded`` values crossed an ABI boundary, whose decoder leaves them canonical."""
+    if value[0] == "ite":
+        return _clean_register(value[2], decoded) and _clean_register(value[3], decoded)
+    if value in decoded or value[0] != "conv" or value[1] in ("uint256", "int256", "bytes32", "bool"):
+        return True
+    inner = value[2]
+    held = {"arg": 2, "conv": 1}.get(inner[0])
+    held = inner[held] if held is not None else inner[4][-1] if inner[0] == "load" else None
+    if inner[0] == "conv" and not _clean_register(inner, decoded):
+        return False
+    if held == value[1] or inner[0] == "const":
+        return True
+    widths = [
+        (160, False) if t == "address" else _integer(t) if re.fullmatch(r"u?int\d*", str(t)) else None
+        for t in (held, value[1])
+    ]
+    if None in widths:
+        return False
+    (bits, signed), (target, target_signed) = widths
+    return bits <= target if signed == target_signed else not signed and bits < target
 
 
 def _signed(x: int, bits: int) -> int:
