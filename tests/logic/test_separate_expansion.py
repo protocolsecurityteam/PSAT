@@ -10,7 +10,7 @@ import pytest
 
 from services.logic import deployment, expansion
 from services.logic.expansion import Selection, expand_formula, formula_hash
-from services.logic.formula import Linker
+from services.logic.linker import Linker
 from services.logic.model import Limits, decode_formula, encode
 from services.logic.terms import CALLER, const, mk, mk_cmp
 from tests.logic._anvil import anvil  # noqa: F401
@@ -21,6 +21,9 @@ def install_inputs(monkeypatch, d, reads):
     class Contracts(dict):
         def code_address(self, address):
             return address
+
+        def own_code(self, address):
+            return self.get(address)
 
     contracts = Contracts(d.contracts("C", "Guard"))
 
@@ -89,10 +92,12 @@ def test_expansion_reuses_saved_formula_and_only_selected_functions(monkeypatch,
     def forbidden(*args, **kwargs):
         raise AssertionError("expansion re-lowered a saved formula")
 
-    monkeypatch.setattr(deployment, "compile_function", forbidden)
+    monkeypatch.setattr("services.logic.formula.compile_function", forbidden)
     monkeypatch.setattr("services.logic.lower.Lowerer.success", forbidden)
     result = deployment.deployment_expansions(None, saved, "unused", {"selected(uint256)": Selection()})
     assert result["kind"] == "address_expansions"
+    assert result["storage_steps"] == Limits().storage_steps
+    assert "callers" in result["functions"]["selected(uint256)"]["storage_accounting"]
     assert set(result["functions"]) == {"selected(uint256)"}
     value = result["functions"]["selected(uint256)"]["expansion"]["value"]
     from tests.logic.test_formula_engine import OWNER

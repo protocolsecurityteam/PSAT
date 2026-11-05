@@ -191,6 +191,21 @@ def labels(formula):
     return {str(t[1]) for k in ("unknown", "opaque", "assumed") for t in subterms(formula, k)}
 
 
+def callers_with_resources(formula, reads, contracts):
+    """Test-only caller projection assuming the raw calls have enough execution resources.
+
+    Pair this with EVM execution and keep production's qualified result assertion.
+    This does not certify transaction gas feasibility or remove any other unknown.
+    """
+    from services.logic.solver import project
+    from services.logic.terms import TRUE, replace_terms
+
+    resources = {t: TRUE for t in subterms(formula.success, "unknown") if t[1] == "unsupported:raw_call_resources"}
+    return project(
+        replace_terms(formula.success, resources), Translation(reads, contracts, formula.address, formula.selector)
+    )
+
+
 def agrees(formula, engine, chain, where=None):
     if engine is None:
         assert labels(formula), (where, "unknown without a reason", formula)

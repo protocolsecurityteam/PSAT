@@ -2,8 +2,8 @@
 nested builtin calls, so the lowering can follow them like any other code instead of matching patterns.
 
 Only straight-line code is read: ``let`` and assignments, nested blocks, and calls as statements. Control flow
-(``if``, ``for``, ``switch``, functions) raises ``Unsupported``, and the caller falls back to treating the
-assembly as code it didn't follow.
+(``if``, ``for``, ``switch``, functions) raises ``Unsupported``, and the caller retains the
+assembly as an unfinished operation.
 """
 
 from __future__ import annotations
@@ -36,6 +36,12 @@ class Number:
 class Assign:
     targets: tuple[str, ...]
     value: object | None  # ``let x`` alone: zero
+    declared: bool = False
+
+
+@dataclass(frozen=True)
+class Block:
+    statements: tuple
 
 
 @dataclass(frozen=True)
@@ -66,7 +72,7 @@ def _tokens(text: str) -> list[tuple[str, str]]:
 
 
 def parse(text: str) -> list:
-    """The statements of an assembly block's text (its braces optional), in order, nested blocks flattened."""
+    """The statements of an assembly block's text (its braces optional), in order, nested lexical blocks preserved."""
     tokens = _tokens(text)
     at = [0]
 
@@ -87,14 +93,16 @@ def parse(text: str) -> list:
             return Number(int(value, 0))
         if kind == "str":
             raise Unsupported("string literal")
+        if kind == "id" and value in ("true", "false"):
+            return Number(int(value == "true"))
         if kind != "id" or value in _CONTROL:
             raise Unsupported(f"expression at {value!r}")
-        if peek() and peek()[1] == "(":
+        if (next_token := peek()) is not None and next_token[1] == "(":
             take("(")
             args = []
-            while peek() and peek()[1] != ")":
+            while (next_token := peek()) is not None and next_token[1] != ")":
                 args.append(expression())
-                if peek() and peek()[1] == ",":
+                if (next_token := peek()) is not None and next_token[1] == ",":
                     take(",")
             take(")")
             return Call(value, tuple(args))
@@ -102,28 +110,28 @@ def parse(text: str) -> list:
 
     def statements(until: str | None) -> list:
         out: list = []
-        while peek() is not None and (until is None or peek()[1] != until):
-            kind, value = peek()
+        while (next_token := peek()) is not None and (until is None or next_token[1] != until):
+            kind, value = next_token
             if value == "{":
                 take("{")
-                out.extend(statements("}"))
+                out.append(Block(tuple(statements("}"))))
                 take("}")
             elif value in _CONTROL:
                 raise Unsupported(value)
             elif value == "let":
                 take("let")
                 names = [take()[1]]
-                while peek() and peek()[1] == ",":
+                while (next_token := peek()) is not None and next_token[1] == ",":
                     take(",")
                     names.append(take()[1])
-                if peek() and peek()[1] == ":=":
+                if (next_token := peek()) is not None and next_token[1] == ":=":
                     take(":=")
-                    out.append(Assign(tuple(names), expression()))
+                    out.append(Assign(tuple(names), expression(), declared=True))
                 else:
-                    out.append(Assign(tuple(names), None))
-            elif kind == "id" and peek(1) and peek(1)[1] in (":=", ","):
+                    out.append(Assign(tuple(names), None, declared=True))
+            elif kind == "id" and (following := peek(1)) is not None and following[1] in (":=", ","):
                 names = [take()[1]]
-                while peek() and peek()[1] == ",":
+                while (next_token := peek()) is not None and next_token[1] == ",":
                     take(",")
                     names.append(take()[1])
                 take(":=")

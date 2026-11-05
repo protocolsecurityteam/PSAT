@@ -42,8 +42,13 @@ def main(argv=None):
     generate.add_argument("--chain-id", type=int, required=True)
     generate.add_argument("--block", type=int)
     generate.add_argument("--rpc-url", required=True)
-    generate.add_argument("--related-address", action="append", default=[], type=_address)
-    generate.add_argument("--context-chars", type=int, default=48_000)
+    generate.add_argument("--related-address", action="append", default=None, type=_address)
+    generate.add_argument("--context-chars", type=int)
+    generate.add_argument("--resume", type=Path, help="continue pending functions in a saved generation artifact")
+    generate.add_argument("--expansion-steps", type=int, default=5000)
+    generate.add_argument("--loop-iterations", type=int, default=32)
+    generate.add_argument("--callee-depth", type=int, default=8)
+    generate.add_argument("--value-steps", type=int, default=50_000)
     generate.add_argument("--output", type=Path, required=True)
 
     assess = jobs.add_parser("assess", help="evaluate access and run or reuse pinned Jev impact judgments")
@@ -66,18 +71,28 @@ def main(argv=None):
     enumerate_.add_argument("--rpc-url", required=True)
     enumerate_.add_argument("--members", type=int, default=Limits().members)
     enumerate_.add_argument("--solver-ms", type=int, default=Limits().solver_ms)
+    enumerate_.add_argument(
+        "--storage-steps",
+        type=int,
+        default=Limits().storage_steps,
+        help="accounting work limit per storage address and projection",
+    )
     enumerate_.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    for field in ("block", "max_requests", "direct_reads", "members", "solver_ms"):
+    for field in ("block", "max_requests", "direct_reads", "members", "solver_ms", "storage_steps"):
         value = getattr(args, field, None)
         if value is not None and value < 0:
             parser.error(f"{field} cannot be negative")
-    inputs = [getattr(args, key, None) for key in ("artifact", "assessment")]
+    inputs = [getattr(args, key, None) for key in ("artifact", "assessment", "resume")]
     if args.output.resolve() in [path.resolve() for path in inputs if path is not None]:
         parser.error("output must not replace an input artifact")
 
     if args.job == "generate":
-        if args.chain_id <= 0 or args.context_chars <= 0 or len(args.related_address) > 32:
+        if (
+            args.chain_id <= 0
+            or (args.context_chars is not None and args.context_chars <= 0)
+            or len(args.related_address or []) > 32
+        ):
             parser.error("positive chain/context size and at most 32 related addresses required")
         from db.models import SessionLocal
         from services.logic.deployment import deployment_formulas
@@ -89,8 +104,13 @@ def main(argv=None):
                 args.chain_id,
                 args.rpc_url,
                 block=args.block,
-                related_addresses=tuple(args.related_address),
+                related_addresses=tuple(args.related_address) if args.related_address is not None else None,
                 context_chars=args.context_chars,
+                expansion_steps=args.expansion_steps,
+                loop_iterations=args.loop_iterations,
+                callee_depth=args.callee_depth,
+                value_steps=args.value_steps,
+                resume=json.loads(args.resume.read_text()) if args.resume else None,
             )
     else:
         artifact = json.loads(args.artifact.read_text())
@@ -157,9 +177,12 @@ def main(argv=None):
                     artifact,
                     args.rpc_url,
                     selections,
-                    limits=Limits(members=args.members, solver_ms=args.solver_ms),
+                    limits=Limits(members=args.members, solver_ms=args.solver_ms, storage_steps=args.storage_steps),
                 )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
+    if args.job == "generate" and result.get("pending_functions"):
+        print(f"Generation paused; saved resumable work to {args.output}.")
+        raise SystemExit(3)
     if args.job == "assess" and result["assessment"]["status"] == "not_verified":
         print("Contract source is not verified; no assessment or enumeration was performed.")
         raise SystemExit(4)

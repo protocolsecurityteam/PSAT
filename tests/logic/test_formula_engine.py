@@ -127,14 +127,14 @@ def test_shared_argument_constraints_filter_mapping_values(deployed):
 def test_blocklist_is_a_complement_not_occupied_keys(deployed):
     row = analyze(deployed, "notBanned", Limits(members=2))
     assert row.callers.representation == "cofinite", row
-    assert row.callers.excluded == (OTHER,)
+    assert row.callers.excluded == (0, OTHER)
     assert passes(deployed, "notBanned", STRANGER)
     assert not passes(deployed, "notBanned", OTHER)
 
 
 def test_success_and_effect_authority_are_separate(deployed):
     row = analyze(deployed, "early")
-    assert row.callers.representation == "cofinite" and not row.callers.excluded
+    assert row.callers.representation == "cofinite" and row.callers.excluded == (0,)
     assert row.effects and all(e.members == (OWNER,) and e.complete for e in row.effects)
     assert passes(deployed, "early", STRANGER)
 
@@ -184,7 +184,7 @@ def test_composition_uses_values_and_all_updates(deployed, first, last, expected
     combined = sequence((formula(deployed, first), formula(deployed, last)))
     result = project(combined, Translation(FixtureReads(deployed), deployed.contracts("C", "Guard"), deployed.at["C"]))
     if expected == "all":
-        assert result.representation == "cofinite" and not result.excluded, result
+        assert result.representation == "cofinite" and result.excluded == (0,), result
     else:
         assert result.representation == "finite" and result.members == ((OWNER,) if expected == "owner" else ()), result
 

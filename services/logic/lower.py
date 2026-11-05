@@ -1,18 +1,17 @@
 """Slither IR to one formula: the condition under which a call returns instead of reverting.
 
-Forward symbolic execution over each function's control-flow graph, in topological order with merges at joins, so the
-work is linear in the graph however many branches it has. The rules are the language's, not any contract's:
+Symbolic execution follows each function's control-flow graph and merges states at joins.
+The rules are the language's, not any contract's:
 
 * ``require``/``assert`` conjoin their condition to the path; ``revert`` and ``throw`` end it.
 * ``if`` splits the path; where branches meet, the path conditions are or-ed and the values they disagree on become
   ``ite``.
 * Internal and library calls run inline with their parameters bound; a modifier runs the rest of the function at its
   ``_``.
-* A loop exits either before its first iteration, or after one iteration followed by an unknown number of further
-  ones: everything the body changed is forgotten and the path carries an ``unknown`` conjunct, so it can widen what
-  may pass but never proves anything passes.
-* Storage reads see earlier writes in the same call; external calls are values (``call`` terms) whose answer the
-  decision step reads from the chain.
+* Resumable generation retains unfinished loops and calls with their state. Direct legacy lowering qualifies
+  unfinished iterations; retaining a loop is not a proof of arbitrary-length reachability.
+* Storage reads see earlier writes. Supported external calls execute through shared symbolic world state and
+  explicit frames; no production eth_call is used to decide authorization.
 """
 
 from __future__ import annotations
@@ -66,8 +65,37 @@ from slither.slithir.operations import (
     Unpack,
 )
 from slither.slithir.operations.codesize import CodeSize
-from slither.slithir.variables import Constant, ReferenceVariable
+from slither.slithir.variables import Constant, ReferenceVariable, TemporaryVariable
 
+from .abi_values import abi_name, abi_signature, checked_return_size, folded_selector, getter_shape
+from .layout import storage_name
+from .memory import (
+    CALLDATA_COPY as _CALLDATA_COPY,
+)
+from .memory import (
+    SPAN as _MEMORY_SPAN,
+)
+from .memory import (
+    clobbered as _clobbered,
+)
+from .memory import (
+    disjoint as _memory_disjoint,
+)
+from .memory import (
+    location as _memory_offset,
+)
+from .memory import (
+    memory_bytes as _memory_bytes,
+)
+from .memory import (
+    memory_word as _memory_word,
+)
+from .memory import (
+    region_holds as _region_holds,
+)
+from .memory import (
+    shift as _memory_shift,
+)
 from .terms import (
     CALLDATA,
     CALLER,
@@ -243,37 +271,37 @@ _YUL_ENVIRONMENT = {
 
 # The legacy Yul reader (``_yul``, for assembly Slither leaves as text before Solidity 0.6), by builtin: read with the
 # meaning the same operation has in Solidity, read as an unknown by name, or refused (``yul.Unsupported``: the text
-# falls back to ``_legacy_assembly``, which forgets what the block assigns and marks what it may write or call).
+# is retained as an unfinished operation, never recovered by pattern matching).
 LEGACY_YUL_HANDLED = frozenset(
     (
         "add sub mul div mod exp and or xor shl shr lt gt eq slt sgt iszero not sload caller address callvalue "
         "timestamp number extcodesize calldataload sdiv smod sar byte signextend calldatasize chainid selfbalance "
         "balance addmod mulmod sstore mstore mstore8 calldatacopy codecopy returndatacopy pop log1 log2 log3 log4 "
-        "revert invalid"
+        "mload returndatasize return stop revert invalid"
     ).split()
 )
 LEGACY_YUL_OPAQUE = {
-    "mload": "mload(uint256)",  # memory this reading doesn't track: a lost word
     "keccak256": "keccak256",
     "gas": "gas",
-    "returndatasize": "returndatasize",
     "msize": "msize",
 }
 LEGACY_YUL_UNSUPPORTED = frozenset(
     (
         "basefee blobbasefee blobhash blockhash call callcode clz codesize coinbase create create2 datacopy "
         "dataoffset datasize delegatecall difficulty extcodecopy extcodehash gaslimit gasprice loadimmutable log0 "
-        "mcopy origin pc prevrandao return selfdestruct setimmutable staticcall stop tload tstore"
+        "mcopy origin pc prevrandao selfdestruct setimmutable staticcall tload tstore"
     ).split()
 )
 LEGACY_YUL_STATEMENTS = frozenset(
-    "sstore mstore mstore8 calldatacopy codecopy returndatacopy pop log1 log2 log3 log4 revert invalid".split()
+    (
+        "sstore mstore mstore8 calldatacopy codecopy returndatacopy pop log1 log2 log3 log4 return stop revert invalid"
+    ).split()
 )
 LEGACY_YUL_ARITY = {
     **dict.fromkeys("iszero not sload extcodesize calldataload balance mload pop".split(), 1),
     **dict.fromkeys(
         "caller address callvalue timestamp number calldatasize chainid selfbalance gas returndatasize msize "
-        "invalid".split(),
+        "stop invalid".split(),
         0,
     ),
     **dict.fromkeys("addmod mulmod calldatacopy codecopy returndatacopy log1".split(), 3),
@@ -304,16 +332,13 @@ REJECTED_VARIABLES = {
 # Assembly builtins that leave memory as it was (``mstore`` and the calls track what they write themselves).
 _MEMORY_NEUTRAL = frozenset(
     (
-        "mstore mload sload keccak256 require assert calldataload calldatasize extcodesize extcodehash staticcall "
-        "call callcode returndatasize returndatacopy "
+        "mstore mstore8 mload sload sstore tstore keccak256 require assert calldataload calldatasize "
+        "extcodesize extcodehash staticcall "
+        "call callcode returndatasize returndatacopy calldatacopy delegatecall "
         "balance selfbalance gas chainid timestamp number caller address origin callvalue byte signextend"
     ).split()
 )
 _SCOPED = re.compile(r"_scope_\d+$")  # Slither's suffix for a local declared again under a name in use
-_MEMORY_SPAN = 0x400  # how far above zero constant-offset assembly memory is followed
-# Where assembly that reads the free memory pointer (``mload(0x40)``) before writing it finds free memory: a window of
-# its own, followed like the one above zero (GPv2's ``safeTransferFrom`` building its call there).
-_FREE_MEMORY = 2**32
 
 
 def parameter(param: Any, index: int) -> Term:
@@ -368,34 +393,8 @@ def _keeps_memory(ir: Any) -> bool:
 def _small_const(term: Any) -> int | None:
     if isinstance(term, tuple) and term[0] == "const" and isinstance(term[1], int) and not isinstance(term[1], bool):
         value = term[1]
-        return value if 0 <= value < _MEMORY_SPAN or _FREE_MEMORY <= value < _FREE_MEMORY + _MEMORY_SPAN else None
+        return value if 0 <= value < _MEMORY_SPAN else None
     return None
-
-
-def _memory_bytes(mem: tuple, start: int | None, length: int | None) -> tuple | None:
-    """Memory [start, start+length) as the words that last wrote each byte, cut to the bytes each still holds;
-    ``None`` when any byte there was never written by this assembly."""
-    if start is None or length is None or not 0 < length <= _MEMORY_SPAN:
-        return None
-    if start % _FREE_MEMORY + length > _MEMORY_SPAN:
-        return None
-    owner: list[int | None] = [None] * length
-    for i, (offset, _) in enumerate(mem):
-        for b in range(max(offset, start), min(offset + 32, start + length)):
-            owner[b - start] = i
-    if any(o is None for o in owner):
-        return None
-    pieces = []
-    b = 0
-    while b < length:
-        i = owner[b]
-        e = b
-        while e < length and owner[e] == i:
-            e += 1
-        offset, word = mem[i]  # type: ignore[index]
-        pieces.append(mk_slice(word, start + b - offset, e - b))
-        b = e
-    return tuple(pieces)
 
 
 def _one_word(type_: str) -> bool:
@@ -427,26 +426,6 @@ def _selector_word(t: Term) -> bool:
     return inner is not None and shifted(inner, "shr") == mk("elem", CALLDATA, const(0))
 
 
-def _call_arguments(text: str, start: int) -> list[str] | None:
-    """The comma-separated arguments of the call whose ``(`` ends just before ``start``, split at its own depth."""
-    depth, parts, current = 1, [], []
-    for i in range(start, len(text)):
-        ch = text[i]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                parts.append("".join(current).strip())
-                return parts
-        elif ch == "," and depth == 1:
-            parts.append("".join(current).strip())
-            current = []
-            continue
-        current.append(ch)
-    return None
-
-
 def _packed_item(pointer: Term, width: int) -> Term | None:
     """The item of ``width`` bytes starting at ``pointer`` (``add(data, k)``) in bytes an ``abi.encodePacked`` built,
     ``data`` being where their length is kept: what ``mload`` reads there (a signature's ``r`` and ``s``)."""
@@ -471,13 +450,25 @@ def _packed_item(pointer: Term, width: int) -> Term | None:
 
 def _dynamic_bytes(t: Any) -> bool:
     """A ``bytes``/``string`` argument: a memory value whose length word is followed by its bytes."""
-    return isinstance(t, tuple) and bool(t) and t[0] == "arg" and t != CALLDATA and t[2] in ("bytes", "string")
+    return (
+        isinstance(t, tuple)
+        and bool(t)
+        and (
+            t[0] in ("bytes_prefix", "bytes_slice", "bytes_patch")
+            or (t[0] == "arg" and t != CALLDATA and t[2] in ("bytes", "string"))
+        )
+    )
 
 
 def _bytes_word(pointer: Term) -> Term | None:
     """``mload`` inside a ``bytes``/``string`` argument: its length (``mload(signature)``), or the word ``k`` bytes
     past the length (``mload(add(signature, 0x20))``: a packed signature's ``r``), as ``("word", signature, k - 32)``
     (OpenZeppelin's ``ECDSA.tryRecover(bytes32, bytes)``)."""
+    if pointer[0] == "enc":
+        from .abi_values import encoded_region
+
+        layout = encoded_region(pointer)
+        return const(layout[0]) if layout is not None else None
     if _dynamic_bytes(pointer):
         return mk("len", pointer)
     if not (isinstance(pointer, tuple) and pointer[:2] == ("op", "add") and len(pointer[2]) == 2):
@@ -491,25 +482,21 @@ def _bytes_word(pointer: Term) -> Term | None:
     return mk("word", data, const(at - 32))
 
 
-def _memory_word(mem: tuple, offset: int | None) -> Any:
-    """``mload(offset)``: the word stored there, when one ``mstore`` wrote all 32 bytes and nothing since."""
-    pieces = _memory_bytes(mem, offset, 32)
-    if pieces is None or len(pieces) != 1:
-        return None
-    piece = pieces[0]
-    return piece[1] if piece[0] == "slice" else piece  # all 32 bytes of one word: the word itself
-
-
 # A key of a modifier's state, beside its variables' ids: whether the function's frame riding in it is lost (a run of
 # ``_`` not followed to its end), so a later ``_`` starts from unknowns.
 _LOST_FRAME = "lost_frame"
+_HEAP_UNPLACED = ("heap", "unplaced_allocator")
+_HEAP_ALIASES = ("heap", "unplaced_layout")
+_RETURN_BUFFER = ("heap", "return_buffer")
+_RETURN_ARITY = ("heap", "return_arity")
+_EMPTY_RETURN = mk("returndata_empty")
 
 
 @dataclass
 class State:
     pc: Term
     env: dict = field(default_factory=dict)  # this frame's locals, by id(variable)
-    store: dict = field(default_factory=dict)  # storage written so far in the call: (contract, var, path) -> value
+    store: dict = field(default_factory=dict)  # ordered updates, with physical views and distinct unmodeled writes
     ret: tuple | None = None  # the function's return values once known (a modifier carries them past ``_``)
     halted: bool = False  # an assembly ``return``/``stop`` ended the call successfully
     # Words assembly ``mstore``d at constant offsets, in order: (offset, value). Emptied by anything else that may
@@ -575,9 +562,18 @@ def _merge_store(states: list[Any]) -> dict:
     positions = [{k: i for i, k in enumerate(s.store)} for s in states]
     reread: set = set()
     by_place: dict = {}
+    from .cells import annotation
+
     for key in keys:
         if key[0] not in ("act", "emit", "havoc", "heap"):
-            by_place.setdefault((key[0], key[1]), []).append(key)
+            group = (
+                ("physical", key[1])
+                if key[0] == "raw"
+                else ("physical", key[0])
+                if annotation(key)
+                else (key[0], key[1])
+            )
+            by_place.setdefault(group, []).append(key)
     for group in by_place.values():
         if len(group) < 2:
             continue
@@ -595,9 +591,27 @@ def _merge_store(states: list[Any]) -> dict:
     return out
 
 
+def _evm_word(value: Term) -> Term:
+    if value[0] == "const" and isinstance(value[1], (int, bool)):
+        return const(int(value[1]) % 2**256, "uint256")
+    return value if value[:2] == ("conv", "uint256") else mk("conv", "uint256", value)
+
+
 def stored(store: dict, key: tuple, value: Term) -> dict:
     """``store`` with ``key`` written last: a store is read in write order, so a location written again moves to the
     end (a later write at a key that may equal it no longer hides it)."""
+    from .cells import base_location, occurrence
+    from .terms import _unmodelled
+
+    key = base_location(key)
+    if key[0] in ("raw", "transient"):
+        key = (key[0], key[1], _evm_word(key[2]))
+        value = _evm_word(value)
+    if key[0] not in ("heap", "act", "emit", "havoc") and _unmodelled(key):
+        # A diagnostic label is not a value identity. Keep separate writes rather
+        # than letting a later rejected address erase an earlier possible write.
+        serial = max((n for k in store if (n := occurrence(k)) is not None), default=-1) + 1
+        key = (*key, ("write_occurrence", serial))
     out = {k: v for k, v in store.items() if k != key}
     out[key] = value
     return out
@@ -606,6 +620,15 @@ def stored(store: dict, key: tuple, value: Term) -> dict:
 def _may_alias(a: tuple, b: tuple) -> bool:
     """Whether two store keys of one place may name overlapping storage: a path and one inside it, or keys that
     aren't two different fixed values."""
+    from .cells import annotation, slot_equal, view
+
+    ca, cb = view(a), view(b)
+    if ca is not None and cb is not None:
+        if mk_cmp("eq", ca[0], cb[0]) == FALSE or slot_equal(ca[1], cb[1]) == FALSE:
+            return False
+        return not (ca[2][0] == cb[2][0] == "const" and (ca[2][1] + ca[3] <= cb[2][1] or cb[2][1] + cb[3] <= ca[2][1]))
+    if annotation(a) or annotation(b):
+        return True
     if a[0] in ("raw", "transient"):
         return not (_fixed(a[2]) and _fixed(b[2]) and a[2] != b[2])
     for (ka, x), (kb, y) in zip(a[2], b[2]):
@@ -626,30 +649,55 @@ def read_store(store: dict, key: tuple) -> Term:
     whole of what is read inside of (``cfg = Cfg(..)`` then ``cfg.live``) gives the part of it read; a write inside of
     what is read whole (``list.push(x)`` then ``list`` copied to memory) gives the whole with that part replaced
     (``upd``). A loop that may have written the variable further (``havoc``) leaves it unknown from there."""
+    from .cells import annotation, context, overlay, view
+
     kind = key[0]
     if kind == "heap":
-        return store.get(key, unknown("unallocated"))  # an object one path never allocated: never reached there
+        if key == _RETURN_BUFFER:
+            return store.get(key, _EMPTY_RETURN)
+        if key == _RETURN_ARITY:
+            return store.get(key, unknown("return_arity"))
+        return store.get(
+            key, FALSE if key in (_HEAP_UNPLACED, _HEAP_ALIASES) else unknown("unallocated")
+        )  # an object one path never allocated: never reached there
     if kind in ("act", "emit", "havoc"):
         value = FALSE
         for k, written in store.items():
             if k == key:
                 value = written
         return value
-    if kind in ("raw", "transient"):
+    if kind == "transient":
         return _read_slot(store, key)
-    contract, name, path = key
-    value: Term = mk("load", contract, name, path)
+    raw = kind == "raw"
+    contract = key[1] if raw else key[0]
+    name = "raw" if raw else key[1]
+    path: tuple = () if raw else key[2]
+    value = baseline = unwritten(key)
+    cell = view(key)
     for k, written in store.items():
         head = k[0]
         if head == "havoc":
-            if k[1] == contract and k[2] in (name, "*", "*elsewhere"):
-                value = mk_ite(written, _forgotten(k, mk("load", contract, name, path)), value)
+            if k[1] in (contract, "*world*") and (cell is not None or k[2] in (name, "*", "*elsewhere")):
+                value = mk_ite(written, _forgotten(k, baseline), value)
+            continue
+        other = view(k)
+        if cell is not None and other is not None:
+            value = overlay(value, cell, other, written)
             continue
         if head == "raw" and k[1] == contract:
-            if _may_hold_named(k[2]):
-                value = _raw_named(mk("load", contract, name, path))  # an assembly write that may land in it
+            value = _raw_named(baseline)
             continue
-        if head in ("act", "emit", "transient", "raw", "heap") or head != contract or k[1] != name:
+        if head in ("act", "emit", "transient", "raw", "heap") or head != contract:
+            continue
+        if raw or context(k) != context(key):
+            value = _raw_named(baseline)
+            continue
+        if any((meta := annotation(loc)) is not None and meta[2] is None for loc in (key, k)):
+            value = _raw_named(baseline)
+            continue
+        if k[1] != name:
+            if not isinstance(k[1], str) or not isinstance(name, str):
+                value = mk("opaque", "unsupported:storage_namespace_alias", (baseline,))
             continue
         kpath = k[2]
         n = min(len(kpath), len(path))
@@ -674,31 +722,18 @@ def read_store(store: dict, key: tuple) -> Term:
 
 def _read_slot(store: dict, key: tuple) -> Term:
     """A raw (``sload``) or transient (``tload``) slot as this call's writes leave it."""
-    kind, contract, slot = key
+    kind, contract, slot = key[:3]
+    slot = _evm_word(slot)
     value: Term = mk("rawload", contract, slot) if kind == "raw" else mk("const", 0, "uint256")
     for k, written in store.items():
-        if k[0] == "havoc" and k[1] == contract and k[2] in (kind, "*", "*elsewhere"):
+        if k[0] == "havoc" and k[1] in (contract, "*world*") and k[2] in (kind, "*", "*elsewhere"):
             value = mk_ite(written, _forgotten(k, mk("rawload", contract, slot)), value)
         elif k[0] == kind and k[1] == contract:
-            value = mk_ite(mk_cmp("eq", k[2], slot), written, value)
-        elif kind == "raw" and k[0] == contract and _may_hold_named(slot):
+            value = mk_ite(mk_cmp("eq", _evm_word(k[2]), slot), _evm_word(written), value)
+        elif kind == "raw" and k[0] == contract:
             # A named variable written, then a slot read that may be its own: which bytes it changed isn't placed.
             value = _raw_named(mk("rawload", contract, slot))
     return value
-
-
-def _may_hold_named(slot: Term) -> bool:
-    """Whether a raw slot may be one a named variable occupies: anything but a hash, or a constant derived from one
-    (namespaced storage, ERC-1967 slots), which no declared variable's slot collides with."""
-    if slot[0] == "const":
-        return isinstance(slot[1], int) and not isinstance(slot[1], bool) and slot[1] < 2**64
-    return not _hash_based(slot)
-
-
-def _hash_based(slot: Term) -> bool:
-    if slot[0] == "hash":
-        return True
-    return slot[0] == "op" and slot[1] in ("add", "sub", "xor") and any(_hash_based(a) for a in slot[2])
 
 
 def _raw_named(load: Term) -> Term:
@@ -720,8 +755,13 @@ VALUE_STEPS = 50_000
 _STEPS = [VALUE_STEPS]
 
 
-def _spent() -> bool:
-    _STEPS[0] -= 1
+def _spent(count: int = 1) -> bool:
+    _STEPS[0] -= count
+    if _STEPS[0] < 0:
+        from .continuation import ACTIVE
+
+        if (journal := ACTIVE.get()) is not None:
+            journal.suspend("value_steps")
     return _STEPS[0] < 0
 
 
@@ -759,8 +799,16 @@ def project(value: Term, steps: tuple) -> Term:
         return mk("opaque", "budget:value_steps", (value, mk("const", repr(steps), "string")))
     if kind == "ite":
         return mk_ite(value[1], project(value[2], steps), project(value[3], steps))
+    if kind == "abi_array":
+        step, rest = steps[0], steps[1:]
+        if step == ("f", "length"):
+            return length_of(value[1])
+        if step[0] == "k":
+            return project(element(value, step[1]), rest)
     if kind == "load":
-        return mk("load", value[1], value[2], (*value[3], *steps))
+        from .cells import child_load
+
+        return child_load(value, steps)
     if kind == "rawload":
         return mk("opaque", "unsupported:raw_struct", (value,))
     step, rest = steps[0], steps[1:]
@@ -792,6 +840,10 @@ def element(container: Term, key: Term, zero: Term | None = None) -> Term:
         return mk("opaque", "budget:value_steps", (container, key))
     if kind == "ite":
         return mk_ite(container[1], element(container[2], key, zero), element(container[3], key, zero))
+    if kind == "abi_array":
+        from .abi_values import transfer
+
+        return transfer(element(container[1], key, zero), container[2], container[3])[0]
     if kind == "array" and len(container) == 3:
         items = container[2]
         if key[0] == "const" and isinstance(key[1], int) and not isinstance(key[1], bool):
@@ -805,7 +857,9 @@ def element(container: Term, key: Term, zero: Term | None = None) -> Term:
     if kind == "array":
         return zero if zero is not None else mk("elem", container, key)  # ``new T[](n)``: zeroed
     if kind == "load":
-        return mk("load", container[1], container[2], (*container[3], ("k", key)))
+        from .cells import child_load
+
+        return child_load(container, (("k", key),))
     if kind == "upd":
         steps = container[2]
         if steps[0][0] != "k":
@@ -863,6 +917,8 @@ def length_of(container: Term) -> Term | None:
     kind = container[0]
     if _spent():
         return mk("opaque", "budget:value_steps", (container,))
+    if kind == "abi_array":
+        return length_of(container[1])
     if kind == "array":
         return container[1]
     if kind == "ite":
@@ -873,7 +929,9 @@ def length_of(container: Term) -> Term | None:
             return container[3]
         return length_of(container[1])
     if kind == "load":
-        return mk("load", container[1], container[2], (*container[3], ("f", "length")))
+        from .cells import child_load
+
+        return child_load(container, (("f", "length"),))
     if kind == "const" and container[1] == 0:
         return const(0)
     if kind == "abi" and abi_array(container[4]) is not None:
@@ -904,9 +962,20 @@ def _assumed(st: State, label: str, required: bool = False) -> State:
     return _acted(replace(st, pc=mk_and([st.pc, mark])), mark) if required else _acted(st, mark)
 
 
-def _acted(st: State, call: Term) -> State:
-    """``st`` having called out: a mark in its writes, which merges keep per path like any other write."""
-    return State(st.pc, st.env, {**st.store, ("act", call, ()): TRUE}, st.ret, halted=st.halted, mem=st.mem)
+def _acted(st: State, call: Term, site: tuple = (), invalidate_world: bool = True) -> State:
+    """Record a call in execution order. Unmodeled execution can change foreign storage;
+    a proxy dispatch proof defers that execution to its separately verified implementation."""
+    changed = stored(st.store, ("act", call, site), TRUE)
+    if invalidate_world:
+        changed = stored(changed, ("havoc", "*world*", "*", "unmodeled_action"), TRUE)
+    return State(st.pc, st.env, changed, st.ret, halted=st.halted, mem=st.mem)
+
+
+def _unfollowed_state(st: State, label: str) -> State:
+    """Unknown internal execution shares its caller's memory as well as persistent state."""
+    after = _acted(replace(st, pc=mk_and([st.pc, unknown(label)])), unknown(label))
+    store = {k: (unknown(f"{label}:memory:{k[1]}") if k[0] == "heap" else v) for k, v in after.store.items()}
+    return replace(after, store=store, mem=())
 
 
 def _changes(exit_: Exit) -> Term:
@@ -922,6 +991,9 @@ def _changes(exit_: Exit) -> Term:
 
 
 def unwritten(key: tuple) -> Term:
+    from .cells import base_location
+
+    key = base_location(key)
     if key[0] == "heap":
         return unknown("unallocated")
     if key[0] in ("act", "emit", "havoc"):
@@ -930,7 +1002,7 @@ def unwritten(key: tuple) -> Term:
         return mk("const", 0, "uint256")
     if key[0] == "raw":
         return mk("rawload", key[1], key[2])
-    return mk("load", key[0], key[1], key[2])
+    return mk("load", *key)
 
 
 def _merge_ret(states: list[Any]) -> tuple | None:
@@ -959,23 +1031,39 @@ def _select(pcs: list[Term], values: list[Term]) -> Term:
 def _short_circuits(irs: list[Any]) -> dict[int, tuple[int, Any]]:
     """For each ``||``/``&&`` in a node's IR whose right operand is computed by a contiguous run of operations after
     the left's: the run's start -> (the operator's index, the operator)."""
-    produced = {id(ir.lvalue): i for i, ir in enumerate(irs) if getattr(ir, "lvalue", None) is not None}
+    produced: dict[int, list[int]] = {}
+    for i, ir in enumerate(irs):
+        if getattr(ir, "lvalue", None) is not None:
+            produced.setdefault(id(ir.lvalue), []).append(i)
 
     def producers(var: Any, before: int) -> set[int]:
         out: set[int] = set()
-        stack = [var]
+        stack = [(var, before)]
         while stack:
-            index = produced.get(id(stack.pop()))
-            if index is None or index >= before or index in out:
+            value, cutoff = stack.pop()
+            index = next((i for i in reversed(produced.get(id(value), ())) if i < cutoff), None)
+            if index is None or index in out:
                 continue
             out.add(index)
-            stack.extend(getattr(irs[index], "read", None) or [])
+            stack.extend((v, index) for v in getattr(irs[index], "read", None) or [])
         return out
 
     spans: dict[int, tuple[int, Any]] = {}
     for b, ir in enumerate(irs):
         if not isinstance(ir, Binary) or ir.type not in (BinaryType.OROR, BinaryType.ANDAND):
             continue
+        expression = getattr(ir, "expression", None)
+        rhs = _span(getattr(expression, "expression_right", None))
+        if rhs is not None and rhs[1] > rhs[0]:
+            inside = {
+                i
+                for i, op in enumerate(irs[:b])
+                if (where := _span(getattr(op, "expression", None))) and rhs[0] <= where[0] < where[1] <= rhs[1]
+            }
+            if inside:
+                start = min(inside)
+                spans[start if inside == set(range(start, b)) else -1] = (b, ir)
+                continue
         left = producers(ir.variable_left, b)
         right = producers(ir.variable_right, b) - left
         if not right:
@@ -995,8 +1083,25 @@ class Lowerer:
     top level, the calling contract and the callee's address when another contract's check is lowered for its caller.
     """
 
-    def __init__(self, contract: Contract, sender: Term = CALLER, this: Term = THIS, code: Term | None = None):
+    def __init__(
+        self,
+        contract: Contract,
+        sender: Term = CALLER,
+        this: Term = THIS,
+        code: Term | None = None,
+        call_handler=None,
+        journal=None,
+        frame=None,
+        frame_identity=None,
+    ):
         self.contract = contract
+        self.call_handler = call_handler
+        self.journal = journal
+        self.resolver: Any = None
+        self._frame_value = frame.value if frame is not None else mk("callvalue")
+        self._frame_data = frame.calldata if frame is not None else CALLDATA
+        self._static = frame.static if frame is not None else False
+        self._frame_identity = 1 if frame_identity is None else frame_identity
         self.sender = sender
         self.this = this
         self._outer_this = this
@@ -1014,6 +1119,8 @@ class Lowerer:
         self._vars: dict[int, Any] = {}
         # Objects allocated so far (``("heap", n)``), numbered in the order the lowering meets them.
         self._objects = 0
+        self._memory_bases = 0
+        self._object_types: dict = {}
         # Why the statement being lowered may slice calldata in a way Slither's IR drops (``data[4:]``): the label
         # its dynamic calldata reads as (``unsupported:slice``, or ``unsupported:slice_source`` where its source
         # can't be read faithfully), else empty.
@@ -1031,8 +1138,64 @@ class Lowerer:
         # Whether assembly read storage this lowering may not place (``sload`` in text it couldn't parse).
         self.raw_reads = False
         self.exits: list = []
+        if journal is not None:
+            journal.attach(self)
         # What each action assumed to succeed (an ``assumed`` mark: a creation, ether sent, a low-level or assembly
         # call) was handed, per time it was made: whether its outcome may turn on what the caller picks.
+
+    def _call_frame(self):
+        from .model import CallFrame
+
+        return CallFrame(
+            self.code,
+            self.this,
+            self.sender,
+            self._frame_value if self._payable else const(0),
+            self._frame_data,
+            self._static,
+        )
+
+    def _defer_call(
+        self,
+        st: State,
+        kind: str,
+        target: Term,
+        calldata: Term,
+        value: Term,
+        gas: Term | None,
+        reason: str,
+        operands: tuple = (),
+        decoded_call: Term | None = None,
+        raw: Term | None = None,
+        intrinsic: str | None = None,
+        input_guard: Term = TRUE,
+    ) -> None:
+        if self.journal is not None and self.call_handler is not None:
+            self.journal.suspend(
+                "call",
+                {
+                    "kind": "call",
+                    "reason": reason,
+                    "mode": kind,
+                    "target": _convert("address", target),
+                    "calldata": calldata,
+                    "value": value,
+                    "gas": gas,
+                    "operands": operands,
+                    "decoded_call": decoded_call,
+                    "raw": raw,
+                    "intrinsic": intrinsic,
+                    "input_guard": input_guard,
+                    "return_size_checked": checked_return_size(self.contract),
+                    "caught": self._node.type == NodeType.TRY,
+                    "caller_frame": self._call_frame().record(),
+                    "memory_frame": self._frame_identity,
+                    "state": st,
+                },
+            )
+
+    def _site(self, operation):
+        return self.journal.references.ref(operation) if self.journal is not None else id(operation)
 
     def success(self, function: Function) -> Term:
         """The condition under which an external call to ``function`` returns."""
@@ -1083,6 +1246,9 @@ class Lowerer:
         zero for a view call (a ``staticcall`` carries none) and unknown for an action, and ``msg.data``, ``msg.sig``
         and ``calldatasize`` are the callee's own, never the outer call's. ``args``, ``sender`` and ``this`` stay as
         the caller's terms give them, whatever of the outer frame they read (``check(msg.data)``)."""
+        self._static = view
+        self._frame_value = const(0) if view else unknown("callee:msg.value")
+        self._frame_data = unknown("callee:msg.data")
         shield: dict[Term, Term] = {}
 
         def shielded(term: Term, name: str, type_: str) -> Term:
@@ -1098,7 +1264,7 @@ class Lowerer:
         if self.code == self._outer_this:
             self.code = self.this
         pc, ret = self.returns(function, given + list(args[len(given) :]))
-        signature = function.solidity_signature or f"{function.name}()"
+        signature = abi_signature(function) or f"{function.name}()"
         own = {
             CALLDATA: unknown("callee:msg.data"),
             mk("sig"): const(int.from_bytes(keccak(text=signature)[:4], "big"), "bytes4"),
@@ -1116,12 +1282,88 @@ class Lowerer:
 
         return framed(pc), tuple(framed(r) for r in ret)
 
+    def called_paths(self, function: Function, args: list[Term], store: dict, *, guard: Term = TRUE) -> list[Exit]:
+        """External execution with a separate memory frame and the current shared storage.
+
+        Capture outer frame leaves before lowering, so framing the callee never rewrites
+        values already computed by its caller. Return values are deep copies, not pointers.
+        """
+        incoming = [
+            guard,
+            *args,
+            self.sender,
+            self.this,
+            self._frame_data,
+            self._frame_value,
+            *store.keys(),
+            *store.values(),
+        ]
+        captured = {}
+        for value in incoming:
+            for kind in ("sig", "callvalue", "calldatasize", "arg"):
+                for term in subterms(value, kind):
+                    if kind == "arg" and term != CALLDATA:
+                        continue
+                    captured.setdefault(term, mk("frame_value", self._frame_identity, len(captured)))
+        restore = {value: term for term, value in captured.items()}
+        given = [replace_terms(value, captured) for value in args]
+        self._frame_data = replace_terms(self._frame_data, captured)
+        self._frame_value = replace_terms(self._frame_value, captured)
+        self.sender, self.this = replace_terms(self.sender, captured), replace_terms(self.this, captured)
+        state = {
+            replace_terms(key, captured): replace_terms(value, captured)
+            for key, value in store.items()
+            if key[0] != "heap"
+        }
+        self._steps = 0
+        self._payable = True
+        self._arguments = tuple(given)
+        self._calldata_min = _calldata_min(function)
+        entry_guard = mk_and(
+            [
+                replace_terms(guard, captured),
+                TRUE if getattr(function, "payable", False) else mk_cmp("eq", self._frame_value, const(0)),
+            ]
+        )
+        exits = self.paths(function, State(entry_guard, {id(p): a for p, a in zip(function.parameters, given)}, state))
+        frame = {
+            CALLDATA: self._frame_data,
+            mk("callvalue"): self._frame_value,
+            mk("sig"): mk("calldata_selector", self._frame_data),
+        }
+        for exit_ in exits:
+            for value in [exit_.pc, *(exit_.ret or ()), *exit_.store.keys(), *exit_.store.values()]:
+                frame.update({t: mk("len", self._frame_data) for t in subterms(value, "calldatasize")})
+
+        def framed(value):
+            return replace_terms(replace_terms(value, frame), restore)
+
+        self.exits = [
+            Exit(
+                framed(e.pc),
+                {framed(k): framed(v) for k, v in e.store.items()},
+                tuple(framed(v) for v in e.ret) if e.ret is not None else None,
+                e.halted,
+            )
+            for e in exits
+        ]
+        return self.exits
+
+    def _decoder(self) -> bool | None:
+        from .abi_values import strict_decoder
+
+        function = getattr(self._node, "function", None)
+        scope = getattr(function, "file_scope", None)
+        if scope is None:
+            return None
+        return strict_decoder(self.contract, scope)
+
     def _from_here(self, call: Term | None) -> Term | None:
         """A call this code makes, carrying who makes it where that isn't the contract decided: a callee's own calls
         come from the callee (``msg.sender`` there), so they are asked of the chain and lowered from it."""
-        if call is None or call[0] != "call" or len(call) > 5 or self.this == THIS:
+        if call is None or call[0] != "call" or (len(call) > 5 and call[5] is not None):
             return call
-        return mk(*call, self.this)
+        return mk(*call[:5], self.this, *call[6:])
 
     def paths(self, function: Function, state: State) -> list[Exit]:
         """Each way a call of ``function`` from ``state`` returns, memory left behind: the values it returns read out of
@@ -1129,21 +1371,42 @@ class Lowerer:
         out = []
         for e in self.run(function, state, 0):
             heap = State(e.pc, {}, e.store)
+            if e.store.get(_HEAP_UNPLACED, FALSE) != FALSE and e.ret and not e.halted:
+                label = "unsupported:abi_return_allocator"
+                if self.journal is not None:
+                    self.journal.suspend(
+                        "operation",
+                        {
+                            "kind": "abi_return_encoding",
+                            "reason": label,
+                            "function": self.journal.references.ref(function),
+                            "state": State(e.pc, e.env or {}, e.store, e.ret),
+                            "memory_frame": self._frame_identity,
+                            "caller_frame": self._call_frame().record(),
+                        },
+                    )
+                e = replace(e, pc=mk_and([e.pc, unknown(label)]), ret=(unknown(label),), halted=True)
+            if any(e.store.get(k, FALSE) != FALSE for k in (_HEAP_UNPLACED, _HEAP_ALIASES)) and e.ret and not e.halted:
+                heap = self._unplaced_heap(heap)  # ABI return encoding runs after modifier epilogues
             ret = None if e.ret is None else tuple(self._deep(v, heap) for v in e.ret)
-            out.append(Exit(e.pc, {k: v for k, v in e.store.items() if k[0] != "heap"}, ret))
+            out.append(Exit(e.pc, {k: v for k, v in e.store.items() if k[0] != "heap"}, ret, halted=e.halted))
         return out
 
     def run(self, function: Function, state: State, depth: int) -> list[Exit]:
         if depth == 0:
-            _STEPS[0] = VALUE_STEPS
+            _STEPS[0] = self.journal.value_steps if self.journal is not None else VALUE_STEPS
         getter = self._getter(function, state) if function.entry_point is None else None
         if getter is not None:
             return [getter]
-        if function.entry_point is None or depth > MAX_DEPTH or function in self._stack:
+        if self.journal is not None and depth > self.journal.call_depth:
+            self.journal.suspend("internal_call_depth", (function, state, depth))
+        if function.entry_point is None or (self.journal is None and (depth > MAX_DEPTH or function in self._stack)):
             if depth > 0:
                 self.lost = True  # code run without being followed: whatever it writes goes unrecorded
-            ret = tuple(unknown(f"unanalysed:{function.canonical_name}") for _ in function.returns)
-            return [Exit(mk_and([state.pc, unknown(f"unanalysed:{function.canonical_name}")]), state.store, ret)]
+            label = f"unanalysed:{function.canonical_name}"
+            ret = tuple(unknown(label) for _ in function.returns)
+            after = _unfollowed_state(state, label)
+            return [Exit(after.pc, after.store, ret, halted=True)]
         for r in function.returns:
             state.env.setdefault(id(r), _zero(r.type))
         state = _function_scoped_locals(function, state)
@@ -1182,26 +1445,30 @@ class Lowerer:
     def _getter(self, function: Function, state: State) -> Exit | None:
         """A body-less declaration that a public state variable implements (an interface's ``fee()`` met by
         ``uint256 public fee``): the variable's getter, returning its storage keyed by the arguments."""
-        from slither.core.solidity_types import MappingType
+        from slither.core.solidity_types import ArrayType, MappingType
 
         var = next(
             (v for v in self.contract.state_variables if v.name == function.name and v.visibility == "public"), None
         )
         if var is None:
             return None
-        type_ = var.type
-        for _ in function.parameters:
-            if not isinstance(type_, MappingType):
-                return None  # an array's getter reverts past its length
-            type_ = type_.type_to
-        if function.parameters:
-            keys = tuple(("k", self.val(p, state)) for p in function.parameters)
-            value = self._read_at((self.this, var.name, keys), state)
-        else:
-            value = self.val(var, state)
+        type_, location, pc = var.type, (self.this, storage_name(self.contract, var), ()), state.pc
+        for p in function.parameters:
+            key = self.val(p, state)
+            if isinstance(type_, MappingType):
+                type_ = type_.type_to
+            elif isinstance(type_, ArrayType):
+                bound = self._storage_bound(type_, location, key, state)
+                if bound is not None:
+                    pc = mk_and([pc, bound])
+                type_ = type_.type
+            else:
+                return None
+            location = _extend(location, ("k", key))
+        value = self._read_at(location, state) if function.parameters else self.val(var, state)
         if len(function.returns) == 1:
-            return Exit(state.pc, state.store, (value,))
-        return Exit(state.pc, state.store, tuple(unknown(f"getter:{var.name}") for _ in function.returns))
+            return Exit(pc, state.store, (value,))
+        return Exit(pc, state.store, tuple(unknown(f"getter:{var.name}") for _ in function.returns))
 
     # Graph walk -------------------------------------------------------------------------------------------------------
 
@@ -1220,6 +1487,21 @@ class Lowerer:
         header), the states reaching ``stop`` go to ``left`` for the run that asked, which goes on from there: the
         iteration is a region of the graph, never the rest of the function, so an enclosing loop is never entered
         half way through."""
+        if state.pc == FALSE:
+            return []
+        if self.journal is not None and unrolled >= self.journal.loop_iterations:
+            self.journal.suspend(
+                "loop_iterations",
+                {
+                    "kind": "loop",
+                    "function": function,
+                    "entry": start,
+                    "state": state,
+                    "iterations": unrolled,
+                    "region_exit": stop,
+                    "frame": self._call_frame().record(),
+                },
+            )
         order, edges = _schedule(start, stop)
         incoming: dict[int, list[State]] = {id(start): [state]}
         arrival: dict[int, State] = {}
@@ -1255,7 +1537,9 @@ class Lowerer:
                         # The loop is done after this iteration: exact, no forgetting.
                         incoming.setdefault(id(leave), []).append(out)
                         continue
-                    if again == TRUE and unrolled < MAX_UNROLL and self._steps < UNROLL_BUDGET:
+                    if again == TRUE and (
+                        self.journal is not None or (unrolled < MAX_UNROLL and self._steps < UNROLL_BUDGET)
+                    ):
                         # Another iteration whose condition is known: run it, then on from where it leaves the loop.
                         exits.extend(self._iterate(function, succ, out, depth, body, unrolled, leave, incoming))
                         continue
@@ -1266,7 +1550,9 @@ class Lowerer:
                         ends = State(mk_and([out.pc, mk_not(again)]), out.env, out.store, out.ret)
                         incoming.setdefault(id(leave), []).append(ends)
                         more = State(mk_and([out.pc, again]), out.env, out.store, out.ret)
-                    if again != TRUE and unrolled < MAX_SYMBOLIC_UNROLL and self._steps < UNROLL_BUDGET:
+                    if again != TRUE and (
+                        self.journal is not None or (unrolled < MAX_SYMBOLIC_UNROLL and self._steps < UNROLL_BUDGET)
+                    ):
                         exits.extend(self._iterate(function, succ, more, depth, body, unrolled, leave, incoming))
                     else:
                         after, leaving = self._widen(function, more, entry, succ, leave)
@@ -1307,7 +1593,8 @@ class Lowerer:
         """A path this lowering can't follow further: it may return, with unknown values, and write anything."""
         self.lost = True
         ret = None if isinstance(function, Modifier) else tuple(unknown(label) for _ in function.returns)
-        return Exit(mk_and([st.pc, unknown(label)]), st.store, ret)
+        after = _unfollowed_state(st, label)
+        return Exit(after.pc, after.store, ret, halted=True)
 
     def _widen(self, function: Function, more: State, entry: State, start: Any, leave: Any) -> tuple[State, list]:
         """The loop entered at ``start`` (its header, or a ``do``'s body) after more iterations than were run: every
@@ -1352,7 +1639,7 @@ class Lowerer:
                 env[k] = forget(f"#{len(done)}", v)
                 done.add(k)
         # Objects in memory the body may write into, and those they hold: their contents forgotten too.
-        objects: set = set()
+        objects: set = {k[1] for k in more.store if k[0] == "heap"} if effects["everything"] else set()
         pending = [more.env.get(id(var)) for var in effects["objects"]]
         while pending:
             value = pending.pop()
@@ -1383,7 +1670,7 @@ class Lowerer:
         for c, name in marks:
             store = stored(store, ("havoc", c, name, tag), TRUE)
         if effects["calls"]:
-            store[("act", mk("assumed", f"{tag}:call"), ())] = TRUE
+            store = _acted(State(more.pc, env, store, more.ret), mk("assumed", f"{tag}:call")).store
         pc = mk_and([more.pc, unknown(tag)])
         after = State(pc, env, store, more.ret)
         leaving = []
@@ -1430,13 +1717,13 @@ class Lowerer:
         def lvalue(var: Any) -> None:
             if isinstance(var, StateVariable):
                 if not (var.is_constant or var.is_immutable):
-                    out["storage"].add((self.this, var.name))
+                    out["storage"].add((self.this, storage_name(self.contract, var)))
                 return
             if isinstance(var, ReferenceVariable):
                 local(var)
                 origin = getattr(var, "points_to_origin", None)
                 if isinstance(origin, StateVariable):
-                    out["storage"].add((self.this, origin.name))
+                    out["storage"].add((self.this, storage_name(self.contract, origin)))
                 elif origin is not None and getattr(origin, "is_storage", False):
                     pointers.append(origin)  # where it lands: placed once every pointer the loop moves is known
                 elif origin is not None:
@@ -1541,7 +1828,7 @@ class Lowerer:
                 source = ir.rvalue
                 origin = getattr(source, "points_to_origin", None) if isinstance(source, ReferenceVariable) else source
                 if isinstance(origin, StateVariable) and not (origin.is_constant or origin.is_immutable):
-                    places.add((self.this, origin.name))
+                    places.add((self.this, storage_name(self.contract, origin)))
                     continue
                 place = self._fixed_place(origin, function, st)
                 if place is None:
@@ -1592,7 +1879,11 @@ class Lowerer:
             names, raw, transient, everything, calls, caller = set(), False, False, False, False, False
             elsewhere = False
             try:
-                names = {v.name for v in callee.all_state_variables_written() if not (v.is_constant or v.is_immutable)}
+                names = {
+                    storage_name(self.contract, v)
+                    for v in callee.all_state_variables_written()
+                    if not (v.is_constant or v.is_immutable)
+                }
                 reads = {v.name for v in callee.all_solidity_variables_read()}
                 caller = bool(reads & {"msg.sender", "tx.origin"})
                 for c in callee.all_solidity_calls():
@@ -1629,7 +1920,7 @@ class Lowerer:
                 # Handed a part of storage: the variable it roots in, placed with the loop's own pointers.
                 origin = getattr(a, "points_to_origin", None) if isinstance(a, ReferenceVariable) else a
                 if isinstance(origin, StateVariable) and not (origin.is_constant or origin.is_immutable):
-                    out["storage"].add((self.this, origin.name))
+                    out["storage"].add((self.this, storage_name(self.contract, origin)))
                 elif origin is not None:
                     pointers.append(origin)
                 else:
@@ -1638,20 +1929,80 @@ class Lowerer:
                 local(a)  # memory handed by reference: the callee may write into it
                 out["objects"].append(a)
 
-    def _loop_condition(self, header: Any, st: State, depth: int) -> Term:
-        """The header's condition evaluated in ``st``, or ``None`` when it isn't a loop header."""
+    def _resolve_condition(self, condition: Term) -> Term:
+        """Resolve only modeled, frame-independent values already read through the current state.
+
+        Do not follow calls here: their effects belong to normal execution, and resolving them against
+        entry storage would bypass preceding writes. The resolver records block specialization.
+        """
+        if contains(condition, frozenset({"unknown", "opaque", "assumed", "call", "delegate"})):
+            return condition
+        if condition[0] in ("and", "or"):
+            parts = (self._resolve_condition(t) for t in condition[1])
+            return mk_and(parts) if condition[0] == "and" else mk_or(parts)
+        if condition[0] == "not":
+            return mk_not(self._resolve_condition(condition[1]))
+        if self.resolver is None or _frame_bound(condition):
+            return condition
+        value = self.resolver.concrete(condition)
+        return condition if value is None else TRUE if value else FALSE
+
+    def _loop_condition(self, header: Any, st: State, depth: int) -> Term | None:
+        """Preview an elidable header. Effectful headers must execute normally, even on the last test."""
         if header.type != NodeType.IFLOOP:
-            return unknown("not_a_loop")
+            return None
         self._node = header
         bad, cuts = _sliced(header)
-        self._sliced = bad or ("unsupported:slice" if cuts else "")
+        if bad or cuts:
+            return None
+        # These operations only compute temporaries or bind references. Calls and writes to user
+        # variables (including a post-increment in the condition) cannot be elided.
         for ir in header.irs:
             if isinstance(ir, Condition):
-                return self.val(ir.value, st)
+                break
+            if not self._in_yul() and any(
+                contains(self.val(v, st), frozenset({"stackword"})) for v in getattr(ir, "read", ()) or ()
+            ):
+                return None  # Solidity cleanup of an assembly register may introduce an unsupported exit
+            if not (
+                isinstance(ir, (Binary, Unary, TypeConversion))
+                and isinstance(ir.lvalue, TemporaryVariable)
+                or isinstance(ir, (Length, Index, Member))
+                and isinstance(ir.lvalue, ReferenceVariable)
+            ):
+                return None
+        self._sliced = ""
+        before = st
+        st = replace(st, env=dict(st.env), store=dict(st.store))
+        for ir in header.irs:
+            if isinstance(ir, Condition):
+                if (st.pc, st.store, st.mem, st.ret, st.halted) != (
+                    before.pc,
+                    before.store,
+                    before.mem,
+                    before.ret,
+                    before.halted,
+                ):
+                    return None  # a bounds/overflow check or memory effect must run at the real header
+                return self._resolve_condition(self._operand(ir.value, ir.expression, st))
             st = self._exec(ir, st, depth)
-        return unknown("no_condition")
+        return None
 
     def _step(self, function: Function, node: Any, st: State, depth: int, exits: list[Exit], body: Any):
+        if self.journal is None:
+            yield from self._step_uncached(function, node, st, depth, exits, body)
+            return
+
+        def execute():
+            local_exits = []
+            successors = list(self._step_uncached(function, node, st, depth, local_exits, body))
+            return successors, local_exits
+
+        successors, local_exits = self.journal.run(self, "node", node, (st, depth, bool(body)), execute)
+        exits.extend(local_exits)
+        yield from successors
+
+    def _step_uncached(self, function: Function, node: Any, st: State, depth: int, exits: list[Exit], body: Any):
         """Run one node; yield (successor, state) pairs. Exits and dead paths yield nothing."""
         self._node = node
         self._sliced, cuts = _sliced(node)
@@ -1722,9 +2073,15 @@ class Lowerer:
             if node.sons:
                 yield node.sons[0], State(mk_and([after.pc, ok]), after.env, after.store, after.ret)
             catches = node.sons[1:]
+            # Reverting the callee rolls back its writes, not this frame's return-data buffer.
+            caught_store = {
+                **st.store,
+                _RETURN_BUFFER: after.store.get(_RETURN_BUFFER, _EMPTY_RETURN),
+                _RETURN_ARITY: after.store.get(_RETURN_ARITY, const(0)),
+            }
             for i, son in enumerate(catches):
                 which = TRUE if len(catches) == 1 else unknown(f"catch:{node.node_id}:{i}")  # by the revert data
-                yield son, State(mk_and([st.pc, caught, which]), dict(st.env), st.store, st.ret)
+                yield son, State(mk_and([st.pc, caught, which]), dict(st.env), caught_store, st.ret)
             return
         cond: Term | None = None
         custom = self._require_with_error(node, st)
@@ -1738,9 +2095,8 @@ class Lowerer:
         irs = list(node.irs) if custom is None else []
         spans = _short_circuits(irs)
         if -1 in spans:
-            # An operand that runs only when the other doesn't decide, its operations not separable from the rest:
-            # whether they run (a call, a check) is unknown.
-            st = replace(st, pc=mk_and([st.pc, unknown("unsupported:short_circuit")]))
+            exits.append(self._unfollowed(function, st, "unsupported:short_circuit"))
+            return
         skip_to = 0
         for index, ir in enumerate(irs):
             if index < skip_to:
@@ -1750,6 +2106,7 @@ class Lowerer:
                 # hold on that branch alone (Slither's IR evaluates both sides).
                 skip_to, binary = spans[index]
                 st = self._short_circuit(irs[index:skip_to], binary, st, depth)
+                skip_to += 1  # the short-circuit operation already produced its result
                 if st.pc == FALSE:
                     return
                 continue
@@ -1771,7 +2128,9 @@ class Lowerer:
                 exits.append(Exit(st.pc, st.store, values, env=env))
                 return
             if isinstance(ir, Condition):
-                cond = self.val(ir.value, st)
+                cond = self._operand(ir.value, ir.expression, st)
+                if node.type in (NodeType.IF, NodeType.IFLOOP) and cond is not None:
+                    cond = self._resolve_condition(cond)
                 continue
             st = self._exec(ir, st, depth)
             if st.pc == FALSE:
@@ -1860,7 +2219,7 @@ class Lowerer:
         it runs, in every version (Slither marks Yul locals ``memory``, though each is one stack word); a Yul function's
         parameters, declared the same way at its entry, hold what they were handed."""
         yul = getattr(getattr(self._node, "scope", None), "is_yul", False)
-        if yul and not _reference_typed(declared.type) and not any(p is declared for p in function.parameters):
+        if yul and not any(p is declared for p in function.parameters):
             # Sibling Yul blocks each declaring ``x``: every use of the name is bound to one of them, the cell each
             # declaration starts again (``_same_named``).
             declared = self._same_named(function)[0].get(id(declared), declared)
@@ -1891,9 +2250,15 @@ class Lowerer:
         node = self._node
         yul = bool(getattr(getattr(node, "scope", None), "is_yul", False))
         bits, is_signed = _integer(_operand_type(ir))
+        if yul:
+            bits, is_signed = 256, _signed_yul_operation(ir)
         conditions: list = []
         if op in ("div", "mod") and not yul:
             conditions.append(mk_not(mk_cmp("eq", b, const(0))))
+        if op in ("shl", "shr") and not yul:
+            # Older Solidity accepts signed shift counts and checks them at
+            # runtime. For modern unsigned counts this follows from their type.
+            conditions.append(mk_cmp("ge", b, const(0)))
         constants = isinstance(ir.variable_left, Constant) and isinstance(ir.variable_right, Constant)
         checked = (
             op in ("add", "sub", "mul", "pow")
@@ -1906,7 +2271,13 @@ class Lowerer:
             name = f"int{bits}"
             x = _convert(name, a)
             y = b if op in ("shl", "shr", "pow") else _convert(name, b)
-            value = _convert(name, mk_op({"div": "sdiv", "mod": "smod", "shr": "sar"}.get(op, op), (x, y)))
+            version = _solc_version(self.contract)
+            if op == "shr" and not yul and version is not None and version < [0, 5]:
+                # Legacy Solidity used SDIV by the EVM's wrapped EXP result,
+                # including its signed denominator at255 and zero at256+.
+                value = _convert(name, mk_op("sdiv", (x, mk_op("pow", (const(2), y)))))
+            else:
+                value = _convert(name, mk_op({"div": "sdiv", "mod": "smod", "shr": "sar"}.get(op, op), (x, y)))
         else:
             x, y = a, b
             value = mk_op(op, (a, b))
@@ -1916,15 +2287,21 @@ class Lowerer:
             conditions.append(mk_cmp("le", y, x))  # an unsigned difference in range: exactly ``b <= a``
         elif checked:
             conditions.append(mk_op("fits", (const(op, "string"), x, y, const(bits), const(is_signed, "bool"))))
-        return value, conditions
+        return (_evm_word(value) if yul and is_signed else value), conditions
 
     def _short_circuit(self, irs: list[Any], binary: Any, st: State, depth: int) -> State:
-        left = self.val(binary.variable_left, st)
+        left = self._resolve_condition(self.val(binary.variable_left, st))
         guard = mk_not(left) if binary.type == BinaryType.OROR else left
         ran = replace(st, pc=mk_and([st.pc, guard]))
+        if ran.pc == FALSE:
+            return self._write(binary.lvalue, TRUE if binary.type == BinaryType.OROR else FALSE, st)
         spans = _short_circuits(irs)
         if -1 in spans:
-            ran = replace(ran, pc=mk_and([ran.pc, unknown("unsupported:short_circuit")]))
+            self.lost = True
+            after = _unfollowed_state(ran, "unsupported:short_circuit")
+            self._halts.append(Exit(after.pc, after.store, None, halted=True))
+            skipped = replace(st, pc=mk_and([st.pc, mk_not(guard)]))
+            return self._write(binary.lvalue, TRUE if binary.type == BinaryType.OROR else FALSE, skipped)
         skip_to = 0
         for index, ir in enumerate(irs):
             if index < skip_to or ran.pc == FALSE:
@@ -1932,19 +2309,19 @@ class Lowerer:
             if index in spans:
                 skip_to, inner = spans[index]
                 ran = self._short_circuit(irs[index:skip_to], inner, ran, depth)
+                skip_to += 1
                 continue
             ran = self._exec(ir, ran, depth)
-        if ran.pc != FALSE:
-            # The operand as a value: a storage reference (``isAdmin[msg.sender]``) means nothing once merged.
-            env = dict(ran.env)
-            env[id(binary.variable_right)] = self.val(binary.variable_right, ran)
-            ran = replace(ran, env=env)
+        # Capture both values at their evaluation points. The RHS may have changed
+        # the left operand's storage/local source; merging then rereading it is wrong.
+        right = self.val(binary.variable_right, ran) if ran.pc != FALSE else FALSE
         skipped = replace(st, pc=mk_and([st.pc, mk_not(guard)]))
         live = [x for x in (ran, skipped) if x.pc != FALSE]
         if not live:
             return State(FALSE, st.env, st.store, st.ret)
         merged = merge(live)
-        return State(merged.pc, merged.env, merged.store, st.ret)
+        value = mk_or([left, right]) if binary.type == BinaryType.OROR else mk_and([left, right])
+        return self._write(binary.lvalue, value, replace(merged, ret=st.ret))
 
     def _succeed(self, node: Any, st: State, sons: list[Any]):
         if not sons:
@@ -1982,9 +2359,12 @@ class Lowerer:
         env[_LOST_FRAME] = FALSE
         env.update({id(p): self.val(a, st) for p, a in zip(modifier.parameters, ir.arguments)})
         env = _function_scoped_locals(modifier, State(st.pc, env, st.store)).env
-        if modifier.entry_point is None or depth > MAX_DEPTH:
+        if self.journal is not None and depth > self.journal.call_depth:
+            self.journal.suspend("internal_call_depth", (modifier, st, depth))
+        if modifier.entry_point is None or (self.journal is None and depth > MAX_DEPTH):
             self.lost = True  # whatever the modifier writes goes unrecorded
-            return body(State(mk_and([st.pc, unknown(f"unanalysed:{modifier.canonical_name}")]), env, st.store))
+            label = f"unanalysed:{modifier.canonical_name}"
+            return [self._unfollowed(function, State(st.pc, env, st.store), label)]
         out = self._run_from(modifier, modifier.entry_point, State(st.pc, env, st.store, None), depth + 1, body)
         # A modifier that returns before ``_`` returns the function's defaults.
         defaults = tuple(_zero(r.type) for r in function.returns)
@@ -1992,14 +2372,119 @@ class Lowerer:
 
     # Operations -------------------------------------------------------------------------------------------------------
 
+    def _clean_register_reads(self, ir: Any, st: State) -> State:
+        from .abi_values import stack_value
+
+        if self._in_yul():
+            return st
+        function = self._node.function
+        for var in getattr(ir, "read", ()) or ():
+            value = self._value(var, st)
+            if not isinstance(value, Term) or not contains(value, frozenset({"stackword"})):
+                continue
+            exempt = False
+            if isinstance(ir, Assignment):
+                exempt = str(getattr(var, "type", None)) == str(getattr(ir.lvalue, "type", None))
+            elif isinstance(ir, TypeConversion):
+                exempt = str(getattr(var, "type", None)) == str(ir.type)
+            elif isinstance(ir, HighLevelCall) and not isinstance(ir, LibraryCall):
+                exempt = var is ir.destination or var in ir.arguments
+            elif isinstance(ir, (InternalCall, LibraryCall)):
+                exempt = any(
+                    var is arg and str(getattr(arg, "type", None)) == str(p.type)
+                    for p, arg in zip(ir.function.parameters, ir.arguments)
+                )
+            elif isinstance(ir, SolidityCall):
+                exempt = ir.function.name.startswith("abi.encode")
+            elif isinstance(ir, Return):
+                exempt = any(
+                    var is arg and str(getattr(arg, "type", None)) == str(p.type)
+                    for p, arg in zip(function.returns, ir.values)
+                )
+            elif isinstance(ir, NewStructure):
+                exempt = any(
+                    var is arg and str(getattr(arg, "type", None)) == str(p.type)
+                    for p, arg in zip(ir.structure.elems_ordered, ir.arguments)
+                )
+            if exempt:
+                continue
+
+            def clean(term):
+                if term[0] == "stackword":
+                    return stack_value(term[1], term[2])[1]
+                if term[0] == "ite":
+                    return mk_ite(term[1], clean(term[2]), clean(term[3]))
+                return mk_and(stack_value(t[1], t[2])[1] for t in subterms(term, "stackword"))
+
+            valid = clean(value)
+            bad = mk_and([st.pc, mk_not(valid)])
+            if bad != FALSE:
+                after = _unfollowed_state(replace(st, pc=bad), "unsupported:dirty_yul_register")
+                self._halts.append(Exit(after.pc, after.store, (unknown("dirty_yul_register"),), halted=True))
+            st = replace(st, pc=mk_and([st.pc, valid]))
+        return st
+
     def _exec(self, ir: Any, st: State, depth: int) -> State:
+        if self.journal is not None:
+            return self.journal.run(self, "operation", ir, (st, depth), lambda: self._exec_uncached(ir, st, depth))
+        return self._exec_uncached(ir, st, depth)
+
+    def _exec_uncached(self, ir: Any, st: State, depth: int) -> State:
+        before_buffer = st.store.get(_RETURN_BUFFER, _EMPTY_RETURN)
+        before_arity = st.store.get(_RETURN_ARITY, unknown("return_arity"))
+        self._last_call = before_buffer
+        self._last_returns = before_arity[1] if before_arity[0] == "const" else None
+        st = self._clean_register_reads(ir, st)
+        if st.pc == FALSE:
+            return st
+        if any(st.store.get(k, FALSE) != FALSE for k in (_HEAP_UNPLACED, _HEAP_ALIASES)):
+            # Compiler-generated ABI/event/precompile buffers also use the allocator.
+            # Only operations known not to allocate can keep older heap objects intact.
+            local = isinstance(
+                ir,
+                (
+                    Assignment,
+                    Binary,
+                    Unary,
+                    TypeConversion,
+                    Condition,
+                    Index,
+                    Member,
+                    Length,
+                    Unpack,
+                    Delete,
+                    Nop,
+                    InternalCall,
+                ),
+            )
+            local_library = isinstance(ir, LibraryCall) and ir.function.visibility in ("internal", "private")
+            builtin = isinstance(ir, SolidityCall) and (
+                self._in_yul()  # EVM builtins use explicit regions, not Solidity's allocator.
+                or ir.function.name.split("(")[0] in ("require", "assert", "revert", "addmod", "mulmod")
+                or ir.function.name.startswith("revert ")
+            )
+            if not (local or local_library or builtin):
+                if st.store.get(_HEAP_UNPLACED, FALSE) != FALSE:
+                    return self._retain_allocator(st, ir)
+                st = self._unplaced_heap(st)
         for var in getattr(ir, "read", None) or []:
             # A value in memory read through a variable first gets an object, so every later name for it is that one.
             if self._memory_var(var):
                 held = st.env.get(id(var))
                 if not _pointer(held) and not _reference(held):
                     st = self._allocate(var, held if held is not None else _zero(var.type), st)
+                    if st.halted or st.pc == FALSE:
+                        return st
         out = self._exec_ir(ir, st, depth)
+        nested = isinstance(ir, (InternalCall, LibraryCall)) and isinstance(ir.function, Function)
+        buffer = out.store.get(_RETURN_BUFFER, before_buffer)
+        arity = out.store.get(_RETURN_ARITY, before_arity)
+        if not nested and buffer == before_buffer and arity == before_arity:
+            buffer = self._last_call if self._last_call is not None else unknown("unsupported:returndata_state")
+            arity = const(self._last_returns) if self._last_returns is not None else unknown("return_arity")
+        out = replace(out, store={**out.store, _RETURN_BUFFER: buffer, _RETURN_ARITY: arity})
+        self._last_call = buffer
+        self._last_returns = arity[1] if arity[0] == "const" else None
         if out.mem and not _keeps_memory(ir):
             out = replace(out, mem=())
         return out
@@ -2007,6 +2492,24 @@ class Lowerer:
     def _exec_ir(self, ir: Any, st: State, depth: int) -> State:
         if isinstance(ir, SolidityCall):
             return self._solidity_call(ir, st)
+        if (
+            isinstance(ir, LibraryCall)
+            and isinstance(ir.function, Function)
+            and ir.function.visibility in ("public", "external")
+        ):
+            self._defer_call(
+                st,
+                "delegatecall",
+                self.val(ir.destination, st),
+                mk(
+                    "opaque",
+                    "library_arguments",
+                    tuple(self._deep(self.val(a, st), st) for a in ir.arguments),
+                ),
+                self._call_frame().value,
+                None,
+                "unsupported:external_library_execution",
+            )
         if isinstance(ir, (InternalCall, LibraryCall)) and isinstance(ir.function, Function):
             target = ir.function
             if target.entry_point is None and isinstance(ir, InternalCall):
@@ -2023,8 +2526,10 @@ class Lowerer:
                 if getattr(p, "location", None) == "storage" and (loc := self._location(a, st)) is not None
                 else self._value(a, st)
                 if self._memory_var(p)
-                else self.val(a, st)
-                for p, a in zip(target.parameters, ir.arguments)
+                else self._value(a, st)
+                if str(getattr(a, "type", None)) == str(p.type) and not self._in_yul()
+                else self._argument(ir, i, a, st)
+                for i, (p, a) in enumerate(zip(target.parameters, ir.arguments))
             ]
             env = {id(p): a for p, a in zip(target.parameters, args)}
             node, sliced = self._node, self._sliced
@@ -2044,23 +2549,61 @@ class Lowerer:
                 out.env[id(ir.lvalue)] = ret[0] if len(ret) == 1 else ("tuple", ret)
             return out
         if isinstance(ir, Assignment):
+            expression = getattr(ir.expression, "expression_right", ir.expression)
+            referenced = self._storage_reference(ir.rvalue, expression, st)
+            if self._in_yul() and getattr(ir.lvalue, "is_storage", False) and not isinstance(ir.lvalue, StateVariable):
+                from .layout import storage_reference
+
+                suffix = storage_reference(
+                    self.contract.compilation_unit, getattr(ir.expression, "expression_left", None)
+                )
+                if suffix != "slot":
+                    return self._unplaced(ir.lvalue, st)
+                slot = referenced if referenced is not None else self.val(ir.rvalue, st)
+                root = mk("slot", slot, str(getattr(ir.lvalue, "type", None)))
+                return self._bind(ir.lvalue, ("loc", (self.this, root, ())), st)
+            if (
+                referenced is not None
+                and not getattr(ir.lvalue, "is_storage", False)
+                and not isinstance(ir.lvalue, StateVariable)
+            ):
+                return self._write(ir.lvalue, referenced, st)
+            if isinstance(ir.rvalue, Constant) and getattr(ir.expression, "member_name", None) in (
+                "selector",
+                "interfaceId",
+            ):
+                width = 32 if str(getattr(ir.lvalue, "type", None)) == "bytes32" else 4
+                value = folded_selector(ir.expression, self.contract, width)
+                selected = const(value, f"bytes{width}") if value is not None else unknown("unsupported:abi_identifier")
+                return self._write(ir.lvalue, selected, st)
+            if isinstance(ir.lvalue, StateVariable) and ir.lvalue.is_constant:
+                # Solidity never assigns a constant: Slither renders Yul ``sstore(SLOT, v)`` of a constant slot so
+                # (an EIP-1967 proxy's ``sstore(IMPL, i)``). Anything the source doesn't show to be that is lost.
+                source = (
+                    _faithful_source(self._node, [ir.lvalue.name])
+                    if self._node is not None and ir.lvalue.name is not None
+                    else None
+                )
+                if source is not None and f"sstore({ir.lvalue.name}," in source.replace(" ", ""):
+                    slot = self.val(ir.lvalue, st)
+                    expressions = getattr(ir.expression or self._node.expression, "arguments", ())
+                    value = self._operand(ir.rvalue, expressions[1] if len(expressions) == 2 else None, st)
+                    return replace(st, store=stored(st.store, ("raw", self.this, slot), value))
+                self.lost = True
+                return replace(
+                    st, store=stored(st.store, ("havoc", self.this, "raw", "unsupported:constant_write"), TRUE)
+                )
             loaded = self._yul_sload_of_constant(ir.rvalue)
             if loaded is None:
                 return self._write(ir.lvalue, unknown("unsupported:yul_source"), st)
             if loaded:
                 # Slither lowers Yul ``sload(SLOT)`` of a constant to the constant itself (Solady ``Ownable``).
-                return self._write(ir.lvalue, mk("rawload", self.this, self.val(ir.rvalue, st)), st)
+                return self._write(ir.lvalue, read_store(st.store, ("raw", self.this, self.val(ir.rvalue, st))), st)
             if getattr(ir.lvalue, "is_storage", False) and (loc := self._location(ir.rvalue, st)) is not None:
                 return self._bind(ir.lvalue, ("loc", loc), st)  # a storage pointer names a location
-            if getattr(ir.lvalue, "is_storage", False) and str(getattr(ir.rvalue, "type", "")) in (
-                "bytes32",
-                "uint256",
-            ):
-                # ``$.slot := LOCATION`` (namespaced storage, OZ 5): the pointer is the struct rooted at that slot.
-                root = mk("slot", self.val(ir.rvalue, st), str(getattr(ir.lvalue, "type", "")))
-                return self._bind(ir.lvalue, ("loc", (self.this, root, ())), st)
             # A value memory holds by reference names the same object (``b = a``); storage takes a copy (``_write``).
-            return self._write(ir.lvalue, self._value(ir.rvalue, st), st)
+            value = self._operand(ir.rvalue, expression, st) if self._in_yul() else self._value(ir.rvalue, st)
+            return self._write(ir.lvalue, value, st)
         if isinstance(ir, Delete):
             # ``delete m[k]``: Slither's lvalue is ``m`` itself; the entry cleared is ``variable`` (an item or field in
             # memory likewise).
@@ -2068,13 +2611,21 @@ class Lowerer:
             target = ir.variable if self._location(ir.variable, st) is not None or _reference(held) else ir.lvalue
             return self._write(target, _zero(getattr(target, "type", None)), st)
         if isinstance(ir, Binary):
-            a, b = self.val(ir.variable_left, st), self.val(ir.variable_right, st)
+            a = self._operand(ir.variable_left, getattr(ir.expression, "expression_left", None), st)
+            b = self._operand(ir.variable_right, getattr(ir.expression, "expression_right", None), st)
+            common = str(_operand_type(ir)) if not self._in_yul() else ""
+            if re.fullmatch(r"u?int\d*|bytes\d+", common):
+                a = _convert(common, a, getattr(ir.variable_left, "type", None))
+                if ir.type not in (BinaryType.LEFT_SHIFT, BinaryType.RIGHT_SHIFT, BinaryType.POWER):
+                    b = _convert(common, b, getattr(ir.variable_right, "type", None))
             if ir.type == BinaryType.ANDAND:
                 value = mk_and([a, _ran_under(b, a)])
             elif ir.type == BinaryType.OROR:
                 value = mk_or([a, _ran_under(b, mk_not(a))])
             elif ir.type in _COMPARE:
                 bits, is_signed = _integer(_operand_type(ir))
+                if self._in_yul():
+                    bits, is_signed = 256, _signed_yul_operation(ir)
                 if is_signed:
                     # Compared as the signed numbers they are (Yul's ``slt``/``sgt`` too, as Slither renders them).
                     a, b = _convert(f"int{bits}", a), _convert(f"int{bits}", b)
@@ -2085,16 +2636,30 @@ class Lowerer:
                     st = replace(st, pc=mk_and([st.pc, *conditions]))
             return self._write(ir.lvalue, value, st)
         if isinstance(ir, Unary):
-            a = self.val(ir.rvalue, st)
+            a = self._operand(ir.rvalue, getattr(ir.expression, "expression", None), st)
             if ir.type == UnaryType.BANG:
                 return self._write(ir.lvalue, mk_not(a), st)
             # ``~x`` flips the bits of ``x``'s own width.
-            type_ = str(getattr(ir.rvalue, "type", "") or "")
+            type_ = "uint256" if self._in_yul() else str(getattr(ir.rvalue, "type", "") or "")
             flipped = mk_op("bnot", (a,))
             return self._write(ir.lvalue, flipped if type_ in ("uint256", "bytes32") else _convert(type_, flipped), st)
         if isinstance(ir, TypeConversion):
             source = getattr(ir.variable, "type", None)
-            value = _convert(str(ir.type), self.val(ir.variable, st), source)
+            held = self._value(ir.variable, st)
+            if str(source) in ("bytes", "string") and str(ir.type) in ("bytes", "string"):
+                # These types share the same bytes. Memory conversions preserve
+                # the object identity instead of allocating an independent copy.
+                return self._write(ir.lvalue, held, st)
+            if (
+                not self._in_yul()
+                and str(source) == str(ir.type)
+                and isinstance(held, Term)
+                and contains(held, frozenset({"stackword"}))
+            ):
+                return self._write(ir.lvalue, held, st)
+            # Contract/interface casts are address conversions, not new runtime value types.
+            target_type = "address" if _address_typed(ir.type) else str(ir.type)
+            value = _convert(target_type, self.val(ir.variable, st), source)
             count = _enum_size(ir.type)
             if count is not None:
                 # A number converted to an enum it has no member for reverts (Panic 0x21).
@@ -2153,7 +2718,12 @@ class Lowerer:
                 return self._write(ir.lvalue, const(fixed), st)
             return self._write(ir.lvalue, self._length(held, type_), st)
         if isinstance(ir, CodeSize):
-            return self._write(ir.lvalue, mk("codesize", self.val(ir.value, st)), st)  # ``a.code.length``
+            value = (
+                unknown("unsupported:account_after_unmodeled_call")
+                if any(k[0] == "act" for k in st.store)
+                else mk("codesize", self.val(ir.value, st))
+            )
+            return self._write(ir.lvalue, value, st)  # ``a.code.length``
         if isinstance(ir, EventCall):
             # An event, as a mark in the writes like a call out: which writes each path logs (``write_log``).
             args = tuple(self.val(a, st) for a in ir.arguments)
@@ -2165,14 +2735,49 @@ class Lowerer:
             item = _item(whole, ir.index)
             return self._write(ir.lvalue, item, st)
         if isinstance(ir, (Transfer, Send)):
+            self._defer_call(
+                st,
+                "call",
+                self.val(ir.destination, st),
+                const(b"", "bytes"),
+                self.val(ir.call_value, st),
+                const(2300),
+                "unsupported:native_value_call",
+                intrinsic="transfer" if isinstance(ir, Transfer) else "send",
+            )
             # ``transfer`` reverts when the recipient refuses the ether (its own code deciding): success required.
-            st = _assumed(st, f"value:{id(ir)}", required=isinstance(ir, Transfer))
+            st = _assumed(st, f"value:{self._site(ir)}", required=isinstance(ir, Transfer))
             lvalue = getattr(ir, "lvalue", None)  # ``Send`` returns a bool, ``Transfer`` nothing
             return self._write(lvalue, unknown(type(ir).__name__), st) if lvalue is not None else st
         if isinstance(ir, LowLevelCall):
             name = str(getattr(ir.function_name, "value", ir.function_name))
+            if name in ("call", "staticcall", "delegatecall") and self.call_handler is not None:
+                followed = self._raw_call(ir, st, name)
+                if followed is not None:
+                    return followed
+            self._defer_call(
+                st,
+                name,
+                self.val(ir.destination, st),
+                self._deep(self.val(ir.arguments[0], st), st) if ir.arguments else CALLDATA,
+                self._call_frame().value
+                if name == "delegatecall"
+                else (self.val(ir.call_value, st) if getattr(ir, "call_value", None) is not None else const(0)),
+                self.val(ir.call_gas, st) if getattr(ir, "call_gas", None) is not None else None,
+                "unsupported:raw_call_payload" if name != "delegatecall" else "unsupported:delegate_execution",
+            )
+            state_changed = any(k[0] not in ("heap", "emit") for k in st.store)
+            if getattr(ir, "call_gas", None) is not None or (
+                state_changed and (self.call_handler is not None or any(k[0] == "act" for k in st.store))
+            ):
+                gap = unknown("unsupported:raw_call_context")
+                if name != "staticcall":
+                    st = _assumed(st, "raw_call_context")
+                st = replace(st, pc=mk_and([st.pc, gap]), mem=())
+                self._last_call, self._last_returns = gap, None
+                return self._write(ir.lvalue, ("tuple", (gap, gap)), st) if ir.lvalue is not None else st
             if name != "staticcall":
-                st = _assumed(st, f"lowlevel:{id(ir)}")
+                st = _assumed(st, f"lowlevel:{self._site(ir)}")
             if ir.lvalue is None:
                 return st
             target = self.val(ir.destination, st)
@@ -2208,10 +2813,11 @@ class Lowerer:
                 returned = mk("assumed", "returndata")  # what an arranged action returns is arranged with it
             return self._write(ir.lvalue, ("tuple", (success, returned)), st)
         if isinstance(ir, NewContract):
+            self._last_call, self._last_returns = unknown("unsupported:creation_returndata"), None
             # Code deployed by this call: an effect whatever the new contract's constructor does, an action the caller
             # arranges like any call out, unless it hands the constructor who calls. ``new`` reverts when the
             # constructor does (its code deciding, on whatever it reads: ``tx.origin`` among them): success required.
-            st = _assumed(st, f"create:{id(ir)}", required=True)
+            st = _assumed(st, f"create:{self._site(ir)}", required=True)
             if any(contains(self.val(a, st), IDENTITY_KINDS) for a in ir.arguments):
                 st = replace(st, pc=mk_and([st.pc, unknown("unsupported:NewContract")]))
             return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
@@ -2224,7 +2830,11 @@ class Lowerer:
             # An operation not lowered (a call through a function pointer): the path, what it writes and what it
             # returns, all unknown by name.
             self.lost = True
-            st = _acted(replace(st, pc=mk_and([st.pc, unknown(label)])), mk("assumed", label))
+            st = _unfollowed_state(st, label)
+            self._halts.append(Exit(st.pc, st.store, (unknown(label),), halted=True))
+            # Unknown same-frame execution may terminate the whole EVM frame. Stop this
+            # path with an unknown exit instead of trusting its apparent continuation.
+            st = replace(st, pc=FALSE)
             lvalue = getattr(ir, "lvalue", None)
             return self._write(lvalue, unknown(label), st) if lvalue is not None else st
         return st
@@ -2232,7 +2842,41 @@ class Lowerer:
     def _solidity_call(self, ir: SolidityCall, st: State) -> State:
         name = ir.function.name
         base = name.split("(", 1)[0]
-        args = [self.val(a, st) for a in ir.arguments]
+        if base.startswith("abi.encode"):
+            self._last_call, self._last_returns = unknown("unsupported:encoding_returndata"), None
+        args = [self._argument(ir, i, a, st) for i, a in enumerate(ir.arguments)]
+        assembly = None
+        if base in ("call", "callcode", "staticcall", "delegatecall"):
+            valued = base in ("call", "callcode")
+            if len(args) == (7 if valued else 6):
+                if self.call_handler is not None and base != "callcode":
+                    assembly = self._assembly_input(args, st, base)
+                if assembly is None:
+                    self._defer_call(
+                        st,
+                        base,
+                        args[1],
+                        mk("opaque", "memory_region", tuple(args[3:5] if valued else args[2:4])),
+                        args[2] if valued else self._call_frame().value if base == "delegatecall" else const(0),
+                        args[0],
+                        "unsupported:assembly_call_execution",
+                        operands=tuple(args),
+                    )
+        region = None
+        if base in ("mstore", "mstore8") and len(args) == 2:
+            region = args[0], const(32 if base == "mstore" else 1)
+        elif base in ("calldatacopy", "returndatacopy", "codecopy", "mcopy") and len(args) == 3:
+            region = args[0], args[2]
+        elif base == "extcodecopy" and len(args) == 4:
+            region = args[1], args[3]
+        elif base in ("call", "callcode") and len(args) == 7:
+            region = args[5], args[6]
+        elif base in ("staticcall", "delegatecall") and len(args) == 6:
+            region = args[4], args[5]
+        if region is not None:
+            st = self._memory_written(st, region, args[1] if base == "mstore" else None)
+        if assembly is not None:
+            return self._assembly_call(ir, args, st, base, assembly)
         # ``revert Error(...)`` names the custom error it reverts with: one builtin, ``revert ``.
         known = "revert " if name.startswith("revert ") else name
         rejected = REJECTED_BUILTINS.get(known, None if known in HANDLED_BUILTINS else f"unsupported:{name}")
@@ -2253,11 +2897,28 @@ class Lowerer:
         if base in _YUL_ENVIRONMENT and not args:
             value = _YUL_ENVIRONMENT[base] if base != "callvalue" or self._payable else const(0)
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        if base in ("balance", "selfbalance", "extcodesize", "extcodehash", "this.balance", "code") and any(
+            k[0] == "act" for k in st.store
+        ):
+            return (
+                self._write(ir.lvalue, unknown("unsupported:account_after_unmodeled_call"), st)
+                if ir.lvalue is not None
+                else st
+            )
         if base in ("address", "caller", "codesize", "this.balance") and not args:
             value = {"address": self.this, "caller": self.sender, "codesize": mk("codesize", self.code)}.get(
                 base, mk("balance", self.this)
             )
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        abi_types = None
+        if base.startswith("abi.encode") and base != "abi.encodeCall":
+            from .abi_values import describe, transfer
+
+            head = 1 if base in ("abi.encodeWithSelector", "abi.encodeWithSignature") else 0
+            abi_types = tuple(describe(getattr(a, "type", None)) for a in ir.arguments[head:])
+            # Each value as its type's encoding cleans it. Whether that encoding decodes is the decoder's to say,
+            # where a callee followed reads it (``Linker.callee``): no condition here.
+            args = [*args[:head], *(transfer(self._deep(v, st), t, t)[0] for v, t in zip(args[head:], abi_types))]
         packed_v = (
             base == "byte"
             and len(args) == 2
@@ -2282,30 +2943,51 @@ class Lowerer:
             acted = _acted(st, mk("assumed", "selfdestruct"))
             return State(acted.pc, acted.env, acted.store, st.ret, halted=True, mem=st.mem)
         if base in ("return", "stop"):
-            # Assembly ``return(p, n)`` ends the whole call successfully (a proxy forwarding its delegate's result).
-            ret = st.ret if st.ret is not None else (unknown("assembly_return"),)
-            return State(st.pc, st.env, st.store, ret, halted=True)
+            return self._return_memory(base, args, st)
         if base == "abi.encodeCall" and len(ir.arguments) == 2 and isinstance(ir.arguments[1], list):
             # ``abi.encodeCall(I.f, (a, b))``: the same bytes as ``abi.encodeWithSignature("f(...)", a, b)``.
             function = args[0]
             if function[0] == "const" and function[2] == "function":
-                inputs = tuple(_typed_word(a, self.val(a, st)) for a in ir.arguments[1])
-                value = mk("enc", "abi.encodeWithSignature", (const(function[1], "string"), *inputs))
+                from .abi_values import describe, transfer
+
+                types = tuple(describe(a.type) for a in ir.arguments[1])
+                normalized = [
+                    transfer(self._deep(self.val(a, st), st), t, t)[0] for a, t in zip(ir.arguments[1], types)
+                ]
+                inputs = tuple(_typed_word(a, v) for a, v in zip(ir.arguments[1], normalized))
+                value = mk("enc", "abi.encodeWithSignature", (const(function[1], "string"), *inputs), types)
                 return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
         if base in ("log0", "log1", "log2", "log3", "log4") and len(args) >= 2:
             # An event written in assembly (DSS's ``note``): a mark like ``emit``'s, its topics as the arguments.
             topics = tuple(mk("sig") if _selector_word(t) else t for t in args[2:])
             return State(st.pc, st.env, {**st.store, ("emit", base, topics): TRUE}, st.ret, mem=st.mem)
+        if (
+            base in ("staticcall", "call", "callcode")
+            and args
+            and (
+                args[0][:2] != ("opaque", "gas()")
+                or (self.call_handler is not None and any(k[0] not in ("heap", "emit") for k in st.store))
+                or any(k[0] == "act" for k in st.store)
+            )
+        ):
+            gap = unknown("unsupported:raw_call_context")
+            if base != "staticcall":
+                st = _assumed(st, "raw_call_context")
+            st = replace(st, pc=mk_and([st.pc, gap]), mem=())
+            self._last_call, self._last_returns = gap, None
+            return self._write(ir.lvalue, gap, st) if ir.lvalue is not None else st
         if base == "staticcall" and len(args) == 6:
             return self._static_call(ir, args, st)
         if base == "call" and len(args) == 7:
-            action = self._from_here(_encoded_action(args[1], args[3], args[2])) or self._scratch_action(st.mem, args)
-            out, size = _small_const(args[5]), _small_const(args[6])
+            action = self._from_here(
+                _encoded_action(args[1], self._memory_data(args[3], st), args[2])
+            ) or self._scratch_action(st.mem, args)
+            out, size = _memory_offset(args[5]), _small_const(args[6])
             if action is not None and out is not None and size is not None and size % 32 == 0:
                 # ``call(gas, token, 0, add(data, 0x20), mload(data), out, size)`` of ``abi.encodeCall`` data
                 # (OpenZeppelin's ``SafeERC20``): the action that data names, its return words left at ``out``.
-                written = {out + 32 * i: mk("item", action, i) for i in range(size // 32)}
-                mem = (*((o, w) for o, w in st.mem if not out - 31 <= o < out + size), *written.items())
+                written = {_memory_shift(out, 32 * i): mk("retword", action, i) for i in range(size // 32)}
+                mem = (*_clobbered(st.mem, out, size), *written.items())
                 acted = _acted(State(st.pc, st.env, st.store, st.ret, mem=mem), action)
                 after = State(acted.pc, acted.env, acted.store, acted.ret, mem=mem)
                 self._last_call, self._last_returns = action, None  # what ``returndatasize()`` asks about next
@@ -2313,19 +2995,19 @@ class Lowerer:
         if base in ("call", "callcode"):
             # Assembly ``call(gas, to, value, in, size, out, outsize)``: an action the caller arranges, like a
             # low-level ``.call``, and so is what it returns (Solady's ``safeTransferFrom`` reading ``mload(0) == 1``).
-            out, size = (_small_const(args[5]), _small_const(args[6])) if len(args) == 7 else (None, None)
+            out, size = (_memory_offset(args[5]), _small_const(args[6])) if len(args) == 7 else (None, None)
             mem: tuple = ()
             if out is not None and size is not None and size % 32 == 0:
-                kept = tuple((o, w) for o, w in st.mem if not out - 31 <= o < out + size)
-                mem = (*kept, *((out + 32 * i, mk("assumed", "returndata")) for i in range(size // 32)))
+                kept = _clobbered(st.mem, out, size)
+                mem = (*kept, *((_memory_shift(out, 32 * i), mk("assumed", "returndata")) for i in range(size // 32)))
             after = _assumed(State(st.pc, st.env, st.store, st.ret, mem=mem), base)
             # Data this reading couldn't decode that holds who calls: the callee's check of that caller is unread.
-            start, length = (_small_const(args[3]), _small_const(args[4])) if len(args) == 7 else (None, None)
+            start, length = (_memory_offset(args[3]), _small_const(args[4])) if len(args) == 7 else (None, None)
             named = (
                 start is not None
                 and length is not None
                 and any(
-                    start - 31 <= o < start + length and contains(w, IDENTITY_KINDS)
+                    not _memory_disjoint(o, 32, start, length) and contains(w, IDENTITY_KINDS)
                     for o, w in st.mem
                     if isinstance(w, tuple)
                 )
@@ -2334,36 +3016,49 @@ class Lowerer:
             return self._write(ir.lvalue, success, after) if ir.lvalue is not None else after
         if base == "delegatecall":
             # ``delegatecall(gas, target, ...)``: the target's code for this call, on this storage, for this caller;
-            # an effect whether or not its success is used.
-            value = mk("delegate", args[1] if len(args) > 1 else unknown("delegate_target"))
-            st = _acted(st, mk("assumed", "delegatecall"))
+            # an effect whether or not its success is used. Only input that is this call's whole calldata, copied
+            # untouched, makes it the forward a proxy's dispatch is (``("delegate", target)``).
+            target = args[1] if len(args) > 1 else unknown("delegate_target")
+            start = _memory_offset(args[2]) if len(args) == 6 else None
+            forwards = (
+                start is not None
+                # A capped gas argument can make the delegated execution fail even when
+                # the implementation's source predicate passes. Only the uncapped
+                # gas() forwarding class is modeled here.
+                and args[0][:2] == ("opaque", "gas()")
+                and args[3][0] == "calldatasize"
+                and _region_holds(st.mem, start, _CALLDATA_COPY)
+                # A second forward on this path runs on what the first left: not the call the caller made.
+                and ("havoc", self.this, "*elsewhere", "delegatecall") not in st.store
+            )
+            # Keep the requested memory region, not a guessed full ABI payload: a shorter
+            # size or shifted pointer sends different bytes. Execution remains qualified.
+            data = mk("opaque", "unsupported:delegate_data", tuple(args[2:4]))
+            value = mk("delegate", target) if forwards else mk("delegate", target, data)
+            # Keep every executed delegate, including one whose success is discarded.
+            # The call-site key prevents distinct delegates from collapsing into one effect.
+            site = (self._node.function.canonical_name, self._node.node_id, self._node.irs.index(ir))
+            st = _acted(st, value, site, invalidate_world=self.call_handler is not None)
             st = replace(st, store=stored(st.store, ("havoc", self.this, "*elsewhere", "delegatecall"), TRUE))
+            out, size = (_memory_offset(args[4]), _small_const(args[5])) if len(args) == 6 else (None, None)
+            mem = () if out is None or size is None else _clobbered(st.mem, out, size)
+            st = replace(st, mem=mem)
+            self._last_call, self._last_returns = value, None  # what ``returndatasize()`` asks about next
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        if base == "calldatacopy" and len(args) == 3:
+            return self._copy_calldata(args, st)
         if base in ("create", "create2"):
+            self._last_call, self._last_returns = unknown("unsupported:creation_returndata"), None
             # Assembly ``create``: code deployed by this call, like ``new C()``, except that it returns zero instead
             # of reverting when the constructor does (the address, unknown by name, carries that).
             st = _assumed(st, base)
             return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
         if base == "returndatacopy" and len(args) == 3:
-            # The last call's return data copied out: its first word, when that call is known and copied from the
-            # start (GPv2's ``returndatacopy(0, 0, returndatasize())`` before ``mload(0)``); else memory unknown.
-            dest = _small_const(args[0])
-            if dest is None or self._last_call is None or _small_const(args[1]) != 0:
-                return State(st.pc, st.env, st.store, st.ret)
-            kept = tuple((o, w) for o, w in st.mem if not dest - 31 <= o < dest + 32)
-            return State(st.pc, st.env, st.store, st.ret, mem=(*kept, (dest, mk("item", self._last_call, 0))))
-        if base == "mstore" and len(args) == 2:
-            offset = _small_const(args[0])
-            mem = (*st.mem, (offset, args[1])) if offset is not None else ()
-            return State(st.pc, st.env, st.store, st.ret, mem=mem)
+            return self._copy_returndata(args, st)
+        if base in ("mstore", "mstore8") and len(args) == 2:
+            return self._store_memory(st, args[0], args[1], 32 if base == "mstore" else 1)
         if base == "mload" and len(args) == 1:
-            value = (
-                _memory_word(st.mem, _small_const(args[0]))
-                or _packed_item(args[0], 32)
-                or _bytes_word(args[0])
-                or (const(_FREE_MEMORY) if _small_const(args[0]) == 0x40 else None)
-                or _lost_word(name, args)
-            )
+            st, value = self._load_memory(st, args[0])
         elif (
             base == "byte"
             and len(args) == 2
@@ -2373,17 +3068,21 @@ class Lowerer:
             # ``byte(0, mload(add(sig, 0x60)))``: the one-byte item a packed encoding put there (a signature's ``v``).
             value = _packed_item(args[1][2][0], 1) or mk("opaque", name, tuple(args))
         elif base in _HASHES:
+            if base not in ("keccak256", "sha3"):
+                self._last_call, self._last_returns = unknown("unsupported:precompile_returndata"), None
             if "bytes" in name or "()" in name:
                 inputs = tuple(args)
             else:
                 # The assembly form hashes a memory range: the bytes earlier ``mstore``s left there, when known.
-                packed = _memory_bytes(st.mem, *(_small_const(a) for a in args[:2])) if len(args) == 2 else None
+                packed = (
+                    _memory_bytes(st.mem, _memory_offset(args[0]), _small_const(args[1])) if len(args) == 2 else None
+                )
                 inputs = (mk("enc", "abi.encodePacked", packed),) if packed else (unknown("memory"),)
             value = mk("hash", "keccak256" if base == "sha3" else base, inputs)
         elif base == "abi.encodePacked":
             # Packed, an item takes its static type's width, which a value computed in an inlined callee (a key
             # index, ``add(totalAddedKeys, i)``) no longer says: the argument's declared type does.
-            value = mk("enc", base, tuple(_typed_packed(a, v) for a, v in zip(ir.arguments, args)))
+            value = mk("enc", base, tuple(_typed_packed(a, v) for a, v in zip(ir.arguments, args)), abi_types)
         elif base.startswith("abi.encode"):
             # Each item takes its declared type's word: a ``bytesN`` read from storage sits at the left, an ``int8``
             # sign-extends, which the read value itself no longer says. The selector or signature heading
@@ -2398,9 +3097,11 @@ class Lowerer:
                     "enc",
                     base,
                     (*args[:head], *(_abi_item(a, v) for a, v in zip(ir.arguments[head:], args[head:]))),
+                    abi_types,
                 )
         elif base.startswith("abi.decode") and args and args[0][0] == "assumed":
-            value = args[0]  # decoding what an arranged action returned: arranged too
+            value = unknown("unsupported:abi.decode_input")
+            st = replace(st, pc=mk_and([st.pc, value]))
         elif (
             base.startswith("abi.decode")
             and args
@@ -2410,26 +3111,71 @@ class Lowerer:
             # What a view call returned, decoded: its words, when each decoded value is one.
             types = _decoded_types(ir.lvalue)
             if types is None:
-                value = mk("opaque", name, tuple(args))
+                value = unknown("unsupported:abi.decode_layout")
+                st = replace(st, pc=mk_and([st.pc, value]))
             else:
-                items = [mk("item", args[0][2][0], i) for i in range(len(types))]
+                call = args[0][2][0]
+                expected = tuple(str(t) for t in types)
+                from .abi_values import describe, inferred
+
+                typed = mk(
+                    *call[:5],
+                    call[5] if len(call) > 5 else self.this,
+                    tuple(describe(t) for t in types),
+                    call[7] if len(call) > 7 else tuple(inferred(v) for v in call[3]),
+                    self._decoder(),
+                )
+                # A failed low-level call can carry decodable revert bytes. Until those bytes
+                # are modeled, do not replace decoding with a claim that the callee succeeded.
+                confirmed = any(c[0] == "ok" and c[1] == call for c in _conjuncts(st.pc))
+                decoding = mk("ok", typed, len(types)) if confirmed else unknown("unsupported:revert_data_decode")
+                st = replace(st, pc=mk_and([st.pc, decoding]))
+                items = (
+                    [mk("abi", typed, "(" + ",".join(expected) + ")", (i,), t) for i, t in enumerate(expected)]
+                    if confirmed
+                    else [unknown(f"unsupported:revert_data_decode:{i}") for i in range(len(types))]
+                )
                 value = items[0] if len(items) == 1 else ("tuple", tuple(items))
-        elif base.startswith("abi.decode") and args and args[0][0] == "enc" and args[0][1] == "abi.encode":
-            words = _static_words(args[0][2])
+        elif base.startswith("abi.decode") and args and args[0][0] in ("enc", "ite"):
+            from .abi_values import decode_buffer, describe
+
+            types = getattr(ir.lvalue, "type", None)
+            types = list(types) if isinstance(types, list) else [types]
+            decoded, valid = decode_buffer(args[0], tuple(describe(t) for t in types), self._decoder())
+            st = replace(st, pc=mk_and([st.pc, valid]))
+            value = decoded[0] if len(decoded) == 1 else ("tuple", decoded)
+        elif (
+            base.startswith("abi.decode")
+            and args
+            and args[0][0] == "arg"
+            and args[0] != CALLDATA
+            and args[0][2] == "bytes"
+        ):
+            from .abi_values import describe, from_name, transfer
+
             types = _decoded_types(ir.lvalue)
-            if words is None or types is None:
-                value = mk("opaque", name, tuple(args))
-            elif len(types) > len(words):
-                return State(FALSE, st.env, st.store, st.ret)  # fewer words than it decodes: abi.decode reverts
+            if types is None:
+                value = unknown("unsupported:abi.decode_layout")
+                st = replace(st, pc=mk_and([st.pc, value]))
             else:
-                # The word as encoded, when decoded as its own type; decoded as another, strict decoding reverts out of
-                # that type's range, which isn't followed.
-                decoded = [
-                    w if _decodes_as(_type_of(w), str(t)) else unknown(f"unsupported:abi.decode:{_type_of(w)}->{t}")
-                    for t, w in zip(types, words)
+                pairs = [
+                    transfer(mk("abi_word", args[0], i), from_name("uint256"), describe(t), strict=self._decoder())
+                    for i, t in enumerate(types)
                 ]
-                value = decoded[0] if len(decoded) == 1 else ("tuple", tuple(decoded))
+                valid = mk_cmp("le", const(32 * len(types)), mk("len", args[0]))
+                st = replace(st, pc=mk_and([st.pc, valid, *(p[1] for p in pairs)]))
+                items = [p[0] for p in pairs]
+                value = items[0] if len(items) == 1 else ("tuple", tuple(items))
+        elif base.startswith("abi.decode"):
+            label = (
+                "unsupported:revert_data_decode"
+                if args and any(t[1] == "unsupported:revert_data" for t in subterms(args[0], "unknown"))
+                else "unsupported:abi.decode_input"
+            )
+            st = replace(st, pc=mk_and([st.pc, unknown(label)]))
+            value = unknown(label)
         elif base == "ecrecover":
+            self._last_call, self._last_returns = unknown("unsupported:precompile_returndata"), None
             value = mk("signer", *args)
         elif base == "gas" and not args:
             # The gas left: a word the caller steers (what it sent, less what ran), never who calls. Opaque, so a
@@ -2438,7 +3184,7 @@ class Lowerer:
         elif base == "sload":
             value = read_store(st.store, ("raw", self.this, args[0]))
         elif base == "sstore":
-            return State(st.pc, st.env, stored(st.store, ("raw", self.this, args[0]), args[1]), st.ret)
+            return replace(st, store=stored(st.store, ("raw", self.this, args[0]), args[1]))
         elif base == "tstore" and len(args) == 2:
             store = stored(st.store, ("transient", self.this, args[0]), args[1])
             return State(st.pc, st.env, store, st.ret, mem=st.mem)
@@ -2471,7 +3217,7 @@ class Lowerer:
         """``call(gas, token, 0, in, 4 + 32n, ...)`` of a selector and words ``mstore``d at constant offsets
         (OpenZeppelin 5's ``SafeERC20._safeTransferFrom``): the action they name, its function found by selector
         among the compilation's declarations."""
-        start, size = _small_const(args[3]), _small_const(args[4])
+        start, size = _memory_offset(args[3]), _small_const(args[4])
         if _small_const(args[2]) != 0 or start is None or size is None or size < 4 or (size - 4) % 32:
             return None
         head = next((w for o, w in reversed(mem) if o == start), None)
@@ -2484,13 +3230,15 @@ class Lowerer:
         if not isinstance(value, int) or isinstance(value, bool):
             return None
         selector = value if str(head[2]) == "bytes4" or value < 2**32 else value >> 224
-        words = [_memory_word(mem, start + 4 + 32 * i) for i in range((size - 4) // 32)]
+        words = [_memory_word(mem, _memory_shift(start, 4 + 32 * i)) for i in range((size - 4) // 32)]
         if any(w is None for w in words):
             return None
         signature = _signature_of(self.contract, selector, len(words))
         if signature is None:
             return None
-        return self._from_here(mk("call", args[1], signature, tuple(_unmasked(w) for w in words), False))
+        return self._from_here(
+            mk("call", args[1], signature, tuple(_unmasked(w) for w in words if w is not None), False)
+        )
 
     def _encoded_call(self, target: Term, data: Term, view: bool) -> Term | None:
         """The call ``abi.encodeWithSignature`` / ``abi.encodeWithSelector`` data names, made to ``target``."""
@@ -2498,7 +3246,11 @@ class Lowerer:
             return None
         head, rest = data[2][0], tuple(data[2][1:])
         if data[1] == "abi.encodeWithSignature" and head[0] == "const" and isinstance(head[1], str) and "(" in head[1]:
-            return self._from_here(mk("call", target, head[1], rest, view))
+            return (
+                self._from_here(mk("call", target, head[1], rest, view, None, None, data[3]))
+                if len(data) > 3
+                else self._from_here(mk("call", target, head[1], rest, view))
+            )
         if data[1] == "abi.encodeWithSelector" and head[0] == "const":
             value = int(head[1], 0) if isinstance(head[1], str) and head[1][:2] in ("0x", "0X") else head[1]
             if isinstance(head[1], str) and head[1].isdigit():
@@ -2506,7 +3258,13 @@ class Lowerer:
             if not isinstance(value, int) or isinstance(value, bool):
                 return None
             signature = _signature_of(self.contract, value % 2**32, len(rest))
-            return None if signature is None else self._from_here(mk("call", target, signature, rest, view))
+            if signature is None:
+                return None
+            return (
+                self._from_here(mk("call", target, signature, rest, view, None, None, data[3]))
+                if len(data) > 3
+                else self._from_here(mk("call", target, signature, rest, view))
+            )
         return None
 
     def _static_call(self, ir: SolidityCall, args: list, st: State) -> State:
@@ -2514,33 +3272,411 @@ class Lowerer:
         the view call it makes, succeeding when the call returns, its return words left at ``out``. OpenZeppelin's
         ``AuthorityUtils.canCallWithDelay`` asks the access manager this way."""
         call = None
-        data = args[2]
+        data = self._memory_data(args[2], st)
         if data[0] == "op" and data[1] == "add":
             encoded = [a for a in data[2] if a[0] == "enc"]
             if len(encoded) == 1 and any(a[0] == "const" and a[1] == 32 for a in data[2]):
                 call = self._from_here(_view_call(args[1], encoded[0]))
-        out, size = _small_const(args[4]), _small_const(args[5])
+        out, size = _memory_offset(args[4]), _small_const(args[5])
         # What ``returndatasize()`` and ``returndatacopy`` ask about next: this call, or nothing it can name.
         self._last_call, self._last_returns = call, None
         if call is None or out is None or size is None or size % 32:
             cleared = State(st.pc, st.env, st.store, st.ret)  # whatever it returned is somewhere in memory
             value = mk("opaque", ir.function.name, tuple(args))
             return self._write(ir.lvalue, value, cleared) if ir.lvalue is not None else cleared
-        written = {out + 32 * i: mk("item", call, i) for i in range(size // 32)}
-        mem = (*((o, w) for o, w in st.mem if not out - 31 <= o < out + size), *written.items())
+        written = {_memory_shift(out, 32 * i): mk("retword", call, i) for i in range(size // 32)}
+        mem = (*_clobbered(st.mem, out, size), *written.items())
         after = State(st.pc, st.env, st.store, st.ret, mem=mem)
         return self._write(ir.lvalue, mk("ok", call, 0), after) if ir.lvalue is not None else after
+
+    def _memory_written(self, st, region, value=None):
+        start, size = _memory_offset(region[0]), _small_const(region[1])
+        advances = False
+        if value is not None and start == 64:
+            from .memory import difference
+
+            previous = _memory_word(st.mem, 64)
+            old = _memory_offset(previous) if previous is not None else None
+            new = _memory_offset(value)
+            delta = difference(new, old) if new is not None and old is not None else None
+            advances = delta is not None and delta >= 0
+        if not advances and not _memory_disjoint(start, size, 64, 32):
+            st = replace(st, store=stored(st.store, _HEAP_UNPLACED, TRUE))
+        # The allocator word (64..95) can affect future allocations, not objects
+        # already allocated above it. New objects under an unplaced allocator are
+        # already opaque. Writes reaching the zero slot or heap may alias old objects.
+        if not self._fresh_memory(start, st) and not _memory_disjoint(start, size, 96, None):
+            st = replace(st, store=stored(st.store, _HEAP_ALIASES, TRUE))
+            st = self._unplaced_heap(st, region)
+        return st
+
+    def _return_memory(self, base, args, st):
+        # Assembly ``return(p, n)`` ends the whole call successfully (a proxy forwarding its delegate's result).
+        ret = st.ret if st.ret is not None else (unknown("assembly_return"),)
+        start = _memory_offset(args[0]) if base == "return" and len(args) == 2 else None
+        last = self._last_call
+        if base == "stop":
+            return State(st.pc, st.env, st.store, (mk("evm_return", const(b"", "bytes")),), halted=True)
+        if (
+            start is not None
+            and last is not None
+            and last[0] == "return_buffer"
+            and (
+                args[1] == mk("retsize", last) and _region_holds(st.mem, start, mk("opaque", "returndatacopy", (last,)))
+            )
+        ):
+            return State(st.pc, st.env, st.store, (mk("evm_return", last[1]),), halted=True)
+        if base == "return" and len(args) == 2 and self.call_handler is not None:
+            payload = self._memory_payload(args[0], args[1], st)
+            if payload is not None:
+                return State(st.pc, st.env, st.store, (mk("evm_return", payload),), halted=True)
+        if (
+            start is not None
+            and last is not None
+            and last[0] == "delegate"
+            and args[1] == mk("retsize", last)
+            and _region_holds(st.mem, start, mk("opaque", "returndatacopy", (last,)))
+        ):
+            ret = (mk("opaque", "forwarded", (last,)),)  # the delegate's own return data, byte for byte
+        return State(st.pc, st.env, st.store, ret, halted=True)
+
+    def _copy_calldata(self, args, st):
+        dest = _memory_offset(args[0])
+        if dest is None:
+            return replace(st, mem=())
+        mem = _clobbered(st.mem, dest, None)
+        if _small_const(args[1]) == 0 and args[2][0] == "calldatasize":
+            mem = (*mem, (dest, _CALLDATA_COPY))
+        return replace(st, mem=mem)
+
+    def _copy_returndata(self, args, st):
+        # The last call's return data copied out: its first word, when that call is known and copied from the
+        # start (GPv2's ``returndatacopy(0, 0, returndatasize())`` before ``mload(0)``); else memory unknown.
+        dest = _memory_offset(args[0])
+        if self._last_call is not None:
+            available = mk("retsize", self._last_call)
+            if args[2] == available and _small_const(args[1]) not in (None, 0):
+                return State(FALSE, st.env, st.store, st.ret)
+            if not (_small_const(args[1]) == 0 and args[2] == available):
+                bound = mk_and(
+                    [mk_cmp("le", args[1], available), mk_cmp("le", args[2], mk_op("sub", (available, args[1])))]
+                )
+                st = replace(st, pc=mk_and([st.pc, bound]))
+        else:
+            st = replace(st, pc=mk_and([st.pc, unknown("unsupported:returndata_bounds")]))
+        if _small_const(args[2]) == 0:
+            return st  # Bounds still apply, but zero bytes cannot modify memory.
+        if dest is None:
+            return replace(st, pc=mk_and([st.pc, unknown("unsupported:assembly_memory_alias")]), mem=())
+        if self._last_call is not None and self._last_call[0] == "delegate":
+            # A delegate's return data, whole, is what a forwarding proxy hands back; any part of it, unknown.
+            if dest is None or _small_const(args[1]) != 0 or args[2] != mk("retsize", self._last_call):
+                return State(st.pc, st.env, st.store, st.ret)
+            copied = mk("opaque", "returndatacopy", (self._last_call,))
+            return State(st.pc, st.env, st.store, st.ret, mem=(*_clobbered(st.mem, dest, None), (dest, copied)))
+        count = _small_const(args[2])
+        if count is None and self.resolver is not None:
+            count = _small_const(self.resolver.expand(args[2]))
+        start = _small_const(args[1])
+        if (
+            count is None
+            and start == 0
+            and self._last_call is not None
+            and self._last_call[0] == "return_buffer"
+            and args[2] == mk("retsize", self._last_call)
+        ):
+            copied = mk("opaque", "returndatacopy", (self._last_call,))
+            return replace(st, mem=(*_clobbered(st.mem, dest, None), (dest, copied)))
+        if self._last_call is None or count is None or start is None:
+            return replace(st, mem=_clobbered(st.mem, dest, count))
+        pieces = []
+        copied = 0
+        while copied < count:
+            index, skip = divmod(start + copied, 32)
+            width = min(32 - skip, count - copied)
+            pieces.append(
+                (
+                    _memory_shift(dest, copied),
+                    mk("memory_fragment", mk("retword", self._last_call, index), skip, width),
+                )
+            )
+            copied += width
+        return replace(st, mem=(*st.mem, *pieces))
+
+    def _store_memory(self, st, pointer, value, width=32):
+        offset = _memory_offset(pointer)
+        if offset is None:
+            return replace(st, pc=mk_and([st.pc, unknown("unsupported:assembly_memory_alias")]), mem=())
+        if width == 1:
+            value = mk("memory_fragment", mk_op("shl", (_convert("uint8", value), const(248))), 0, 1)
+        return replace(st, mem=(*st.mem, (offset, value)))
+
+    def _load_memory(self, st, pointer):
+        offset = _memory_offset(pointer)
+        if offset is None:
+            st = replace(st, pc=mk_and([st.pc, unknown("unsupported:assembly_memory_alias")]))
+        data_pointer = self._memory_data(pointer, st)
+        cached = _memory_word(st.mem, offset)
+        if cached is None and offset == 64:
+            self._memory_bases += 1
+            cached = mk(
+                "memory_address",
+                self._frame_identity,
+                mk(
+                    "memory_arena",
+                    self._memory_bases,
+                    st.store.get(_HEAP_UNPLACED, FALSE) == FALSE,
+                    self._objects,
+                    self._memory_floor(),
+                ),
+            )
+            st = replace(st, mem=(*st.mem, (64, cached)))
+        value = (
+            cached
+            or _packed_item(data_pointer, 32)
+            or _bytes_word(data_pointer)
+            or _lost_word("mload(uint256)", [data_pointer])
+        )
+        return st, value
+
+    def _memory_floor(self):
+        version = _solc_version(self.contract)
+        if version == [0, 4]:
+            return 96  # Older compiler arenas can start at0x60, before the modern zero slot.
+        return 128 if version is not None and [0, 5] <= version <= [0, 8] else 0
+
+    def _memory_payload(self, pointer, length, st):
+        from .memory import buffer_memory, copied_buffer, split
+
+        framed = replace_terms(length, {t: mk("len", self._frame_data) for t in subterms(length, "calldatasize")})
+        start = _memory_offset(pointer)
+        if start is not None and framed == mk("len", self._frame_data):
+            copied = copied_buffer(st.mem, start, self._frame_data)
+            if copied is not None:
+                return copied
+        size = _small_const(framed)
+        if size is None and self.resolver is not None:
+            size = _small_const(self.resolver.expand(framed))
+        if size == 0:
+            return const(b"", "bytes")
+        start = _memory_offset(pointer)
+        if start is None or size is None:
+            return None
+        base, _ = split(start)
+        seed = ()
+        writes = st.mem
+        if base[0] == "memory_address":
+            contents = self._memory_data(base, st)
+            backing = buffer_memory(contents, (base, 32))
+            if backing is not None:
+                seed = (((base, 0), const(backing[0])), *backing[1])
+                if all(st.store.get(k, FALSE) == FALSE for k in (_HEAP_UNPLACED, _HEAP_ALIASES)):
+                    scratch = set(_clobbered(st.mem, self._memory_floor(), None))
+                    writes = tuple(entry for entry in writes if entry not in scratch)
+        memory = list(seed)
+        for position, value in writes:
+            data = self._frame_data if value == _CALLDATA_COPY else None
+            if value[:2] == ("opaque", "returndatacopy") and value[2][0][0] == "return_buffer":
+                data = value[2][0][1]
+            layout = buffer_memory(data, position) if data is not None else None
+            memory.extend(layout[1] if layout is not None else ((position, value),))
+        pieces = _memory_bytes(
+            memory,
+            start,
+            size,
+            missing=lambda i, width: mk(
+                "unknown", "unsupported:assembly_memory_byte", self._frame_identity, self._steps, start, i, width
+            ),
+        )
+        return mk("enc", "abi.encodePacked", pieces) if pieces is not None else None
+
+    def _assembly_input(self, args, st, mode):
+        offset = 3 if mode == "call" else 2
+        data = self._memory_payload(args[offset], args[offset + 1], st)
+        return None if data is None else self._bytes_call(_convert("address", args[1]), data, mode)
+
+    def _bytes_call(self, target, data, mode):
+        from .memory import buffer_length
+
+        if self.resolver is None or buffer_length(data) is None:
+            return None
+        # Runtime dispatch owns both entry selection and decoding. The byte
+        # producer does not guess a signature when the selector is symbolic.
+        return mk("call", target, "", (), mode == "staticcall", None, None, (), True), TRUE, data
+
+    def _assembly_call(self, ir, args, st, mode, prepared):
+        from .memory import copied_byte, memory_uint
+
+        call, guard, data = prepared
+        summary = self._invoke_call(
+            ir,
+            call,
+            st,
+            data,
+            mk("unknown", "unsupported:raw_call_resources", self._frame_identity, self._steps, self._site(ir)),
+            mode,
+            input_guard=guard,
+            operands=tuple(args),
+        )
+        store = {
+            **{k: v for k, v in st.store.items() if k[0] == "heap"},
+            **{u.location: u.value for u in summary.storage},
+        }
+        success, returned = summary.returns
+        self._last_call, self._last_returns = mk("return_buffer", returned), None
+        dest, size = _memory_offset(args[-2]), _small_const(args[-1])
+        memory = st.mem
+        if size != 0:
+            if dest is None or size is None:
+                memory = ()
+            else:
+                for i in range(size):
+                    at = _memory_shift(dest, i)
+                    previous = memory_uint(st.mem, at, 1) or unknown("unsupported:unwritten_memory_byte")
+                    value = copied_byte(returned, i, previous)
+                    memory = (*memory, (at, mk("memory_fragment", mk_op("shl", (value, const(248))), 0, 1)))
+        after = State(mk_and([st.pc, summary.guard]), st.env, store, st.ret, mem=memory)
+        return self._write(ir.lvalue, success, after) if ir.lvalue is not None else after
+
+    def _invoke_call(
+        self,
+        ir,
+        call: Term,
+        st: State,
+        calldata: Term,
+        raw: Term | None = None,
+        mode=None,
+        *,
+        input_guard=TRUE,
+        operands=(),
+    ):
+        from .model import CallRequest, DeferredCall, Update
+
+        assert self.call_handler is not None
+        value = (
+            self._call_frame().value
+            if mode == "delegatecall"
+            else self.val(ir.call_value, st)
+            if getattr(ir, "call_value", None) is not None
+            else const(0)
+        )
+        gas = self.val(ir.call_gas, st) if getattr(ir, "call_gas", None) is not None else None
+        if operands:
+            value = operands[2] if mode == "call" else value
+            gas = None if operands[0][:2] == ("opaque", "gas()") else operands[0]
+        request = CallRequest(
+            call,
+            tuple(Update(k, v) for k, v in st.store.items() if k[0] != "heap"),
+            value,
+            gas,
+            self._node.type == NodeType.TRY,
+            raw,
+            self._call_frame(),
+            calldata,
+            mode,
+            mk_and([st.pc, input_guard]),
+            checked_return_size(self.contract),
+        )
+        try:
+            return self.call_handler(request)
+        except DeferredCall as exc:
+            self._defer_call(
+                st,
+                mode or ("staticcall" if call[4] else "call"),
+                call[1],
+                calldata,
+                value,
+                gas,
+                exc.reason,
+                decoded_call=call,
+                raw=raw,
+                operands=operands,
+                input_guard=input_guard,
+            )
+            raise  # only reachable if an executor was incorrectly used without its journal
+
+    def _raw_call(self, ir: LowLevelCall, st: State, mode: str) -> State | None:
+        """Use the existing call executor for typed Solidity bytes calls, retaining failed-call state."""
+        from .abi_values import inferred
+        from .memory import buffer_length
+
+        assert self.call_handler is not None
+        data = self._deep(self.val(ir.arguments[0], st), st) if ir.arguments else CALLDATA
+        target = self.val(ir.destination, st)
+        guard = TRUE
+        if self.resolver is not None and buffer_length(data) is not None:
+            prepared = self._bytes_call(target, data, mode)
+            if prepared is None:
+                return None
+            call, guard, _ = prepared
+        else:
+            call = self._encoded_call(target, data, mode == "staticcall")
+        if call is None:
+            return None
+        call = mk(*call[:6], None, call[7] if len(call) > 7 else tuple(inferred(v) for v in call[3]), self._decoder())
+        summary = self._invoke_call(
+            ir,
+            call,
+            st,
+            data,
+            mk("unknown", "unsupported:raw_call_resources", self._frame_identity, self._steps, self._site(ir)),
+            mode,
+            input_guard=guard,
+        )
+        store = {
+            **{k: v for k, v in st.store.items() if k[0] == "heap"},
+            **{u.location: u.value for u in summary.storage},
+        }
+        self._last_call, self._last_returns = unknown("unsupported:raw_returndata_memory"), None
+        after = State(mk_and([st.pc, summary.guard]), st.env, store, st.ret, mem=())
+        return self._write(ir.lvalue, ("tuple", summary.returns), after) if ir.lvalue is not None else after
 
     def _external_call(self, ir: HighLevelCall, st: State) -> State:
         target = self.val(ir.destination, st)
         fn = ir.function
-        signature = getattr(fn, "solidity_signature", None) or f"{ir.function_name}()"
-        view = bool(getattr(fn, "view", False) or getattr(fn, "pure", False) or not isinstance(fn, Function))
-        args = tuple(self.val(a, st) for a in ir.arguments)
+        signature = abi_signature(fn) or f"{ir.function_name}()"
+        evm = str(getattr(self.contract.compilation_unit, "context", {}).get("psat_evm_version", "") or "").lower()
+        view = ir.is_static_call() and evm not in ("homestead", "tangerinewhistle", "spuriousdragon")
+        from .abi_values import describe, transfer
+
+        input_types = (
+            tuple(describe(p.type) for p in fn.parameters)
+            if isinstance(fn, Function)
+            else tuple(describe(t) for t in getter_shape(fn.type)[0])
+        )
+        args = tuple(transfer(self._deep(self.val(a, st), st), t, t)[0] for a, t in zip(ir.arguments, input_types))
         value = self._from_here(mk("call", target, signature, args, view))
+        assert value is not None
         returns = getattr(fn, "returns", None) or []
+        if isinstance(fn, Function):
+            expected = tuple(describe(r.type) for r in returns)
+        else:
+            held = getattr(ir.lvalue, "type", None)
+            expected = tuple(describe(t) for t in held) if isinstance(held, list) else (describe(held),)
+        value = mk(*value[:5], value[5], expected, input_types, self._decoder())
         self._last_call = value
         self._last_returns = len(returns) if isinstance(fn, Function) else None
+        if self.call_handler is None and any(k[0] == "act" for k in st.store):
+            gap = unknown("unsupported:read_after_unmodeled_call")
+            self._last_call = gap
+            st = replace(st, pc=mk_and([st.pc, gap]), mem=())
+            result = gap if len(expected) == 1 else ("tuple", tuple(gap for _ in expected))
+            return self._write(ir.lvalue, result, st) if ir.lvalue is not None else st
+        if self.call_handler is not None:
+            summary = self._invoke_call(
+                ir, value, st, mk("enc", "abi.encodeWithSignature", (const(signature, "string"), *args), input_types)
+            )
+            store = {
+                **{k: v for k, v in st.store.items() if k[0] == "heap"},
+                **{u.location: u.value for u in summary.storage},
+            }
+            after = State(mk_and([st.pc, summary.guard]), st.env, store, st.ret)
+            values = summary.returns
+            self._last_call = unknown("unsupported:returndata_after_followed_call")
+            if ir.lvalue is None:
+                return after
+            result = values[0] if len(values) == 1 else ("tuple", tuple(values))
+            return self._write(ir.lvalue, result, after)
         if not view:
             st = _acted(st, value)
             if target == self.this:
@@ -2656,93 +3792,45 @@ class Lowerer:
             base = expr.expression_left
             if isinstance(base, Identifier) and isinstance(base.value, StateVariable) and not base.value.is_constant:
                 key = self._expression(expr.expression_right, st, depth + 1)
-                return self._read_at((self.this, base.value.name, (("k", key),)), st)
+                return self._read_at((self.this, storage_name(self.contract, base.value), (("k", key),)), st)
         return unknown(f"expression:{type(expr).__name__}")
 
     def _legacy_assembly(self, function: Function, asm: str, st: State) -> State:
-        """Inline assembly Slither leaves unlowered (Solidity before 0.6): its storage reads and writes and a
-        forwarding ``delegatecall`` are read from the text; anything else it assigns becomes unknown."""
-        import re
-
-        names: dict[str, Any] = {
-            v.name: v for v in [*function.parameters, *function.returns, *function.variables] if v.name
-        }
-        constants = {
-            v.name: v
-            for v in [
-                *getattr(self.contract.compilation_unit, "variables_top_level", []),
-                *self.contract.state_variables,
-            ]
-            if isinstance(v, TopLevelVariable) or v.is_constant
-        }
-
-        def value(token: str) -> Term:
-            if token in names:
-                return self._value(names[token], st)
-            if token in constants:
-                return _constant_initializer(constants[token])
-            try:
-                return const(int(token, 0))
-            except ValueError:
-                return unknown(f"asm:{token}")
-
+        """Parse the legacy frontend's text, using common value and memory semantics."""
+        from .layout import assembly_bindings
         from .yul import Unsupported, parse
 
+        self._last_call = st.store.get(_RETURN_BUFFER, _EMPTY_RETURN)
+        arity = st.store.get(_RETURN_ARITY)
+        self._last_returns = arity[1] if arity is not None and arity[0] == "const" else None
         try:
-            return self._yul(parse(asm), names, constants, st)
-        except Unsupported:
-            pass
-        if re.search(r"\b(sstore|delegatecall|callcode)\s*\(", asm):
-            # Storage this reading doesn't follow may be written, here or by code run on it: unrecorded. (A call
-            # out writes the callee's storage; an event missed only makes a lookup look less logged.)
+            bindings = assembly_bindings(self.contract, function, self._node)
+            return self._yul(parse(asm), bindings, st)
+        except (Unsupported, ValueError) as exc:
+            label = "unsupported:legacy_assembly"
+            if self.journal is not None:
+                self.journal.suspend(
+                    "operation",
+                    {
+                        "kind": "legacy_assembly",
+                        "reason": label,
+                        "detail": str(exc),
+                        "node": self.journal.references.ref(self._node),
+                        "state": st,
+                        "memory_frame": self._frame_identity,
+                        "caller_frame": self._call_frame().record(),
+                    },
+                )
             self.lost = True
-        acts = re.findall(r"\b(call|callcode|delegatecall|create|create2|selfdestruct)\s*\(", asm)
-        for act in sorted(set(acts)):
-            st = _acted(st, mk("assumed", act))
-        if re.search(r"\bsload\s*\(", asm):
-            self.raw_reads = True
-        assigned = set(re.findall(r"(\w+)\s*:=", asm)) | set(re.findall(r"let\s+(\w+)", asm))
-        for name in assigned:
-            if name in names:
-                st = self._bind(names[name], unknown(f"asm:{name}"), st)
-        # What runs before any control flow runs unconditionally; past it, an assignment or a write may not happen.
-        flow = re.search(r"\b(if|switch|for|case|default|function|leave|break|continue)\b", asm)
-        straight = asm[: flow.start()] if flow else asm
-        for target, source in re.findall(r"(\w+)\s*:=\s*(\w+)\s*(?=$|\n|\}|let\b|\w+\s*:=|mstore|sstore)", straight):
-            # A plain copy (``output := _input``): the value itself, unless the target is assigned again elsewhere.
-            if target in names and len(re.findall(rf"\b{target}\s*:=", asm)) == 1:
-                st = self._bind(names[target], value(source), st)
-        for target, slot in re.findall(r"(\w+)\s*:=\s*sload\(\s*(\w+)\s*\)", straight):
-            if target in names and len(re.findall(rf"\b{target}\s*:=", asm)) == 1:
-                st = self._bind(names[target], mk("rawload", self.this, value(slot)), st)
-        for target, account in re.findall(r"(\w+)\s*:=\s*extcodesize\(\s*(\w+)\s*\)", straight):
-            if target in names and len(re.findall(rf"\b{target}\s*:=", asm)) == 1:
-                st = self._bind(names[target], mk("codesize", value(account)), st)
-        if len(re.findall(r"\bsstore\(", asm)) > len(re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", straight)):
-            self.lost = True  # a store this reading doesn't place, or one that may not run
-        for slot, written in re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", straight):
-            st = State(st.pc, st.env, stored(st.store, ("raw", self.this, value(slot)), value(written)), st.ret)
-        for found in re.finditer(r"\blog([1-4])\s*\(", straight):
-            parts = _call_arguments(straight, found.end())
-            if parts is not None:
-                topics = tuple(self._asm_topic(part, value) for part in parts[2:])
-                st = State(st.pc, st.env, {**st.store, ("emit", f"log{found.group(1)}", topics): TRUE}, st.ret)
-        forward = re.search(r"delegatecall\(\s*[^,]+,\s*(\w+)", asm)
-        if forward and re.search(r"\breturn\(", asm):
-            # A proxy forwarding the call: it returns exactly when the delegate does.
-            ok = mk("delegate", value(forward.group(1)))
-            return State(mk_and([st.pc, ok]), st.env, st.store, st.ret or (unknown("forwarded"),), halted=True)
-        if re.search(r"\b(revert|invalid)\(", asm) and not re.search(r"\b(if|switch|case)\b", asm):
-            return State(FALSE, st.env, st.store, st.ret)
-        return st
+            return replace(_unfollowed_state(st, label), ret=(unknown(label),), halted=True)
 
-    def _yul(self, statements: list, names: dict, constants: dict, st: State) -> State:
+    def _yul(self, statements: list, bindings: dict, st: State) -> State:
         """Straight-line Yul (``yul.parse``), each builtin as the term the same operation lowers to in Solidity:
         storage reads and writes, events, memory reads as opaque values, and assignments to the function's own
         variables. Raises ``Unsupported`` for anything else that does more than compute a value."""
-        from .yul import Assign, Name, Number, Unsupported
+        from .yul import Assign, Block, Name, Number, Unsupported
 
-        local: dict[str, Term] = {}
+        scopes: list[dict[str, Term]] = [{}]
         binary = {
             "add": "add",
             "sub": "sub",
@@ -2757,15 +3845,28 @@ class Lowerer:
         compare = {"lt": "lt", "gt": "gt", "eq": "eq", "slt": "lt", "sgt": "gt"}
 
         def ev(e: Any) -> Term:
+            nonlocal st
+            if _spent():
+                raise Unsupported("value budget")
             if isinstance(e, Number):
                 return const(e.value)
             if isinstance(e, Name):
-                if e.name in local:
-                    return local[e.name]
-                if e.name in names:
-                    return self.val(names[e.name], st)
-                if e.name in constants:
-                    return _constant_initializer(constants[e.name])
+                for scope in reversed(scopes):
+                    if e.name in scope:
+                        return scope[e.name]
+                if e.name in bindings:
+                    variable, suffix = bindings[e.name]
+                    if suffix is not None:
+                        from .layout import locate_symbolic
+
+                        location = self._location(variable, st)
+                        where = (
+                            locate_symbolic(self.contract, location[1], location[2]) if location is not None else None
+                        )
+                        if where is None:
+                            raise Unsupported("storage reference")
+                        return where[0 if suffix == "slot" else 1]
+                    return self._operand(variable, None, st)
                 raise Unsupported(f"name {e.name}")  # a storage pointer's ``_slot``, a variable unknown here
             args = [ev(a) for a in e.args]
             name = e.name
@@ -2779,9 +3880,9 @@ class Lowerer:
                 return mk_cmp(compare[name], args[0], args[1])
             if name in ("sdiv", "smod", "sar") and len(args) == 2:
                 if name == "sar":
-                    return _convert("int256", mk_op("sar", (_convert("int256", args[1]), args[0])))
+                    return _evm_word(mk_op("sar", (_convert("int256", args[1]), args[0])))
                 x, y = (_convert("int256", a) for a in args)
-                return _convert("int256", mk_op(name, (x, y)))
+                return _evm_word(mk_op(name, (x, y)))
             if name in ("byte", "signextend") and len(args) == 2:
                 return mk_op(name, tuple(args))
             if name == "calldatasize" and not args:
@@ -2796,7 +3897,7 @@ class Lowerer:
             if name == "not" and len(args) == 1:
                 return mk_op("bnot", (args[0],))
             if name == "sload" and len(args) == 1:
-                return mk("rawload", self.this, args[0])
+                return read_store(st.store, ("raw", self.this, args[0]))
             if name == "caller" and not args:
                 return self.sender
             if name == "address" and not args:
@@ -2813,75 +3914,82 @@ class Lowerer:
                 offset = _small_const(args[0])
                 word = self._calldata_word(offset) if offset is not None else None
                 return word if word is not None else mk("elem", CALLDATA, args[0])
-            if name in ("mload", "keccak256", "addmod", "mulmod", "gas", "returndatasize", "msize"):
-                # Memory this reading doesn't track, what the gas or the last call leave: unknown by name (``addmod``
-                # and ``mulmod`` are evaluated exactly from it).
-                if name == "mload":
-                    return _lost_word("mload(uint256)", args)
+            if name == "mload":
+                st, value = self._load_memory(st, args[0])
+                return value
+            if name == "returndatasize":
+                return mk("retsize", self._last_call) if self._last_call is not None else unknown("returndata_state")
+            if name in ("keccak256", "addmod", "mulmod", "gas", "msize"):
                 return mk("opaque", name, tuple(args))
             raise Unsupported(f"builtin {name}")
 
-        for statement in statements:
-            if isinstance(statement, Assign):
-                if len(statement.targets) != 1:
-                    raise Unsupported("several targets")
-                target = statement.targets[0]
-                if (
-                    isinstance(statement.value, Name)
-                    and statement.value.name in names
-                    and statement.value.name not in local
-                ):
-                    term = self._value(names[statement.value.name], st)  # a plain copy: the same object, if one
-                else:
+        def execute(statements):
+            nonlocal st
+            for statement in statements:
+                if st.pc == FALSE or st.halted:
+                    return
+                if isinstance(statement, Block):
+                    scopes.append({})
+                    try:
+                        execute(statement.statements)
+                    finally:
+                        scopes.pop()
+                    continue
+                if isinstance(statement, Assign):
+                    if len(statement.targets) != 1:
+                        raise Unsupported("several targets")
+                    target = statement.targets[0]
                     term = const(0) if statement.value is None else ev(statement.value)
-                if target in local or target not in names:
-                    local[target] = term
+                    if statement.declared:
+                        scopes[-1][target] = term
+                        continue
+                    scope = next((s for s in reversed(scopes) if target in s), None)
+                    if scope is not None:
+                        scope[target] = term
+                    elif target in bindings and bindings[target][1] is None:
+                        st = self._bind(bindings[target][0], term, st)
+                    else:
+                        raise Unsupported(f"assignment to {target}")
+                    continue
+                call = statement.call
+                args = [ev(a) for a in call.args]
+                if call.name == "sstore" and len(args) == 2:
+                    st = replace(st, store=stored(st.store, ("raw", self.this, args[0]), args[1]))
+                elif call.name in ("mstore", "mstore8") and len(args) == 2:
+                    width = 32 if call.name == "mstore" else 1
+                    st = self._memory_written(st, (args[0], const(width)), args[1] if width == 32 else None)
+                    st = self._store_memory(st, args[0], args[1], width)
+                elif call.name in ("calldatacopy", "codecopy", "returndatacopy") and len(args) == 3:
+                    st = self._memory_written(st, (args[0], args[2]))
+                    if call.name == "calldatacopy":
+                        st = self._copy_calldata(args, st)
+                    elif call.name == "returndatacopy":
+                        st = self._copy_returndata(args, st)
+                    elif args[2] != const(0):
+                        st = replace(st, mem=_clobbered(st.mem, _memory_offset(args[0]), _small_const(args[2])))
+                elif call.name in ("return", "stop"):
+                    if len(args) != (2 if call.name == "return" else 0):
+                        raise Unsupported(f"arity {call.name}")
+                    st = self._return_memory(call.name, args, st)
+                elif call.name == "pop" and len(args) == 1:
+                    pass
+                elif call.name in ("log1", "log2", "log3", "log4"):
+                    topics = tuple(mk("sig") if _selector_word(t) else t for t in args[2:])
+                    st = replace(st, store={**st.store, ("emit", call.name, topics): TRUE})
+                elif call.name in ("revert", "invalid"):
+                    st = replace(st, pc=FALSE)
                 else:
-                    st = self._bind(names[target], term, st)
-                continue
-            call = statement.call
-            if call.name == "sstore" and len(call.args) == 2:
-                slot, written = ev(call.args[0]), ev(call.args[1])
-                st = State(st.pc, st.env, stored(st.store, ("raw", self.this, slot), written), st.ret)
-            elif call.name in ("mstore", "mstore8", "calldatacopy", "codecopy", "returndatacopy"):
-                for a in call.args:
-                    ev(a)
-                st = replace(st, mem=())  # memory this reading doesn't track
-            elif call.name == "pop":
-                ev(call.args[0])
-            elif call.name in ("log1", "log2", "log3", "log4"):
-                topics = [ev(a) for a in call.args[2:]]
-                topics = [mk("sig") if _selector_word(t) else t for t in topics]
-                st = State(st.pc, st.env, {**st.store, ("emit", call.name, tuple(topics)): TRUE}, st.ret)
-            elif call.name in ("revert", "invalid"):
-                return State(FALSE, st.env, st.store, st.ret)
-            else:
-                raise Unsupported(f"statement {call.name}")
-        return st
+                    raise Unsupported(f"statement {call.name}")
 
-    def _asm_topic(self, text: str, value: Callable[[str], Term]) -> Term:
-        """A legacy-assembly log topic: the selector (DSS ``note``'s ``shl(224, shr(224, calldataload(0)))``), an
-        argument read from calldata, the caller, or a named value."""
-        text = re.sub(r"\s+", "", text)
-        if text in (
-            "shl(224,shr(224,calldataload(0)))",
-            "and(calldataload(0),not(0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff))",
-        ):
-            return mk("sig")
-        loaded = re.fullmatch(r"calldataload\((\w+)\)", text)
-        if loaded:
-            try:
-                return self._calldata_word(int(loaded.group(1), 0)) or unknown("asm:calldata")
-            except ValueError:
-                return unknown("asm:calldata")
-        if text in ("caller", "caller()"):
-            return self.sender
-        if re.fullmatch(r"\w+", text):
-            return value(text)
-        return unknown("asm:topic")
+        execute(statements)
+        return st
 
     def _calldata_word(self, offset: int) -> Term | None:
         """``calldataload(4 + 32 i)``: the call's ``i``-th argument, when it and every one before it is one word."""
+        if self._frame_data != CALLDATA:
+            from .memory import buffer_uint
+
+            return buffer_uint(self._frame_data, offset, 32, padded=True)
         if offset < 4 or (offset - 4) % 32:
             return None
         index = (offset - 4) // 32
@@ -2984,7 +4092,11 @@ class Lowerer:
             if declared is not None:
                 return self._write(ir.lvalue, _constant_initializer(declared), st)
             # ``IAuthority.canCall`` as a value (``abi.encodeCall``'s first argument): the function it names.
-            named = {f.solidity_signature for f in ir.variable_left.functions if f.name == field_name}
+            named = {
+                abi_signature(f)
+                for f in ir.variable_left.functions_entry_points
+                if f.name == field_name and not (f.is_constructor or f.is_fallback or f.is_receive)
+            }
             if len(named) == 1:
                 return self._write(ir.lvalue, const(named.pop(), "function"), st)
         whole = self.val(ir.variable_left, st)
@@ -3002,7 +4114,9 @@ class Lowerer:
             return self._write(ir.lvalue, _field_of(whole, field_name), st)
         if isinstance(whole, tuple) and whole and whole[0] == "load":
             # A field of a struct read whole from storage (``Config memory c = _config; c.epoch``): that field's slot.
-            return self._write(ir.lvalue, mk("load", whole[1], whole[2], (*whole[3], ("f", field_name))), st)
+            from .cells import child_load
+
+            return self._write(ir.lvalue, child_load(whole, (("f", field_name),)), st)
         if isinstance(whole, tuple) and whole and whole[0] == "arg" and ir.lvalue is not None:
             # A field of a struct the caller passes is a value the caller picks, like any argument.
             return self._write(ir.lvalue, _typed_arg(f"{whole[1]}.{field_name}", ir.lvalue.type), st)
@@ -3017,7 +4131,12 @@ class Lowerer:
             column = mk("arg", f"{whole[1][1]}[].{field_name}", f"{ir.lvalue.type}[]")
             return self._write(ir.lvalue, mk("elem", column, whole[2]), st)
         if field_name in ("codesize", "codehash") and _address_typed(getattr(ir.variable_left, "type", None)):
-            return self._write(ir.lvalue, mk(field_name, whole), st)  # ``address(token).code.length``
+            value = (
+                unknown("unsupported:account_after_unmodeled_call")
+                if any(k[0] == "act" for k in st.store)
+                else mk(field_name, whole)
+            )
+            return self._write(ir.lvalue, value, st)  # ``address(token).code.length``
         # A field of any other value (one another contract returned, encoded with dynamic parts): unknown by name.
         return self._write(ir.lvalue, mk("opaque", f"unsupported:member:{field_name}", (whole,)), st)
 
@@ -3040,7 +4159,7 @@ class Lowerer:
 
     def _location(self, var: Any, st: State) -> tuple | None:
         if isinstance(var, StateVariable) and not (var.is_constant or var.is_immutable):
-            return (self.this, var.name, ())
+            return (self.this, storage_name(self.contract, var), ())
         held = st.env.get(id(var))
         if isinstance(held, tuple) and held and held[0] == "loc":
             return held[1]
@@ -3048,17 +4167,171 @@ class Lowerer:
 
     def _read_at(self, loc: tuple, st: State) -> Term:
         """Storage at ``loc`` as this call sees it (``read_store``)."""
-        return read_store(st.store, loc)
+        from .cells import annotate
+
+        return read_store(st.store, annotate(self.contract, self.code, loc))
+
+    def _storage_reference(self, variable, expression, st):
+        from .layout import locate_symbolic, storage_reference
+
+        if not self._in_yul():
+            return None
+        suffix = storage_reference(self.contract.compilation_unit, expression)
+        if suffix is None:
+            if (isinstance(variable, StateVariable) and not (variable.is_constant or variable.is_immutable)) or getattr(
+                variable, "is_storage", False
+            ):
+                return unknown("unsupported:storage_reference_metadata")
+            return None
+        if suffix == "unresolved":
+            return unknown("unsupported:storage_reference_metadata")
+        location = self._location(variable, st)
+        if location is None:
+            return unknown("unsupported:storage_reference")
+        try:
+            where = locate_symbolic(self.contract, location[1], location[2])
+        except ValueError as exc:
+            return unknown(str(exc))
+        return where[0 if suffix == "slot" else 1] if where is not None else unknown("unsupported:storage_reference")
+
+    def _operand(self, variable, expression, st):
+        referenced = self._storage_reference(variable, expression, st)
+        if referenced is not None:
+            return referenced
+        if self._in_yul() and self._memory_var(variable):
+            pointer = self._value(variable, st)
+            if not _pointer(pointer):
+                return unknown("unsupported:memory_pointer_identity")
+            reference = substitute(pointer, "ptr", lambda p: mk("memory_object", p[1]))
+            return mk("memory_address", self._frame_identity, reference)
+        return self.val(variable, st)
+
+    def _memory_data(self, pointer, st):
+        """Only memory reads may dereference an address into current object contents."""
+        active = set()
+
+        def dereference(t):
+            if t[1] != self._frame_identity or t in active:
+                return unknown("unsupported:memory_pointer_view")
+            active.add(t)
+            try:
+                ref = substitute(t[2], "memory_object", lambda p: mk("ptr", p[1]))
+                if not _pointer(ref):
+                    return unknown("unsupported:memory_pointer_view")
+                return substitute(self._deep(ref, st), "memory_address", dereference)
+            finally:
+                active.remove(t)
+
+        return substitute(pointer, "memory_address", dereference)
+
+    def _fresh_memory(self, position, st):
+        if not isinstance(position, tuple):
+            return False
+        base, _ = position
+        if (
+            base[0] != "memory_address"
+            or base[1] != self._frame_identity
+            or base[2][:1] != ("memory_arena",)
+            or not base[2][2]
+            or base[2][3] != self._objects
+            or any(st.store.get(k, FALSE) != FALSE for k in (_HEAP_UNPLACED, _HEAP_ALIASES))
+        ):
+            return False
+        current = _memory_word(st.mem, 64)
+        at = _memory_offset(current) if current is not None else None
+        return isinstance(at, tuple) and at[0] == base
+
+    def _argument(self, ir, index, variable, st):
+        expressions = getattr(ir.expression, "arguments", ())
+        return self._operand(variable, expressions[index] if index < len(expressions) else None, st)
+
+    def _in_yul(self) -> bool:
+        return bool(
+            getattr(getattr(self._node, "scope", None), "is_yul", False)
+            or (
+                getattr(self._node, "type", None) == NodeType.ASSEMBLY
+                and isinstance(getattr(self._node, "inline_asm", None), str)
+            )
+        )
 
     def _bind(self, lvalue: Any, value: Any, st: State) -> State:
+        if self._in_yul() and self._memory_var(lvalue):
+            from .abi_values import describe
+
+            reference = self._memory_reference(value, describe(lvalue.type))
+            if reference is None:
+                label = "unsupported:memory_reference_cast"
+                if self.journal is not None:
+                    self.journal.suspend(
+                        "operation",
+                        {
+                            "kind": "memory_reference",
+                            "reason": label,
+                            "value": value,
+                            "destination": self.journal.references.ref(lvalue),
+                            "type": describe(lvalue.type),
+                            "state": st,
+                            "objects": self._object_types,
+                            "memory_frame": self._frame_identity,
+                            "caller_frame": self._call_frame().record(),
+                        },
+                    )
+                after = _unfollowed_state(st, label)
+                self._halts.append(Exit(after.pc, after.store, (unknown(label),), halted=True))
+                return replace(after, pc=FALSE)
+            return State(st.pc, {**st.env, id(lvalue): reference}, st.store, st.ret, mem=st.mem)
+        if self._in_yul() and isinstance(value, Term) and not isinstance(lvalue, TemporaryVariable):
+            from .abi_values import describe
+
+            desc = describe(getattr(lvalue, "type", None))
+            if desc[1] == "enum":
+                label = "unsupported:yul_enum_assignment"
+                after = _unfollowed_state(st, label)
+                self._halts.append(Exit(after.pc, after.store, (unknown(label),), halted=True))
+                return replace(after, pc=FALSE)
+            if re.fullmatch(r"u?int\d+|bytes\d+|bool|address", desc[1]):
+                value = mk("stackword", value, desc)
         if self._memory_var(lvalue) and not _pointer(value) and not _reference(value):
             return self._allocate(lvalue, value, st)  # a new value in memory: an object of its own
         env = dict(st.env)
         env[id(lvalue)] = value
         return State(st.pc, env, st.store, st.ret, mem=st.mem)
 
+    def _memory_reference(self, value, type_):
+        """A Yul word assigned back to a Solidity reference preserves a known alias."""
+
+        def supported(t):
+            return not isinstance(t, tuple) or (t[:2] != ("abi_type", "unsupported") and all(supported(x) for x in t))
+
+        if not supported(type_):
+            return None
+        if value[0] == "stackword":
+            value = value[1]
+        if value[:2] == ("conv", "uint256") and value[2][0] == "memory_address":
+            value = value[2]
+        if value[0] == "memory_address" and value[1] == self._frame_identity:
+            value = substitute(value[2], "memory_object", lambda p: mk("ptr", p[1]))
+        if value[0] == "ptr":
+            return value if self._object_types.get(value[1]) == type_ else None
+        if value[0] == "ite":
+            yes = self._memory_reference(value[2], type_)
+            no = self._memory_reference(value[3], type_)
+            return mk_ite(value[1], yes, no) if yes is not None and no is not None else None
+        return None
+
     def _write(self, lvalue: Any, value: Any, st: State) -> State:
         ref = st.env.get(id(lvalue))
+        if (
+            isinstance(value, Term)
+            and contains(value, frozenset({"stackword"}))
+            and (
+                self._location(lvalue, st) is not None
+                or (isinstance(ref, tuple) and ref and ref[0] in ("mref", "sref"))
+            )
+        ):
+            from .abi_values import stack_value
+
+            value = substitute(value, "stackword", lambda t: stack_value(t[1], t[2])[0])
         if isinstance(ref, tuple) and ref and ref[0] == "mref":
             # An item written in place: in the object holding it, or in the value holding it, written back where that
             # value lives (an item or field of another value: ``g[1][0] = x``, ``s.xs[i] = x``).
@@ -3081,6 +4354,9 @@ class Lowerer:
         loc = self._location(lvalue, st)
         if loc is not None:
             # Storage holds a copy: whatever objects the value points to, read out.
+            from .cells import annotate
+
+            loc = annotate(self.contract, self.code, loc)
             return State(st.pc, st.env, stored(st.store, loc, self._deep(value, st)), st.ret, mem=st.mem)
         if getattr(lvalue, "is_storage", False) and not isinstance(lvalue, (StateVariable, ReferenceVariable)):
             # Written through a storage pointer whose location isn't one place: any of this contract's storage.
@@ -3099,15 +4375,68 @@ class Lowerer:
         """A local, parameter or temporary holding a value memory keeps by reference."""
         if isinstance(var, (StateVariable, ReferenceVariable, Constant, SolidityVariable)):
             return False
+        if isinstance(var, TemporaryVariable) and self._in_yul():
+            return False  # Yul temporaries are words, even when frontend type inference copies a reference type.
+        function = getattr(var, "function", None)
+        if function is not None:
+            if getattr(getattr(function, "function_language", None), "name", None) == "Yul":
+                return False
+            declared = function.__dict__.get("_psat_yul_words")
+            if declared is None:
+                declared = function.__dict__["_psat_yul_words"] = {
+                    id(n.variable_declaration)
+                    for n in function.nodes
+                    if getattr(getattr(n, "scope", None), "is_yul", False) and n.variable_declaration is not None
+                }
+            if id(var) in declared:
+                return False
         if getattr(var, "is_storage", False) or getattr(var, "location", None) in ("storage", "calldata"):
             return False
         return _reference_typed(getattr(var, "type", None))
 
+    def _unplaced_heap(self, st: State, region: tuple = ()) -> State:
+        return replace(
+            st,
+            store={
+                k: mk("opaque", "unsupported:assembly_heap_alias", (v, *region))
+                if k[0] == "heap" and isinstance(k[1], int)
+                else v
+                for k, v in st.store.items()
+            },
+        )
+
     def _allocate(self, var: Any, value: Any, st: State) -> State:
+        from .abi_values import describe
+
+        if st.store.get(_HEAP_UNPLACED, FALSE) != FALSE:
+            return self._retain_allocator(st, var)
+        if any(st.store.get(k, FALSE) != FALSE for k in (_HEAP_UNPLACED, _HEAP_ALIASES)):
+            # The new allocation can overlap an older object when assembly rewrote the free pointer.
+            st = self._unplaced_heap(st)
+            value = mk("opaque", "unsupported:assembly_heap_alias", (value,))
         self._objects += 1
+        self._object_types[self._objects] = describe(var.type)
         env = dict(st.env)
         env[id(var)] = mk("ptr", self._objects)
-        return State(st.pc, env, stored(st.store, ("heap", self._objects), value), st.ret, mem=st.mem)
+        return State(st.pc, env, stored(st.store, ("heap", self._objects), value), st.ret, mem=())
+
+    def _retain_allocator(self, st, site):
+        label = "unsupported:memory_allocator"
+        if self.journal is not None:
+            self.journal.suspend(
+                "operation",
+                {
+                    "kind": "memory_allocation",
+                    "reason": label,
+                    "site": self.journal.references.ref(site),
+                    "state": st,
+                    "objects": self._object_types,
+                    "memory_frame": self._frame_identity,
+                    "caller_frame": self._call_frame().record(),
+                },
+            )
+        self.lost = True
+        return replace(_unfollowed_state(st, label), ret=(unknown(label),), halted=True)
 
     def _object(self, value: Any, st: State) -> Any:
         """What a pointer points to (each pointer of a choice between them); anything else as it is."""
@@ -3122,6 +4451,8 @@ class Lowerer:
         current = self._value(holder, st)
         if not _pointer(current):
             return self._write(holder, change(current), st)
+        if any(st.store.get(k, FALSE) != FALSE for k in (_HEAP_UNPLACED, _HEAP_ALIASES)):
+            st = self._unplaced_heap(st, (current,))
         conditions: dict[int, list] = {}
 
         def leaves(t: Any, cond: Term) -> None:
@@ -3184,11 +4515,35 @@ class Lowerer:
 
     def val(self, var: Any, st: State) -> Any:
         """``var``'s value, every object it points to read out."""
-        return self._deep(self._value(var, st), st)
+        value = self._deep(self._value(var, st), st)
+        if (
+            isinstance(value, Term)
+            and value[0] == "ite"
+            and value[3] == unknown("unsupported:revert_data")
+            and _conjuncts(value[1]) <= _conjuncts(st.pc)
+        ):
+            value = value[2]  # this very call's success flag was required; its failure bytes are unreachable
+        if isinstance(value, Term) and contains(value, frozenset({"stackword"})):
+            from .abi_values import stack_value
+
+            return substitute(value, "stackword", lambda t: t[1] if self._in_yul() else stack_value(t[1], t[2])[0])
+        if self._in_yul() and isinstance(value, Term):
+            name = str(getattr(var, "type", None))
+            fixed = re.fullmatch(r"bytes(\d+)", name)
+            if fixed and not isinstance(var, TemporaryVariable):
+                return mk_op("shl", (value, const(256 - 8 * int(fixed[1]))))
+            if name.startswith("int"):
+                return _evm_word(value)
+        return value
 
     def _value(self, var: Any, st: State) -> Any:
         """``var``'s value as it is held: a value memory keeps by reference is its pointer."""
         if isinstance(var, Constant):
+            if str(var.type) == "string" and isinstance(var.value, str):
+                raw = _compiler_literal_bytes(self._node, var.value)
+                if raw is None:
+                    return unknown("unsupported:string_literal_provenance")
+                return const(var.value, "string") if raw == var.value.encode("utf-8") else const(raw, "bytes")
             return _constant(var)
         if isinstance(var, (SolidityVariableComposed, SolidityVariable)):
             if var.name == "msg.sender":
@@ -3215,7 +4570,7 @@ class Lowerer:
                 return _constant_initializer(var)
             if var.is_immutable:
                 return mk("immutable", self.code, var.name)
-            return self._read_at((self.this, var.name, ()), st)
+            return self._read_at((self.this, storage_name(self.contract, var), ()), st)
         owner = getattr(var, "function", None)
         if owner is not None and id(var) in self._same_named(owner)[1]:
             return unknown(f"shadowed:{_SCOPED.sub('', var.name)}")  # which same-named local is read isn't known
@@ -3514,13 +4869,17 @@ def _typed_packed(var: Any, value: Term) -> Term:
 
 
 def _abi_item(var: Any, value: Term) -> Term:
-    """An ``abi.encode`` item: a one-word value as its declared type lays it out (``_typed_word``); an argument or a
-    literal of any other type as it is (its own term says its type); anything else of a type laid out over more than
-    one word, or none (a struct, an array, ``bytes`` read from storage, a function), refused by name,
-    ``unsupported:abi_item:<type>``, rather than left for the encoding to fail on unnamed."""
+    """Preserve scalar types and static aggregates with their encoding's declared layout.
+
+    Dynamic arguments/literals retain their own types. Other unmodeled values are refused by name.
+    """
     declared = _typed_arg("", getattr(var, "type", None))[2]
     if re.fullmatch(r"address|bool|u?int\d*|bytes\d+", declared):
         return _typed_word(var, value)
+    from .abi_values import describe, static_words
+
+    if static_words(describe(getattr(var, "type", None))) is not None:
+        return value  # The encoding term carries this static aggregate's declared layout.
     if value[0] in ("arg", "const"):
         return value
     label = re.sub(r"[^A-Za-z0-9_.()\[\]]", "", declared) or "unknown"
@@ -3546,37 +4905,6 @@ def _typed_word(var: Any, value: Term) -> Term:
     if own == declared or (own is None and packed_width(value) == 32 and declared in ("uint256", "bytes32")):
         return value
     return mk("conv", declared, value)
-
-
-def _static_words(values: tuple) -> list[Term] | None:
-    """The words ``abi.encode(values)`` lays out, when each value is a one-word value of known type."""
-    words = []
-    for v in values:
-        type_ = v[2] if v[0] in ("arg", "const") and isinstance(v[2], str) else v[1] if v[0] == "conv" else None
-        if type_ is None or type_ in ("bytes", "string") or "[" in type_ or "(" in type_:
-            return None
-        words.append(v)
-    return words
-
-
-def _decodes_as(encoded: str | None, decoded: str) -> bool:
-    """Whether a word ``abi.encode`` made of an ``encoded`` value decodes as ``decoded`` to the same number: the same
-    type, or an integer type whose range holds the encoded one's (an address read as ``uint256``)."""
-    if encoded == decoded:
-        return True
-
-    def range_of(type_: str | None) -> tuple[int, bool] | None:
-        if type_ in ("address", "address payable"):
-            return 160, False
-        if type_ == "bool":
-            return 1, False
-        found = re.fullmatch(r"(u?)int(\d*)", type_ or "")
-        return (int(found.group(2) or 256), found.group(1) == "") if found else None
-
-    a, b = range_of(encoded), range_of(decoded)
-    if a is None or b is None or (b[0] == 1 and a[0] != 1):
-        return False
-    return (a[1] == b[1] and a[0] <= b[0]) or (not a[1] and b[1] and a[0] < b[0])
 
 
 def _type_of(value: Term) -> str | None:
@@ -3673,9 +5001,26 @@ def _field_of(whole: Any, name: str) -> Term:
     return unknown("memory")
 
 
+def _signed_yul_operation(ir: Any) -> bool:
+    from slither.core.expressions import BinaryOperationType
+
+    return getattr(getattr(ir, "expression", None), "type", None) in (
+        BinaryOperationType.DIVISION_SIGNED,
+        BinaryOperationType.MODULO_SIGNED,
+        BinaryOperationType.LESS_SIGNED,
+        BinaryOperationType.GREATER_SIGNED,
+        BinaryOperationType.RIGHT_SHIFT_ARITHMETIC,
+    )
+
+
 def _operand_type(ir: Binary) -> Any:
     """The type an operation computes in: its left operand's (a shift's always), else its right's where the left
     is a literal Slither may have typed loosely."""
+    from .layout import binary_operation_type
+
+    declared = binary_operation_type(ir.node.compilation_unit, ir.expression)
+    if declared is not None:
+        return declared
     left, right = ir.variable_left, ir.variable_right
     if (
         isinstance(left, Constant)
@@ -3873,14 +5218,7 @@ def _items(term: Any) -> tuple | None:
 
 def _abi_type(type_: Any) -> str | None:
     """``type_`` as the ABI names it: a struct a tuple of its fields, an enum ``uint8``, a contract ``address``."""
-    from slither.utils.type import convert_type_for_solidity_signature_to_string
-
-    try:
-        return convert_type_for_solidity_signature_to_string(type_)
-    except Exception as exc:  # a type the conversion doesn't know: refused by whoever asked
-        if isinstance(exc, TimeoutError):
-            raise
-        return None
+    return abi_name(type_)
 
 
 def _abi_static(abi: str) -> bool:
@@ -3945,7 +5283,7 @@ def _returned_items(call: Term, returns: list) -> tuple:
         return (
             "tuple",
             tuple(
-                mk("abi", call, whole, (i,), str(a)) if _fixed_bytes_abi(a) else mk("item", call, i)
+                mk("abi", call, whole, (i,), str(a)) if _fixed_bytes_abi(a) else mk("retword", call, i)
                 for i, a in enumerate(abis)
             ),
         )
@@ -4009,7 +5347,7 @@ def _signature_of(contract: Any, selector: int, arity: int) -> str | None:
         for c in contract.compilation_unit.contracts:
             for f in c.functions:
                 try:
-                    signature = f.solidity_signature
+                    signature = abi_signature(f)
                 except Exception:  # a declaration Slither can't type
                     continue
                 key = int.from_bytes(keccak(text=signature)[:4], "big")
@@ -4036,7 +5374,7 @@ def _encoded_action(target: Term, data: Term, value: Term) -> Term | None:
     if len(encoded) != 1 or not any(a[0] == "const" and a[1] == 32 for a in data[2]):
         return None
     call = _view_call(target, encoded[0])
-    return None if call is None else mk("call", call[1], call[2], call[3], False)
+    return None if call is None else mk("call", call[1], call[2], call[3], False, *call[5:])
 
 
 def _view_call(target: Term, data: Term) -> Term | None:
@@ -4046,7 +5384,11 @@ def _view_call(target: Term, data: Term) -> Term | None:
     signature = data[2][0][1]
     if not isinstance(signature, str) or "(" not in signature:
         return None
-    return mk("call", target, signature, tuple(data[2][1:]), True)
+    return (
+        mk("call", target, signature, tuple(data[2][1:]), True, None, None, data[3])
+        if len(data) > 3
+        else mk("call", target, signature, tuple(data[2][1:]), True)
+    )
 
 
 def _lost_word(name: str, args: Any) -> Term:
@@ -4157,16 +5499,50 @@ def _source(item: Any, fits: Any = None) -> str:
     return next((r for r in readings if fits(r)), "")
 
 
-def _literal_bytes(value: str, source: str) -> bytes | None:
-    """A string literal's bytes: a ``hex"..."`` one's from its source (Slither's value decodes them as text, which
-    not every byte sequence survives), any other's as UTF-8."""
-    if not source.startswith("hex"):
-        return value.encode()
-    digits = source[3:].strip().strip("'\"").replace("_", "")
-    try:
-        return bytes.fromhex(digits)
-    except ValueError:
+def _compiler_literal_bytes(item: Any, value: str) -> bytes | None:
+    """Recover literal bytes from solc's hexValue, within this expression's source span.
+
+    Slither uses the same text '0x80ff' for a real text literal and for non-UTF8 bytes.
+    Ambiguous identical IR constants in one expression are rejected, not guessed.
+    """
+    mapping = getattr(item, "source_mapping", None)
+    unit = getattr(mapping, "compilation_unit", None)
+    if unit is None:
         return None
+    if not hasattr(unit, "_psat_literal_bytes"):
+        literals = {}
+        compilation = unit.crytic_compile_compilation_unit
+        for filename, source in compilation.source_units.items():
+            found = []
+            stack = [source.ast]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, list):
+                    stack.extend(node)
+                elif isinstance(node, dict):
+                    stack.extend(v for v in node.values() if isinstance(v, (dict, list)))
+                    if node.get("nodeType", node.get("name")) != "Literal":
+                        continue
+                    attributes = node.get("attributes", node)
+                    raw = attributes.get("hexValue", attributes.get("hexvalue"))
+                    if not isinstance(raw, str):
+                        continue
+                    try:
+                        start, length, _ = map(int, node["src"].split(":"))
+                        data = bytes.fromhex(raw)
+                    except (KeyError, ValueError):
+                        continue
+                    display = attributes.get("value")
+                    found.append((start, start + length, display if display is not None else "0x" + raw, data))
+            literals[filename.absolute] = found
+        unit._psat_literal_bytes = literals
+    end = mapping.start + mapping.length
+    matches = {
+        raw
+        for start, stop, display, raw in unit._psat_literal_bytes.get(mapping.filename.absolute, ())
+        if mapping.start <= start and stop <= end and display == value
+    }
+    return matches.pop() if len(matches) == 1 else None
 
 
 def _constant_initializer(var: StateVariable) -> Term:
@@ -4203,10 +5579,13 @@ def _fold_expression(expr: Any, type_: str, depth: int) -> Term | None:
         if str(expr.type) == "bool" or type_ == "bool":
             return const(value in (True, "true"), "bool")
         if isinstance(value, str) and str(expr.type) == "string":
-            source = _source(expr, lambda text: text.startswith(("hex", '"', "'")))
-            raw = _literal_bytes(value, source) if source else None  # unread: a ``hex`` literal's bytes unknown
-            aligned = _fixed_bytes(raw, type_) if raw is not None else None
-            return const(aligned, type_) if aligned is not None else const(value, "string")
+            raw = _compiler_literal_bytes(expr, value)
+            if raw is None:
+                return unknown("unsupported:string_literal_provenance")
+            aligned = _fixed_bytes(raw, type_)
+            if aligned is not None:
+                return const(aligned, type_)
+            return const(value, "string") if raw == value.encode("utf-8") else const(raw, "bytes")
         try:
             number = int(value, 0) if isinstance(value, str) else int(value)
         except (TypeError, ValueError):

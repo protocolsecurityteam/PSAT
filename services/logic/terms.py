@@ -6,24 +6,40 @@ Values::
     ("arg", name, type)                     an argument the caller chooses
     ("const", value, type)                  ints (addresses as ints), bools, strings
     ("time", kind)                          block.timestamp, block.number, ...
-    ("load", contract, var, path)           storage; ``path`` is (("k", key) | ("f", field), ...)
+    ("load", contract, var, path[, view])   storage; ``path`` is (("k", key) | ("f", field), ...).
+                                            Optional view retains code address and physical cell coordinates.
     ("rawload", contract, slot)             an assembly ``sload``
     ("hash", kind, args)                    keccak256 / sha256 / ripemd160
     ("enc", kind, args)                     abi.encode* (only ever hashed or compared)
+    ("enc", kind, args, types)              ``types`` the ABI types the items are encoded as, when lowered
     ("signer", digest, v, r, s)             ecrecover: the identity that signed ``digest``
     ("call", target, signature, args, view) another contract's answer
+        optional trailing fields: sender, decoded return types, encoded input types, call-site ABI decoder
+    ("abi_word", bytes_argument, index)    disjoint 32-byte word; decoding length and validity are path constraints
+    ("bytes_prefix", prefix_bytes, tail)   exact fixed bytes followed by an arbitrary byte stream
+    ("bytes_slice", data, start, length)   byte view, padded past its source, without source-offset wrapping
+    ("bytes_patch", data, patches)         ordered (offset, word, word_start, width) writes within data's extent
+    ("byte_chunk", bytes_argument, index) internal finite read of that stream, with equal-index congruence
     ("immutable", code, name)               an immutable of the code at ``code``
     ("item", value, index)                  one element of a tuple result: word ``index`` of the return data
     ("abi", call, returns, path, type)      an item of a call's ABI-decoded return data (``returns`` its tuple type,
                                             ``path`` the position and the struct fields down to it, ``type`` its own)
+    ("delegate", target[, data])            a ``delegatecall``'s success; without ``data``, a verified forward of this
+                                            call's whole calldata (a proxy), with it anything else
     ("ok", call, n)  ("caught", call, n)    whether that call returns, or reverts in the callee (a ``try``); ``n``
                                             return values expected, ``None`` if unknown
     ("len", value)  ("elem", value, index)  arrays
     ("slice", word, start, length)          bytes [start, start+length) of a word, big-endian (assembly memory)
     ("op", name, args)  ("conv", type, value)  ("ite", cond, then, else)
     ("unknown", reason)                     anything the lowering can't express
+    ("write_power", guard, target, value)    a separate projection query: this caller can produce a single-write
+                                            outcome that some other nonzero caller cannot produce with any inputs
+    ("memory_address", frame, reference)    stable address identity of a memory reference, not its contents;
+                                            numeric allocation addresses remain an unsupported query
+    ("memory_object", id)                   a frame-local object reference inside memory_address
 
-Conditions are values of bool type: ``("cmp", "eq" | "lt" | "le", a, b)``, ``("not", a)``, ``("and", frozenset)``,
+Conditions are values of bool type: ``("cmp", "eq" | "lt", a, b)`` (legacy terms also admit ``le``),
+``("not", a)``, ``("and", frozenset)``,
 ``("or", frozenset)`` and bool constants. The constructors simplify as they build, which is what keeps the merge of
 many branches small: ``(P and c) or (P and not c)`` is ``P``.
 """
@@ -32,7 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any
+from typing import Any, cast
 
 
 class Term(tuple):
@@ -133,7 +149,7 @@ def unknown(reason: str) -> Term:
     return mk("unknown", reason)
 
 
-def _unmodelled(term: Term) -> bool:
+def _unmodelled(term: tuple) -> bool:
     """A diagnostic label is not a value identity: two rejected reads may share its text."""
     return contains(term, frozenset({"unknown", "opaque", "assumed", "delegate", "call"}))
 
@@ -167,6 +183,8 @@ def mk_and(items: Any) -> Term:
     parts.discard(TRUE)
     if FALSE in parts or any(not _unmodelled(p) and mk_not(p) in parts for p in parts):
         return FALSE
+    if any(p[0] == "not" and p[1][0] == "and" and not _unmodelled(p) and p[1][1] <= parts for p in parts):
+        return FALSE  # A and B and not(A and B), after conjunction flattening.
     if not parts:
         return TRUE
     if len(parts) == 1:
@@ -222,28 +240,32 @@ def mk_ite(cond: Term, then: Term, other: Term) -> Term:
 
 
 def mk_cmp(op: str, a: Term, b: Term) -> Term:
-    """``op`` in eq, ne, lt, le, gt, ge; stored as eq, lt and le."""
+    """``op`` in eq, ne, lt, le, gt, ge; canonical comparisons use eq and lt."""
     if op == "ne":
         return mk_not(mk_cmp("eq", a, b))
     if op == "gt":
         return mk_cmp("lt", b, a)
     if op == "ge":
         return mk_cmp("le", b, a)
+    if op == "le":
+        return mk_not(mk_cmp("lt", b, a))
     if is_const(a) and is_const(b) and _comparable(a[1], b[1]):
         x, y = _num(a[1]), _num(b[1])
-        return TRUE if {"eq": x == y, "lt": x < y, "le": x <= y}[op] else FALSE
+        return TRUE if {"eq": x == y, "lt": x < y}[op] else FALSE
     if op == "eq" and is_const(a) and is_const(b) and isinstance(a[1], str) and isinstance(b[1], str) and a[2] == b[2]:
         return TRUE if a[1] == b[1] else FALSE  # two literals of one type: equal exactly when their text is
-    if op in ("eq", "le") and a == b and not _unmodelled(a):
+    if op == "eq" and a == b and not _unmodelled(a):
         return TRUE
     if op == "lt" and a == b and not _unmodelled(a):
         return FALSE
     if op == "eq":
         for x, y in ((a, b), (b, a)):
+            if x[0] in ("and", "or", "not", "cmp") and is_const(y) and y[1] in (0, 1):
+                return x if y[1] == 1 else mk_not(x)
             if y == TRUE:
-                return x
+                return mk_cmp("eq", x, const(1))
             if y == FALSE:
-                return mk_not(x)
+                return mk_cmp("eq", x, const(0))
         return mk("cmp", "eq", *sorted((a, b), key=stable))
     return mk("cmp", op, a, b)
 
@@ -537,7 +559,7 @@ def replace_terms(term: Term, mapping: dict[Term, Term], keep_subjects: bool = F
         if key in memo:
             return memo[key]
         if t in mapping:
-            out = mapping[t]
+            out = mapping[cast(Term, t)]
         elif keep_subjects and t and t[0] in ("ok", "caught"):
             out = t
         elif t and isinstance(t[0], str):
@@ -550,31 +572,6 @@ def replace_terms(term: Term, mapping: dict[Term, Term], keep_subjects: bool = F
         return out
 
     return go(term)
-
-
-def assume_conjuncts(formula: Term, rounds: int = 3) -> Term:
-    """``A and B`` is ``A and B[A := true]``: each top-level conjunct holds wherever the others mention it (a path
-    condition merged into a value's ``ite``), so it is folded away there. Equivalent, and smaller."""
-    for _ in range(rounds):
-        if formula[0] != "and":
-            return formula
-        facts: dict[Term, Term] = {}
-        for c in formula[1]:
-            if c[0] == "not":
-                facts[c[1]] = FALSE
-            elif c[0] != "const":
-                facts[c] = TRUE
-        if not facts:
-            return formula
-        parts = []
-        for c in formula[1]:
-            own = c[1] if c[0] == "not" else c
-            parts.append(replace_terms(c, {k: v for k, v in facts.items() if k is not own}, keep_subjects=True))
-        rewritten = mk_and(parts)
-        if rewritten is formula:
-            return formula
-        formula = rewritten
-    return formula
 
 
 def returned_part(values: tuple, path: tuple, leaf: str | None = None) -> Any:

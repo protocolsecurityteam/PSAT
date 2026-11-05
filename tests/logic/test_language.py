@@ -7,7 +7,10 @@ from __future__ import annotations
 import pytest
 from eth_utils import keccak
 
-from services.logic.terms import subterms
+from services.logic.formula import compile_function
+from services.logic.lower import parameter
+from services.logic.solver import Translation
+from services.logic.terms import CALLER, ORIGIN, mk, subterms
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
 
@@ -209,27 +212,37 @@ CALL_CASES = [pytest.param(name, who) for name in ("viaCall", "viaStatic") for w
 
 @pytest.mark.parametrize(("name", "who"), CALL_CASES, ids=[f"{c.values[0]}-{c.values[1]:#x}"[:24] for c in CALL_CASES])
 def test_a_low_level_call_is_the_call_its_data_encodes(calls, name, who):
-    # The call data hands the caller to ``Target``, whose own check lets only its owner through: the lowered formula
-    # says what ``eth_call`` says for the owner and for strangers. ``viaCall``'s is an action handed the caller, and
-    # no callee's code answers here (``engine_says`` follows none): whether it passes is unknown for everyone, never
-    # assumed (a stranger it once let through, A12-call).
+    # Both call forms now follow the target. A successful call requires the owner;
+    # a resource failure can still reject the owner, so that outcome remains qualified.
     fn = O.function(calls, "C", name)
     target = calls.at["Target"]
     chain = O.chain_says(calls, fn, [target], sender=who)
     assert chain == (who == O.OWNER)
-    formula, engine = O.engine_says(calls, fn, [target], sender=who, contracts=calls.contracts("C", "Target"))
-    if name == "viaCall":
-        assert engine is UNK and any("stateful_callee" in str(u[1]) for u in subterms(formula, "unknown"))
+    known = calls.contracts("C", "Target")
+    bindings = {CALLER: who, ORIGIN: who, mk("callvalue"): 0, parameter(fn.parameters[0], 0): target}
+    f = compile_function(calls.slither["C"], fn, calls.at["C"], calls.chain(), known, bindings=bindings)
+    resources = subterms(f.success, "unknown")
+    assert all(t[1] == "unsupported:raw_call_resources" for t in resources)
+    tr = Translation(calls.chain(), known, calls.at["C"], f.selector, bindings=bindings)
+    engine = tr.truth(f.success)
+    if chain:
+        assert engine is UNK and resources
     else:
-        assert engine == chain, (name, hex(who), chain, engine, formula)
+        assert engine is False, (name, hex(who), chain, engine, f.success)
+    completed = Translation(
+        calls.chain(), known, calls.at["C"], f.selector, bindings={**bindings, **{t: True for t in resources}}
+    )
+    assert completed.truth(f.success) is chain and not completed.issues
 
 
-def test_an_undecodable_staticcall_is_rejected_by_name(calls):
+def test_symbolic_static_dispatch_keeps_unmodeled_effect_cases(calls):
     fn = O.function(calls, "C", "viaOpaqueStatic")
     data = keccak(text="allowed(address)")[:4] + bytes(12) + bytes.fromhex(O.OWNER.to_bytes(20, "big").hex())
     formula, engine = O.engine_says(calls, fn, [calls.at["Target"], data], contracts=calls.contracts("C", "Target"))
     assert O.chain_says(calls, fn, [calls.at["Target"], data])
-    assert engine is UNK and "unsupported:staticcall" in {u[1] for u in subterms(formula, "unknown")}
+    # The byte stream can now dispatch, but path-sensitive static write traps
+    # in the other possible entries are still unsupported, not assumed away.
+    assert engine is UNK and "unsupported:static_effect" in {u[1] for u in subterms(formula, "unknown")}
 
 
 @pytest.fixture(scope="module")
@@ -250,4 +263,4 @@ def test_legacy_assembly_assigns_nothing_for_sure_past_control_flow(legacy, y):
         assert not chain
         assert engine is UNK or engine is False or engine == chain, (hex(y), hex(who), engine)
         if engine is UNK:
-            assert "asm:r" in {u[1] for u in subterms(formula, "unknown")}
+            assert "unsupported:legacy_assembly" in {u[1] for u in subterms(formula, "unknown")}

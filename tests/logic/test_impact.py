@@ -1,4 +1,4 @@
-"""Function ratings preserve proofs; transport, caching and policy are independently checked."""
+"""Effect ratings preserve proofs; transport, caching and policy are independently checked."""
 
 import copy
 import json
@@ -12,7 +12,7 @@ from services.logic.model import Effect, Formula, encode
 from services.logic.source_context import build_bundle, build_context, digest, materialize_context
 from services.logic.terms import CALLER, const, mk_cmp
 from services.resolution.logic_assessment import assess_formulas
-from services.resolution.logic_impact import DIMENSIONS, QUESTIONS, JudgmentCache, rate_functions, validate_answer
+from services.resolution.logic_impact import DIMENSIONS, QUESTIONS, JudgmentCache, rate_effects, validate_answer
 from services.resolution.logic_selection import selection_report
 
 
@@ -51,7 +51,11 @@ class Session:
         self.calls.append((url, kwargs))
         if self.error:
             raise self.error
-        return SimpleNamespace(status_code=self.status, json=lambda: copy.deepcopy(self.answer))
+        answer = copy.deepcopy(self.answer)
+        asked = json.loads(kwargs["data"])["questions"]
+        if asked and all(k.startswith("effect_") for k in asked) and set(answer["answers"]) == set(QUESTIONS):
+            answer["answers"] = {key: copy.deepcopy(answer["answers"][key.split("__", 1)[1]]) for key in asked}
+        return SimpleNamespace(status_code=self.status, json=lambda: answer)
 
 
 def inputs():
@@ -99,7 +103,7 @@ def rehash_bundle(artifact):
 
 
 def rate(artifact, path, answer=None, **kw):
-    return rate_functions(
+    return rate_effects(
         artifact, cache=JudgmentCache(path), client=JevClient("test-secret", session=Session(answer)), **kw
     )
 
@@ -111,18 +115,19 @@ def test_model_does_not_edit_access_or_proofs(tmp_path):
     rated = assess_formulas(artifact, cache=JudgmentCache(tmp_path), client=JevClient("test-secret", session=wire))
     assert rated["rows"][0]["access"] == evidence["rows"][0]["access"]
     assert rated["rows"][0]["decision"] == "expand" and artifact == before
-    assert rated["assessment"]["functions"]["change(uint256)"]["level"] == "high"
+    assert rated["assessment"]["functions"]["change(uint256)"]["effects"]["0"]["level"] == "high"
     assert "test-secret" not in json.dumps(rated)
     assert all("test-secret" not in p.read_text() for p in tmp_path.iterdir())
     assert wire.calls[0][1]["allow_redirects"] is False
     state = json.loads(wire.calls[0][1]["data"])["state"]
     assert "effect_index" not in state["target"] and "priority" not in state and "verdict" not in state
+    assert "program" in state and len(json.loads(wire.calls[0][1]["data"])["questions"]) == 5
 
 
 def test_cache_replays_without_key_or_spend(tmp_path):
     _, artifact, _ = inputs()
     first = rate(artifact, tmp_path)
-    second = rate_functions(artifact, cache=JudgmentCache(tmp_path))
+    second = rate_effects(artifact, cache=JudgmentCache(tmp_path))
     assert second["wire_requests"] == 0 and second["statistics"]["cache_hits"] == 1
     assert first["functions"] == second["functions"]
 
@@ -133,7 +138,7 @@ def test_cache_replays_without_key_or_spend(tmp_path):
 def test_low_or_uncertain_model_never_discards_a_function(tmp_path, answer, expected):
     _, artifact, _ = inputs()
     result = assess_formulas(artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=Session(answer)))
-    assert result["assessment"]["functions"]["change(uint256)"]["level"] == expected
+    assert result["assessment"]["functions"]["change(uint256)"]["effects"]["0"]["level"] == expected
     assert result["rows"][0]["decision"] == "review"
 
 
@@ -143,18 +148,18 @@ def test_partial_source_cannot_support_low_and_invalidates_cache(tmp_path):
     artifact["source_bundle"]["source_gaps"].append("missing dependency")
     rehash_bundle(artifact)
     assert (
-        rate_functions(artifact, cache=JudgmentCache(tmp_path))["functions"]["change(uint256)"]["model_status"]
+        rate_effects(artifact, cache=JudgmentCache(tmp_path))["functions"]["change(uint256)"]["model_status"]
         == "cache_miss"
     )
     result = rate(artifact, tmp_path, response(0, "own_entitlement"))
-    assert result["functions"]["change(uint256)"]["level"] == "unknown"
+    assert result["functions"]["change(uint256)"]["effects"]["0"]["level"] == "unknown"
 
 
 def test_missing_context_makes_no_request(tmp_path):
     _, artifact, _ = inputs()
     artifact.pop("contexts")
     client = JevClient("key", session=Session())
-    result = rate_functions(artifact, cache=JudgmentCache(tmp_path), client=client)
+    result = rate_effects(artifact, cache=JudgmentCache(tmp_path), client=client)
     assert client.sent == 0 and result["functions"]["change(uint256)"]["model_status"] == "missing_context"
 
 
@@ -163,7 +168,7 @@ def test_tampered_source_fails_before_spend(tmp_path):
     next(iter(artifact["source_bundle"]["files"].values()))["source"] += "changed"
     client = JevClient("key", session=Session())
     with pytest.raises(ValueError, match="hash"):
-        rate_functions(artifact, cache=JudgmentCache(tmp_path), client=client)
+        rate_effects(artifact, cache=JudgmentCache(tmp_path), client=client)
     assert client.sent == 0
 
 
@@ -180,7 +185,7 @@ def test_high_dimension_is_not_averaged_away(tmp_path):
     _, artifact, _ = inputs()
     answer = response()
     answer["answers"]["authority_power"]["confidence"] = 0.1
-    assert rate(artifact, tmp_path, answer)["functions"]["change(uint256)"]["level"] == "high"
+    assert rate(artifact, tmp_path, answer)["functions"]["change(uint256)"]["effects"]["0"]["level"] == "high"
 
 
 def test_changed_questions_invalidate_cache(tmp_path, monkeypatch):
@@ -191,7 +196,7 @@ def test_changed_questions_invalidate_cache(tmp_path, monkeypatch):
     questions = copy.deepcopy(module.QUESTIONS)
     questions["asset_power"]["instructions"] += "New scope"
     monkeypatch.setattr(module, "QUESTIONS", questions)
-    result = rate_functions(artifact, cache=JudgmentCache(tmp_path))
+    result = rate_effects(artifact, cache=JudgmentCache(tmp_path))
     assert result["functions"]["change(uint256)"]["model_status"] == "cache_miss"
 
 
@@ -264,3 +269,29 @@ def test_recorded_live_responses_replay_the_policy_without_inference():
         validate_answer(case["response"], data["model"])
         estimate = _estimate(case["response"], {"source_complete": case["source_complete"]}, ImpactPolicy())
         assert estimate["level"] == case["accepted_level"]
+
+
+def test_long_context_is_explicit_and_keeps_a_request_budget():
+    large = {"source": "a" * 110_000}
+    normal = Session()
+    with pytest.raises(JevBudgetExceeded):
+        JevClient("secret", session=normal).ask(large, QUESTIONS)
+    assert not normal.calls
+    extended = Session()
+    client = JevClient("secret", session=extended, long_context=True, max_requests=1)
+    client.ask(large, QUESTIONS)
+    assert extended.calls[0][1]["headers"]["TypeSafe-Danger-Zone-Long-Context"] == "true"
+    with pytest.raises(JevBudgetExceeded):
+        client.ask(large, QUESTIONS)
+    assert len(extended.calls) == 1
+    wire = Session()
+    JevClient("secret", session=wire).ask({}, QUESTIONS)
+    assert "TypeSafe-Danger-Zone-Long-Context" not in wire.calls[0][1]["headers"]
+
+
+def test_provider_context_limit_is_a_named_budget_without_retry():
+    wire = Session(answer={"detail": {"error_type": "max_tokens_exceeded"}}, status=400)
+    client = JevClient("secret", session=wire)
+    with pytest.raises(JevBudgetExceeded, match="model context limit"):
+        client.ask({}, QUESTIONS)
+    assert client.sent == len(wire.calls) == 1

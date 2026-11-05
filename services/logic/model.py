@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .terms import Term, stable
+from .terms import TRUE, Term, const, stable
 
 
 class ReadError(RuntimeError):
@@ -41,6 +41,75 @@ class Update:
 
 
 @dataclass(frozen=True)
+class CallFrame:
+    """Execution identity; code and storage addresses are deliberately separate."""
+
+    code: Term
+    storage: Term
+    sender: Term
+    value: Term
+    calldata: Term
+    static: bool = False
+
+    def enter(self, kind: str, target: Term, code: Term, calldata: Term, value: Term) -> CallFrame:
+        if kind not in ("call", "staticcall", "delegatecall", "callcode"):
+            raise ValueError("unknown call kind")
+        delegated = kind in ("delegatecall", "callcode")
+        return CallFrame(
+            code,
+            self.storage if delegated else target,
+            self.sender if kind == "delegatecall" else self.storage,
+            self.value if kind == "delegatecall" else const(0) if kind == "staticcall" else value,
+            calldata,
+            self.static or kind == "staticcall",
+        )
+
+    def record(self) -> dict:
+        return {
+            "code": self.code,
+            "storage": self.storage,
+            "sender": self.sender,
+            "value": self.value,
+            "calldata": self.calldata,
+            "static": self.static,
+        }
+
+
+@dataclass(frozen=True)
+class CallRequest:
+    """A symbolic call and its current world overlay; no caller-local memory or variables."""
+
+    call: Term
+    storage: tuple[Update, ...]
+    value: Term
+    gas: Term | None = None
+    caught: bool = False
+    raw: Term | None = None  # resource-outcome input for a low-level call; failure rolls back this call
+    frame: CallFrame | None = None  # invoking frame, not the callee's derived context
+    calldata: Term | None = None
+    mode: str | None = None  # explicit EVM mode; None retains typed call/staticcall inference
+    input_guard: Term = TRUE  # invoking path and ABI decoding conditions, still in the caller's frame
+    return_size_checked: bool | None = None  # caller ABI wrapper; separate from callee input decoding
+
+
+class DeferredCall(Exception):
+    """Execution needs more semantics or input; the caller retains its own continuation."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+@dataclass(frozen=True)
+class CallResult:
+    """Normal-return condition, decoded values, and the ordered world overlay after the call."""
+
+    guard: Term
+    returns: tuple[Term, ...]
+    storage: tuple[Update, ...]
+
+
+@dataclass(frozen=True)
 class Transition:
     guard: Term
     updates: tuple[Update, ...]
@@ -64,6 +133,7 @@ class Formula:
     success: Term
     effects: tuple[Effect, ...]
     transitions: tuple[Transition, ...]
+    state_specialized: bool | None = False  # call targets / proxy dispatch fixed using the analysis state
 
 
 @dataclass(frozen=True)
@@ -94,6 +164,7 @@ class Analysis:
     callers: SolutionSet | None
     effects: tuple[SolutionSet, ...]
     effect_indices: tuple[int, ...] = ()
+    power_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,7 +191,11 @@ def encode(value: Any) -> Any:
                 nodes[index] = [visit(x) for x in v]
             return {"term": seen[v]}
         if is_dataclass(v):
-            return {f.name: visit(getattr(v, f.name)) for f in fields(v)}
+            return {
+                f.name: visit(getattr(v, f.name))
+                for f in fields(v)
+                if f.name != "state_specialized" or getattr(v, f.name) is not None
+            }
         if isinstance(v, frozenset):
             return {"set": [visit(x) for x in sorted(v, key=stable)]}
         if isinstance(v, tuple):
@@ -129,13 +204,15 @@ def encode(value: Any) -> Any:
             return {"bytes": v.hex()}
         if isinstance(v, dict):
             return {k: visit(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [visit(x) for x in v]
         return v
 
     return {"schema": 2, "value": visit(value), "terms": nodes}
 
 
-def decode_formula(payload: dict) -> Formula:
-    """Restore a saved formula in another process, without re-running the lowerer."""
+def decode_value(payload: dict) -> Any:
+    """Decode the data-only DAG format; never instantiate arbitrary classes."""
     if payload.get("schema") != 2 or not isinstance(payload.get("terms"), list):
         raise ValueError("unsupported formula encoding")
     nodes = payload["terms"]
@@ -143,6 +220,8 @@ def decode_formula(payload: dict) -> Formula:
     active: set[int] = set()
 
     def visit(value: Any) -> Any:
+        if isinstance(value, list):
+            return [visit(v) for v in value]
         if isinstance(value, dict):
             if set(value) == {"term"}:
                 index = value["term"]
@@ -169,12 +248,18 @@ def decode_formula(payload: dict) -> Formula:
             return value
         raise ValueError("invalid formula value")
 
+    return visit(payload["value"])
+
+
+def decode_formula(payload: dict) -> Formula:
+    """Restore a saved formula in another process, without re-running the lowerer."""
     try:
-        data = visit(payload["value"])
+        data = decode_value(payload)
         data["effects"] = tuple(Effect(**effect) for effect in data["effects"])
         data["transitions"] = tuple(
             Transition(t["guard"], tuple(Update(**u) for u in t["updates"])) for t in data["transitions"]
         )
+        data.setdefault("state_specialized", None)  # legacy artifacts did not record specialization
         formula = Formula(**data)
         if (
             type(formula.address) is not int
@@ -183,6 +268,7 @@ def decode_formula(payload: dict) -> Formula:
             or formula.block < 0
             or type(formula.selector) is not int
             or not 0 <= formula.selector < 2**32
+            or (formula.state_specialized is not None and type(formula.state_specialized) is not bool)
             or not isinstance(formula.signature, str)
             or not isinstance(formula.success, Term)
             or not isinstance(formula.parameters, tuple)

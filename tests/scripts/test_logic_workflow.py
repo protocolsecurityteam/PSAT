@@ -30,6 +30,7 @@ def test_generate_assess_enumerate_are_three_explicit_jobs(tmp_path, monkeypatch
         events.append("enumerate")
         assert saved == artifact
         assert selections == {"change(uint256)": Selection(False, (0,))}
+        assert kwargs["limits"].storage_steps == 750000
         return {"kind": "address_expansions"}
 
     wire = Session()
@@ -59,7 +60,7 @@ def test_generate_assess_enumerate_are_three_explicit_jobs(tmp_path, monkeypatch
     result = json.loads(assessment.read_text())
     assert events == ["generate"] and len(wire.calls) == 1
     assert result["assessment"]["status"] == "assessed"
-    assert result["assessment"]["functions"]["change(uint256)"]["level"] == "high"
+    assert result["assessment"]["functions"]["change(uint256)"]["effects"]["0"]["level"] == "high"
     # Exact cached judgments satisfy the mandatory assessment without keys or new requests.
     monkeypatch.delenv("JEV_API_KEY")
     main(args)
@@ -75,6 +76,8 @@ def test_generate_assess_enumerate_are_three_explicit_jobs(tmp_path, monkeypatch
             "change(uint256)",
             "--rpc-url",
             "unused",
+            "--storage-steps",
+            "750000",
             "--output",
             str(addresses),
         ]
@@ -127,7 +130,7 @@ def test_inconclusive_judgment_is_not_material_impact(tmp_path):
         artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=Session(uncertain_response()))
     )
     assert result["assessment"]["judgments_complete"] is True
-    assert result["assessment"]["functions"]["change(uint256)"]["level"] == "unknown"
+    assert result["assessment"]["functions"]["change(uint256)"]["effects"]["0"]["level"] == "unknown"
     assert result["suggested_expansions"] == []
     assert result["rows"][0]["decision"] == "review"
 
@@ -179,7 +182,7 @@ def test_many_effects_cost_one_function_judgment(tmp_path):
     assert result["suggested_expansions"][0]["effect_indices"] == list(range(5))
 
 
-def test_function_without_reported_effects_still_gets_a_judgment(tmp_path):
+def test_function_without_reported_effects_remains_visible_without_a_fabricated_rating(tmp_path):
     from dataclasses import replace
 
     from services.logic.expansion import formula_hash
@@ -194,12 +197,11 @@ def test_function_without_reported_effects_still_gets_a_judgment(tmp_path):
     context["context_hash"] = digest({k: v for k, v in context.items() if k != "context_hash"})
     wire = Session()
     result = assess_formulas(artifact, cache=JudgmentCache(tmp_path), client=JevClient("key", session=wire))
-    assert len(wire.calls) == 1
-    state = json.loads(wire.calls[0][1]["data"])["state"]
-    assert "effect_index" not in state["target"] and "entry" in state
+    assert not wire.calls
     summary = result["assessment"]["functions"][formula.signature]
-    assert summary["model_status"] == "rated" and result["rows"][0]["decision"] == "review"
-    assert summary["level"] == "high"
+    assert summary["model_status"] == "no_modeled_effects" and summary["effects"] == {}
+    assert result["rows"][0]["decision"] == "review"
+    assert not result["assessment"]["judgments_complete"]
     assert result["suggested_expansions"] == []
 
 

@@ -600,6 +600,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
         "optimization_used": result.get("OptimizationUsed", ""),
         "runs": result.get("Runs", ""),
         "evm_version": result.get("EVMVersion", ""),
+        "evm_version_used": settings.evm_version,
         "solc_version": settings.solc_version if language == "solidity" else None,
         "via_ir": settings.via_ir,
         "via_ir_used": False,

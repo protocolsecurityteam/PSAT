@@ -236,3 +236,72 @@ def test_unverified_generation_remains_not_verified(api_client, db_session, runt
     assert run(db_session).status == JobStatus.completed
     assert api_client.get(f"/api/logic/jobs/{assessed}").json()["result_state"] == "not_verified"
     assert not runtime[1].calls
+
+
+def test_long_context_flag_reaches_the_durable_assessment(api_client, db_session, runtime):
+    _, wire = runtime
+    generated = generate(api_client, db_session)
+    assessed = post(api_client, "assess", {"formula_job_id": generated, "long_context": True, "max_requests": 1})
+    assert run(db_session).status == JobStatus.completed
+    assert wire.calls[0][1]["headers"]["TypeSafe-Danger-Zone-Long-Context"] == "true"
+    assert api_client.get(f"/api/logic/jobs/{assessed}").json()["jev_requests_reserved"] == 1
+
+
+def test_generate_resume_keeps_block_and_fences_checkpoint_artifact(api_client, db_session, runtime, monkeypatch):
+    formulas, _ = runtime
+    first = {
+        **copy.deepcopy(formulas),
+        "address": ADDRESS,
+        "status": "incomplete",
+        "pending_functions": {"f()": {"reason": "expansion_steps", "checkpoint": {}}},
+    }
+    monkeypatch.setattr(logic_worker, "deployment_formulas", lambda *a, **kw: copy.deepcopy(first))
+    parent = generate(api_client, db_session)
+    seen = []
+
+    def resumed(*args, **kwargs):
+        seen.append(kwargs)
+        return copy.deepcopy(formulas)
+
+    monkeypatch.setattr(logic_worker, "deployment_formulas", resumed)
+    response = api_client.post(
+        "/api/logic/generate", json={"address": ADDRESS, "chain_id": 1, "resume_job_id": parent, "block": 124}
+    )
+    assert response.status_code == 409
+    child = post(
+        api_client, "generate", {"address": ADDRESS, "chain_id": 1, "resume_job_id": parent, "expansion_steps": 100}
+    )
+    assert api_client.get(f"/api/logic/jobs/{child}").json()["block"] == 123
+    assert run(db_session).status == JobStatus.completed
+    assert seen[0]["block"] == 123 and seen[0]["resume"] == first and seen[0]["expansion_steps"] == 100
+    assert api_client.get(f"/api/logic/jobs/{child}/result").json() == formulas
+
+
+def test_storage_accounting_limit_reaches_expansion_worker(api_client, db_session, runtime, monkeypatch):
+    generated = generate(api_client, db_session)
+    assessed = post(api_client, "assess", {"formula_job_id": generated})
+    assert run(db_session).status == JobStatus.completed
+    captured = []
+    original = logic_worker.deployment_expansions
+
+    def expand(*args, **kwargs):
+        captured.append(kwargs["limits"].storage_steps)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(logic_worker, "deployment_expansions", expand)
+    job_id = post(
+        api_client,
+        "enumerate",
+        {"assessment_job_id": assessed, "functions": ["change(uint256)"], "storage_steps": 750000},
+    )
+    assert run(db_session).status == JobStatus.completed
+    assert captured == [750000]
+    assert db_session.get(Job, uuid.UUID(job_id)).request["params"]["storage_steps"] == 750000
+    for invalid in (-1, True, "100000", 10000001):
+        assert (
+            api_client.post(
+                "/api/logic/enumerate",
+                json={"assessment_job_id": assessed, "functions": ["change(uint256)"], "storage_steps": invalid},
+            ).status_code
+            == 422
+        )

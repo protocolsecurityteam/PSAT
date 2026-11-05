@@ -12,7 +12,7 @@ from services.logic.formula import compile_function
 from services.logic.model import encode
 from services.logic.source_context import build_bundle, build_context, materialize_context
 from services.resolution.logic_assessment import assess_formulas
-from services.resolution.logic_impact import JudgmentCache, rate_functions
+from services.resolution.logic_impact import JudgmentCache, rate_effects
 from services.resolution.logic_selection import selection_report, selections_from_report
 from tests.logic._anvil import Deployment, anvil  # noqa: F401
 from tests.logic.test_formula_engine import FixtureReads, deployed, formula  # noqa: F401
@@ -27,6 +27,8 @@ def artifact(f, fn=None, contracts=None):
         "address": f"0x{f.address:040x}",
         "block": f.block,
         "functions": {f.signature: encode(f)},
+        "code_locations": {f"0x{at:040x}": f"0x{at:040x}" for at in (contracts or {f.address: None})},
+        "entry_code_addresses": {f.signature: f"0x{f.address:040x}"},
     }
     if fn is not None:
         bundle = build_bundle(contracts)
@@ -72,14 +74,16 @@ def test_complete_source_contains_global_declarations(review_deployment):
     assert raw[entry["start"] : entry["start"] + entry["length"]].startswith(b"function setFee")
 
 
-def test_opposite_effect_branches_receive_one_whole_function_judgment(review_deployment, tmp_path):
+def test_opposite_effect_branches_receive_distinct_questions_with_shared_context(review_deployment, tmp_path):
     f, a = saved(review_deployment, "choose")
     assert len(f.effects) == 2 and len({e.guard for e in f.effects}) == 2
     wire = Session()
-    rate_functions(a, cache=JudgmentCache(tmp_path), client=JevClient("fake", session=wire))
+    rate_effects(a, cache=JudgmentCache(tmp_path), client=JevClient("fake", session=wire))
     assert len(wire.calls) == 1
     state = json.loads(wire.calls[0][1]["data"])["state"]
-    assert "effect_index" not in state["target"] and "effect" not in state
+    assert "effect_index" not in state["target"] and "program" in state
+    questions = json.loads(wire.calls[0][1]["data"])["questions"]
+    assert len(questions) == 10 and "effect_0__asset_power" in questions and "effect_1__asset_power" in questions
     entry = state["entry"]
     unit = next(u for u in state["sources"] if u["source_hash"] == entry["file"])
     text = unit["source"].encode()[entry["start"] : entry["start"] + entry["length"]].decode()

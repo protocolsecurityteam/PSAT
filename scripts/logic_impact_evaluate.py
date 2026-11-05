@@ -37,13 +37,21 @@ def evaluate(report: dict, expected: list[dict]) -> dict:
     cases, correct, abstained, missed_high, abstained_high = [], 0, 0, 0, 0
     seen = set()
     for label in expected:
-        key = label["function"]
+        if not all(k in label for k in ("function", "effect_index", "formula_hash")):
+            raise ValueError("expected labels require function, effect_index and formula_hash")
+        index = label["effect_index"]
+        if type(index) is not int or index < 0:
+            raise ValueError("invalid expected effect index")
+        key = label["function"], index
         if key in seen:
             raise ValueError("duplicate expected case")
         seen.add(key)
         if not 0 <= label["expected_min"] <= label["expected_max"] <= 3:
             raise ValueError("invalid expected impact range")
-        row = ratings.get(key)
+        group = ratings.get(label["function"], {})
+        if not label["formula_hash"] or label["formula_hash"] != group.get("formula_hash"):
+            raise ValueError("expected case formula hash does not match report")
+        row = group.get("effects", {}).get(str(index))
         if row is None:
             raise ValueError("expected case missing from report")
         level = row["level"]

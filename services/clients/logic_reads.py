@@ -7,6 +7,7 @@ Trace preimages are checked by the engine; incomplete hints can only cost enumer
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 import rlp
@@ -28,17 +29,21 @@ class ChainReads:
         log_window: int = 1_000_000,
         deployment_block: Callable[[int], int] | None = None,
         trace_preimages: Callable[[int, set[int]], dict[int, bytes]] | None = None,
+        trace_reader: Callable[[str, list], dict[int, bytes]] | None = None,
         word_limit: int = 100_000,
     ):
         self.rpc, self.debug, self.block = rpc, debug or rpc, block
         self.read_limit, self.retries, self.log_window = read_limit, retries, log_window
         self.deployment_block = deployment_block or (lambda address: 0)
         self.trace_preimages = trace_preimages
+        self.trace_reader = trace_reader
         self.word_limit = word_limit
         self.sent = 0
         self.memo: dict[tuple, Any] = {}
+        self._trace_hash_cache: OrderedDict[str, tuple[dict[int, bytes], int]] = OrderedDict()
+        self._trace_words = 0
 
-    def _read(self, method: str, params: list, *, debug: bool = False) -> Any:
+    def _read(self, method: str, params: list, *, debug: bool = False, fetch=None, cache: bool = True) -> Any:
         if debug and self.debug is not self.rpc and method != "eth_chainId":
             primary = self._read("eth_chainId", [])
             archive = self._read("eth_chainId", [], debug=True)
@@ -49,7 +54,7 @@ class ChainReads:
             if not same_chain:
                 raise ReadError("debug provider is on a different chain")
         key = (debug, method, repr(params))
-        if key in self.memo:
+        if cache and key in self.memo:
             return self.memo[key]
         last = None
         for attempt in range(self.retries + 1):
@@ -57,11 +62,14 @@ class ChainReads:
                 raise BudgetExceeded("chain reads")
             self.sent += 1
             try:
-                value = (self.debug if debug else self.rpc)(method, params)
+                value = (fetch or (self.debug if debug else self.rpc))(method, params)
                 if value is None or (isinstance(value, dict) and "error" in value):
                     raise ValueError("unanswered RPC")
-                self.memo[key] = value
+                if cache:
+                    self.memo[key] = value
                 return value
+            except BudgetExceeded:
+                raise
             except (TimeoutError, ConnectionError, ValueError, RuntimeError, OSError) as exc:
                 last = exc
                 if attempt < self.retries:
@@ -100,6 +108,22 @@ class ChainReads:
         if key not in header:
             raise ReadError(f"block field missing: {name}")
         return int(header[key], 16)
+
+    def snapshot_identity(self) -> dict:
+        """Pin durable compilation work to a chain state, not just a reorg-sensitive height."""
+        header = self._read("eth_getBlockByNumber", [hex(self.block), False])
+        try:
+            if int(header["number"], 16) != self.block:
+                raise ValueError()
+            if any(len(bytes.fromhex(header[key][2:])) != 32 for key in ("hash", "stateRoot")):
+                raise ValueError()
+            return {
+                "chain_id": int(self._read("eth_chainId", []), 16),
+                "block_hash": header["hash"].lower(),
+                "state_root": header["stateRoot"].lower(),
+            }
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ReadError("malformed checkpoint snapshot identity") from exc
 
     def storage_dump(self, address: int) -> dict[int, int]:
         header = self._read("eth_getBlockByNumber", [hex(self.block), False])
@@ -219,6 +243,7 @@ class ChainReads:
                 "debug_traceBlockByNumber",
                 [hex(block), {"tracer": "prestateTracer", "tracerConfig": {"diffMode": True}}],
                 debug=True,
+                cache=False,
             )
             header = self._read("eth_getBlockByNumber", [hex(block), False])
             if not isinstance(diff, list):
@@ -231,12 +256,42 @@ class ChainReads:
                 if not any(int(key, 16) in slots for key in state.get("storage", {})):
                     continue
                 tx = entry.get("txHash") or header["transactions"][index]
+                if self.trace_reader is not None:
+                    result.update(self._transaction_hashes(tx))
+                    if sum(max(1, (len(v) + 31) // 32) for v in result.values()) > self.word_limit:
+                        raise BudgetExceeded("trace preimage words")
+                    continue
                 trace = self._read(
-                    "debug_traceTransaction", [tx, {"enableMemory": True, "disableStorage": True}], debug=True
+                    "debug_traceTransaction",
+                    [tx, {"enableMemory": True, "disableStorage": True}],
+                    debug=True,
+                    cache=False,
                 )
                 if not isinstance(trace, dict) or "structLogs" not in trace:
                     raise ReadError("opcode trace unavailable")
                 result.update(hash_preimages(trace))
+        return result
+
+    def _transaction_hashes(self, tx: str) -> dict[int, bytes]:
+        if tx in self._trace_hash_cache:
+            self._trace_hash_cache.move_to_end(tx)
+            return self._trace_hash_cache[tx][0]
+        result = self._read(
+            "debug_traceTransaction",
+            [tx, {"enableMemory": True, "disableStorage": True}],
+            debug=True,
+            fetch=self.trace_reader,
+            cache=False,
+        )
+        weight = sum(max(1, (len(v) + 31) // 32) for v in result.values())
+        if weight > self.word_limit:
+            raise BudgetExceeded("trace preimage words")
+        while self._trace_hash_cache and self._trace_words + max(1, weight) > self.word_limit:
+            _, (_, evicted) = self._trace_hash_cache.popitem(last=False)
+            self._trace_words -= evicted
+        if self.word_limit:
+            self._trace_hash_cache[tx] = result, max(1, weight)
+            self._trace_words += max(1, weight)
         return result
 
 

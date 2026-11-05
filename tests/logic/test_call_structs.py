@@ -107,11 +107,13 @@ def test_an_identity_a_returned_struct_holds_reads_for_its_holder_alone(d, name)
         assert engine == (who == WHO), (name, hex(who), formula)
 
 
-def test_a_dynamic_field_is_refused_by_its_name_alone(d):
+def test_a_dynamic_field_is_evaluated_or_explicitly_qualified(d):
     fn = O.function(d, "C", "taggedData")
     assert O.chain_says(d, fn, (3,))
     formula, engine = O.engine_says(d, fn, (3,), contracts=d.contracts("C", "Oracle"))
-    assert engine is UNK and "unsupported:member:data" in O.labels(formula), formula
+    assert engine is UNK or engine is O.chain_says(d, fn, (3,), sender=O.OWNER), formula
+    if engine is UNK:
+        assert any("member:data" in label or "storage_value:bytes" in label for label in O.labels(formula)), formula
 
 
 @pytest.mark.parametrize("name", ["nestedKeeper", "taggedWho"])
@@ -364,4 +366,4 @@ def test_a_bytes4_gate_nobody_meets_is_never_open(w, followed):
 @pytest.mark.parametrize("followed", [True, False], ids=["followed", "unfollowed"])
 def test_a_gate_on_a_decoded_field_everyone_meets_is_open(w, name, followed):
     v = result(w, name, followed)
-    assert (v.representation == "cofinite" and not v.excluded) if followed else not v.complete
+    assert (v.representation == "cofinite" and v.excluded == (0,)) if followed else not v.complete

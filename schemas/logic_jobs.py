@@ -20,7 +20,12 @@ class GenerateRequest(LogicRequest):
     chain_id: StrictInt = Field(gt=0)
     block: StrictInt | None = Field(default=None, ge=0)
     related_addresses: list[Address] = Field(default_factory=list, max_length=32)
-    context_chars: StrictInt = Field(default=48_000, ge=1, le=64_000)
+    context_chars: StrictInt = Field(default=48_000, ge=1, le=1_000_000)
+    resume_job_id: UUID | None = None
+    expansion_steps: StrictInt = Field(default=5000, ge=0, le=50_000)
+    loop_iterations: StrictInt = Field(default=32, ge=1, le=128)
+    callee_depth: StrictInt = Field(default=8, ge=1, le=32)
+    value_steps: StrictInt = Field(default=50_000, ge=1, le=1_000_000)
 
     @field_validator("address")
     @classmethod
@@ -39,6 +44,7 @@ class AssessRequest(LogicRequest):
     formula_job_id: UUID
     max_requests: StrictInt = Field(default=8, ge=0, le=256)
     cache_only: StrictBool = False
+    long_context: StrictBool = False
     direct_reads: StrictInt = Field(default=64, ge=0, le=4096)
     solver_ms: StrictInt = Field(default=250, ge=0, le=5000)
     solver_queries: StrictInt = Field(default=256, ge=0, le=4096)
@@ -49,6 +55,7 @@ class EnumerateRequest(LogicRequest):
     functions: list[Signature] = Field(min_length=1, max_length=256)
     members: StrictInt = Field(default=256, ge=0, le=4096)
     solver_ms: StrictInt = Field(default=1000, ge=0, le=10_000)
+    storage_steps: StrictInt = Field(default=100_000, ge=0, le=10_000_000)
 
     @field_validator("functions")
     @classmethod

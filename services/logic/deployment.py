@@ -16,11 +16,14 @@ from sqlalchemy.orm import Session
 
 from services.clients.logic_reads import ChainReads
 
+from .abi_values import abi_signature
+from .continuation import PendingCompilation, generate_function
 from .expansion import Selection, expand_formula, formula_hash
-from .formula import compile_function
+from .linker import Linker, _Overlay, _selector
+from .lower import Lowerer
 from .model import Limits, ReadError, decode_formula, encode
 from .source_context import ContextContracts, build_bundle, build_context
-from .terms import reset_terms
+from .terms import const, reset_terms, subterms
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,10 @@ def parse_project(project: Path) -> Any:
         meta = json.loads((project / "contract_meta.json").read_text())
     except (OSError, ValueError):
         meta = {}
-    return _parse_with_ir_fallback(project, meta)
+    slither = _parse_with_ir_fallback(project, meta)
+    for unit in slither.compilation_units:
+        unit.context["psat_evm_version"] = meta.get("evm_version_used")
+    return slither
 
 
 class Builds(Mapping):
@@ -53,16 +59,81 @@ class Builds(Mapping):
         source: Callable[[str], dict | None],
         implementation: Callable[[str], str | None],
         workdir: Path,
+        reads=None,
     ):
         self._source = source
         self._implementation = implementation
         self._workdir = workdir
         self._built: dict[str, Any] = {}
+        self.reads = reads
+        self.resolved: dict[int, int] = {}
+        self._resolving: set[int] = set()
+        self.discover = True
 
     def code_address(self, address: int) -> int:
-        hexaddr = _hex20(address)
-        impl = self._implementation(hexaddr)
-        return int(impl, 16) if impl else address
+        if address in self.resolved:
+            return self.resolved[address]
+        if address in self._resolving:
+            return address
+        if not self.discover:
+            return address
+        self._resolving.add(address)
+        try:
+            target = self._discover_target(address) if self.reads is not None else None
+            if target is None:
+                own = self.own_code(address) if self.reads is not None else None
+                # A metadata implementation pointer does not make a verified contract
+                # forward unknown selectors when it has no fallback at all.
+                hint = (
+                    self._implementation(_hex20(address)) if own is None or own.fallback_function is not None else None
+                )
+                target = int(hint, 16) if hint else address
+            self.resolved[address] = target
+            return target
+        finally:
+            self._resolving.remove(address)
+
+    def _discover_target(self, address: int, code: int | None = None) -> int | None:
+        """Resolve concrete delegate targets from verified fallback IR, without enumerating identities.
+
+        This supplies code locations only. Formula compilation separately proves dispatch for each selector.
+        """
+        if self.reads is None:
+            return None
+        code = address if code is None else code
+        own = self.own_code(code)
+        if own is None or own.fallback_function is None:
+            return None
+        lowerer = Lowerer(own, this=const(address, "address"), code=const(code, "address"))
+        lowerer.success(own.fallback_function)
+        linker = Linker(
+            self.reads,
+            _Overlay(self, address, own),
+            address,
+            Limits(),
+            lambda other: code if other == address else self.code_address(other),
+            own_code=self.own_code,
+        )
+        delegates = set()
+        for exit_ in lowerer.exits:
+            delegates.update(subterms(exit_.pc, "delegate"))
+            delegates.update(k[1] for k in exit_.store if k[0] == "act" and k[1][0] == "delegate")
+        # Discovery supplies an inventory candidate, not a forwarding proof. An
+        # upgrade branch with a symbolic future target must not hide the current one.
+        targets = {value for d in delegates if (value := linker.concrete(linker.expand(d[1]))) is not None}
+        if len(targets) != 1:
+            return None
+        target = targets.pop()
+        return target if target is not None and 0 < target < 2**160 and target != address else None
+
+    def use_saved_locations(self, locations: dict[str, str]) -> None:
+        """Expansion uses the code locations captured during generation; it does not re-lower dispatch."""
+        self.resolved = {int(at, 16): int(code, 16) for at, code in locations.items()}
+        self.discover = False
+
+    def own_code(self, address: int) -> Any:
+        """The contract deployed at ``address`` itself, a proxy's own code rather than its implementation's."""
+        return self.build(_hex20(address))
 
     def build(self, hexaddr: str) -> Any:
         hexaddr = hexaddr.lower()
@@ -117,6 +188,7 @@ def _is_getter(contract: Any, fn: Any) -> bool:
 @contextmanager
 def _deployment_inputs(session: Session, chain_id: int, rpc_url: str, block: int | None):
     from db.models import Contract, Job
+    from services.clients.etherscan import VerifiedSourceUnavailable
     from services.clients.rpc import rpc_request
     from services.discovery.fetch import fetch
 
@@ -125,7 +197,10 @@ def _deployment_inputs(session: Session, chain_id: int, rpc_url: str, block: int
 
     def source(hexaddr):
         # Acquisition failures must propagate; they are not evidence of unverified code.
-        result = fetch(hexaddr, chain_id=chain_id)
+        try:
+            result = fetch(hexaddr, chain_id=chain_id)
+        except VerifiedSourceUnavailable:
+            return None
         return result if isinstance(result, dict) and result.get("SourceCode") else None
 
     if block is None:
@@ -138,12 +213,19 @@ def _deployment_inputs(session: Session, chain_id: int, rpc_url: str, block: int
     def debug_rpc(method, params):
         return rpc_request(debug_url or rpc_url, method, params, retries=0, chain_id=chain_id)
 
-    chain = ChainReads(rpc, block, debug=debug_rpc if debug_url else None)
+    from services.clients.logic_trace import trace_hash_preimages
+
+    def trace_reader(method, params):
+        return trace_hash_preimages(
+            debug_url or rpc_url, method, params, chain_id=chain_id, word_limit=chain.word_limit
+        )
+
+    chain = ChainReads(rpc, block, debug=debug_rpc if debug_url else None, trace_reader=trace_reader)
     implementations = {}
 
     def implementation(hexaddr):
-        # Discovery metadata is a code-location hint, never a proof of proxy dispatch.
-        # compile_function marks this explicitly until dispatch is verified from the proxy code.
+        # Discovery metadata is a code-location hint, never a proof of proxy dispatch: compile_function
+        # verifies it from the proxy's own fallback and the implementation it reads at the block.
         if hexaddr not in implementations:
             row = session.execute(
                 select(Contract.implementation)
@@ -161,7 +243,7 @@ def _deployment_inputs(session: Session, chain_id: int, rpc_url: str, block: int
 
     workdir = Path(tempfile.mkdtemp(prefix="psat_formula_"))
     try:
-        builds = Builds(source, implementation, workdir)
+        builds = Builds(source, implementation, workdir, chain)
         yield chain, builds
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -175,12 +257,43 @@ def deployment_formulas(
     *,
     signatures: set[str] | None = None,
     block: int | None = None,
-    related_addresses: tuple[str, ...] = (),
-    context_chars: int = 48_000,
+    related_addresses: tuple[str, ...] | None = None,
+    context_chars: int | None = None,
+    expansion_steps: int = 5000,
+    loop_iterations: int = 32,
+    callee_depth: int = 8,
+    value_steps: int = 50_000,
+    resume: dict | None = None,
 ) -> dict[str, Any]:
     """Generate formulas only. No holder enumeration or address-set queries are scheduled."""
-    if context_chars <= 0 or len(related_addresses) > 32:
+    scope = resume.get("generation_scope", {}) if resume is not None else {}
+    if related_addresses is None:
+        related_addresses = tuple(scope.get("related_addresses", ()))
+    if context_chars is None:
+        context_chars = scope.get("context_chars", 48_000)
+    if resume is not None and signatures is None and scope.get("signatures") is not None:
+        signatures = set(scope["signatures"])
+    if not isinstance(context_chars, int) or context_chars <= 0 or len(related_addresses) > 32:
         raise ValueError("positive context size and at most 32 explicit related addresses required")
+    if resume is not None:
+        if (resume.get("kind"), resume.get("chain_id"), resume.get("address", "").lower()) != (
+            "formulas",
+            chain_id,
+            address.lower(),
+        ):
+            raise ValueError("generation resume identity mismatch")
+        if block is not None and block != resume["block"]:
+            raise ValueError("generation resume block mismatch")
+        if not resume.get("pending_functions"):
+            raise ValueError("generation has no pending functions")
+        block = resume["block"]
+        previous_scope = resume.get("generation_scope", {})
+        if previous_scope != {
+            "signatures": sorted(signatures) if signatures is not None else None,
+            "related_addresses": sorted(related_addresses),
+            "context_chars": context_chars,
+        }:
+            raise ValueError("generation resume scope mismatch")
     related = set()
     for value in related_addresses:
         address_value = int(value, 16)
@@ -194,19 +307,103 @@ def deployment_formulas(
         if contract is None:
             return {**header, "status": "not_verified", "functions": {}}
         out, contexts, compiled = {}, {}, {}
+        pending = {}
+        previous = resume.get("pending_functions", {}) if resume is not None else {}
+        finished = resume.get("functions", {}) if resume is not None else {}
         associated, missing = {at: contract}, set()
-        for fn in contract.functions_entry_points:
-            if fn.view or fn.pure or fn.is_constructor or not fn.solidity_signature or _is_getter(contract, fn):
+        own = builds.own_code(at)
+        primary_code = builds.code_address(at)
+        # Follow code while keeping storage at this deployment. Earlier layers own
+        # selector collisions; each deeper entry still needs its full dispatch proof.
+        layers = [(at, own)] if own is not None else []
+        if primary_code != at or not layers:
+            layers.append((primary_code, contract))
+        seen_codes = {code for code, _ in layers}
+        current = primary_code
+        # Discover the finite, cycle-checked inventory before spending per-function
+        # proof depth, so a depth cut produces a resumable function, not a missing one.
+        while layers[-1][1].fallback_function is not None:
+            target = builds._discover_target(at, current)
+            if target is None or target in seen_codes:
+                break
+            child = builds.own_code(target)
+            if child is None:
+                missing.add(target)
+                break
+            layers.append((target, child))
+            seen_codes.add(target)
+            current = target
+        entries, claimed = [], set()
+        for code, owner in layers:
+            for fn in owner.functions_entry_points:
+                sig = abi_signature(fn)
+                key = sig if fn.is_fallback or fn.is_receive else _selector(sig)
+                if key not in claimed:
+                    entries.append((fn, owner, code))
+                    claimed.add(key)
+            claimed.update(_selector(abi_signature(v)) for v in owner.state_variables if v.visibility == "public")
+        if resume is not None and (set(previous) | set(finished)) != {
+            abi_signature(fn)
+            for fn, owner, entry_code in entries
+            if not (fn.is_constructor or not abi_signature(fn))
+            and (signatures is None or abi_signature(fn) in signatures)
+            and not _is_getter(owner, fn)
+        }:
+            raise ValueError("generation resume entrypoints changed")
+        entry_codes, code_contexts = {}, {}
+        for fn, entry_contract, entry_code in entries:
+            if fn.is_constructor or not abi_signature(fn) or _is_getter(entry_contract, fn):
                 continue
-            if signatures is not None and fn.solidity_signature not in signatures:
+            if signatures is not None and abi_signature(fn) not in signatures:
                 continue
             reset_terms()
-            tracked = ContextContracts(builds, at, contract)
-            formula = compile_function(contract, fn, at, chain, tracked, code_of=builds.code_address)
-            out[fn.solidity_signature] = encode(formula)
-            compiled[fn.solidity_signature] = (formula, fn)
+            source_view = _Overlay(builds, at, entry_contract)
+            tracked = ContextContracts(source_view, at, entry_contract)
+
+            def code_of(other, selected=entry_code):
+                return selected if other == at else builds.code_address(other)
+
+            signature = abi_signature(fn)
+            if signature in finished:
+                formula = decode_formula(finished[signature])
+            else:
+                formula = generate_function(
+                    entry_contract,
+                    fn,
+                    at,
+                    chain,
+                    tracked,
+                    Limits(callee_depth=callee_depth),
+                    code_of=code_of,
+                    own_code=builds.own_code,
+                    steps=expansion_steps,
+                    loop_iterations=loop_iterations,
+                    value_steps=value_steps,
+                    checkpoint=previous.get(signature, {}).get("checkpoint"),
+                )
+            entry_codes[signature] = _hex20(entry_code)
+            if isinstance(formula, PendingCompilation):
+                from dataclasses import asdict
+
+                pending[signature] = asdict(formula)
+            else:
+                out[signature] = encode(formula)
+                compiled[signature] = (formula, fn)
             associated.update(tracked.used)
+            code_contexts.update(tracked.code_contexts)
+            associated[at] = contract
             missing.update(tracked.missing)
+        # Keep the context of completed functions when resuming only their unfinished siblings.
+        if resume is not None:
+            related.update(int(a, 16) for a in resume.get("code_locations", {}))
+            missing.update(int(a, 16) for a in resume.get("source_scope", {}).get("unverified_addresses", ()))
+            for context in resume.get("source_bundle", {}).get("deployments", ()):
+                storage_address, code = int(context["address"], 16), int(context["code_address"], 16)
+                source = builds.own_code(code)
+                if source is None:
+                    missing.add(code)
+                else:
+                    code_contexts[storage_address, code] = source
         for other in sorted(related - associated.keys()):
             found = builds.get(other)
             if found is None:
@@ -218,6 +415,15 @@ def deployment_formulas(
             associated,
             max_chars=context_chars,
             code_addresses=code_addresses,
+            code_contexts={
+                **code_contexts,
+                **{
+                    (other, other): builds.own_code(other)
+                    for other, code in code_addresses.items()
+                    if other != code and builds.own_code(other) is not None
+                },
+                **{(at, code): owner for code, owner in layers},
+            },
             missing_sources=tuple(f"unverified:{other:#x}" for other in sorted(missing)),
         )
         for signature, (formula, fn) in compiled.items():
@@ -225,6 +431,15 @@ def deployment_formulas(
         return {
             **header,
             "functions": out,
+            "pending_functions": pending,
+            "status": "incomplete" if pending else "available",
+            "generation_scope": {
+                "signatures": sorted(signatures) if signatures is not None else None,
+                "related_addresses": sorted(related_addresses),
+                "context_chars": context_chars,
+            },
+            "code_locations": {_hex20(other): _hex20(code) for other, code in code_addresses.items()},
+            "entry_code_addresses": entry_codes,
             "contexts": contexts,
             "source_bundle": bundle,
             "source_scope": {
@@ -235,6 +450,20 @@ def deployment_formulas(
                 "complete_dependency_graph": False,
             },
         }
+
+
+def saved_contracts(artifact: dict, signature: str, builds):
+    """The layout/code view captured for this saved entry, shared by assessment and expansion."""
+    if not isinstance(builds, Builds):
+        return builds
+    if "code_locations" not in artifact or "entry_code_addresses" not in artifact:
+        raise ValueError("regenerate legacy formula artifact: saved code locations are missing")
+    builds.use_saved_locations(artifact["code_locations"])
+    address = int(artifact["address"], 16)
+    code = artifact.get("entry_code_addresses", {}).get(signature)
+    if code is None:
+        raise ValueError(f"saved entry code is missing: {signature}")
+    return _Overlay(builds, address, builds.own_code(int(code, 16)))
 
 
 def deployment_expansions(
@@ -262,11 +491,20 @@ def deployment_expansions(
     out = {}
     with _deployment_inputs(session, chain_id, rpc_url, block) as (reads, builds):
         for signature, formula in chosen.items():
-            result = expand_formula(formula, reads, builds, selection=selections[signature], limits=limits)
-            out[signature] = {"formula_hash": formula_hash(formula), "expansion": encode(result)}
+            view = saved_contracts(artifact, signature, builds)
+            accounting = {}
+            result = expand_formula(
+                formula, reads, view, selection=selections[signature], limits=limits, accounting=accounting
+            )
+            out[signature] = {
+                "formula_hash": formula_hash(formula),
+                "expansion": encode(result),
+                "storage_accounting": accounting,
+            }
     return {
         "schema": 2,
         "kind": "address_expansions",
+        "storage_steps": limits.storage_steps,
         "chain_id": chain_id,
         "address": artifact["address"],
         "block": block,

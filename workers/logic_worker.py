@@ -40,6 +40,11 @@ def execute_operation(job_id: UUID, lease_id: UUID, request: dict, rpc_url: str)
     params, operation = request["params"], request["logic_operation"]
     with SessionLocal() as session:
         if operation == "generate":
+            previous = None
+            if params.get("resume_job_id"):
+                _, previous = completed_result(session, UUID(params["resume_job_id"]), "generate")
+                if digest(previous) != request["input_hash"]:
+                    raise ValueError("Input checkpoint artifact changed after submission")
             return deployment_formulas(
                 session,
                 params["address"],
@@ -48,6 +53,11 @@ def execute_operation(job_id: UUID, lease_id: UUID, request: dict, rpc_url: str)
                 block=params["block"],
                 related_addresses=tuple(params["related_addresses"]),
                 context_chars=params["context_chars"],
+                expansion_steps=params.get("expansion_steps", 5000),
+                loop_iterations=params.get("loop_iterations", 32),
+                callee_depth=params.get("callee_depth", 8),
+                value_steps=params.get("value_steps", 50_000),
+                resume=previous,
             )
         if operation == "assess":
             _, formulas = completed_result(session, UUID(params["formula_job_id"]), "generate")
@@ -55,7 +65,13 @@ def execute_operation(job_id: UUID, lease_id: UUID, request: dict, rpc_url: str)
                 raise ValueError("Input formula artifact changed after submission")
             key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY", "")
             client = (
-                JobJev(job_id, lease_id, key, max_requests=params["max_requests"])
+                JobJev(
+                    job_id,
+                    lease_id,
+                    key,
+                    max_requests=params["max_requests"],
+                    long_context=params.get("long_context", False),
+                )
                 if key and not params["cache_only"]
                 else None
             )
@@ -86,7 +102,11 @@ def execute_operation(job_id: UUID, lease_id: UUID, request: dict, rpc_url: str)
                 formulas,
                 rpc_url,
                 {name: plan[name] for name in params["functions"]},
-                limits=Limits(members=params["members"], solver_ms=params["solver_ms"]),
+                limits=Limits(
+                    members=params["members"],
+                    solver_ms=params["solver_ms"],
+                    storage_steps=params.get("storage_steps", Limits().storage_steps),
+                ),
             )
         raise ValueError("Unknown logic operation")
 

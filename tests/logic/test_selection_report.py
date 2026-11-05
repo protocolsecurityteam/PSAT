@@ -294,3 +294,36 @@ def test_not_verified_deployment_is_not_a_clean_empty_result():
     result = selection_report(saved)
     assert result["input_status"] == "not_verified"
     assert result["rows"] == [] and result["automatic_execution"] is False
+
+
+def test_shared_propositional_guards_are_built_once(monkeypatch):
+    import z3
+
+    from services.resolution.logic_selection import _necessary, _Queries
+
+    owner = mk_cmp("eq", CALLER, const(7))
+    guard = owner
+    for i in range(32):
+        u = mk("unknown", f"branch:{i}")
+        left = mk("and", frozenset({u, guard}))
+        right = mk("and", frozenset({mk("not", u), guard}))
+        guard = mk("or", frozenset({left, right}))
+    counts = []
+    original = z3.And
+
+    def tracked(*args):
+        counts.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(z3, "And", tracked)
+    assert _necessary(guard, owner, _Queries(ReportLimits()))
+    assert len(counts) < 300  # linear in unique nodes, rather than 2**32 occurrences
+
+
+def test_unknown_occurrences_are_not_correlated_by_dag_reuse():
+    from services.resolution.logic_selection import _necessary, _Queries
+
+    u = mk("unknown", "same diagnostic")
+    owner = mk_cmp("eq", CALLER, const(7))
+    guard = mk("or", frozenset({mk("and", frozenset({u, mk("not", u)})), owner}))
+    assert not _necessary(guard, owner, _Queries(ReportLimits()))

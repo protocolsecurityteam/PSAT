@@ -1,4 +1,4 @@
-"""Join access evidence and whole-function impact ratings; select expansion once."""
+"""Join access evidence and effect-specific impact ratings; select expansion once."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections import Counter
 
 from services.clients.jev import DEFAULT_MODEL, JevClient
 from services.logic.source_context import artifact_hash
-from services.resolution.logic_impact import JudgmentCache, rate_functions
+from services.resolution.logic_impact import JudgmentCache, rate_effects
 from services.resolution.logic_selection import ReportLimits, selection_report
 
 
@@ -26,8 +26,8 @@ def _decision(row: dict, impact: dict) -> tuple[str, str]:
         and all(issue["kind"] == "state_required" for issue in access["issues"])
     )
     if supported and impact["model_status"] == "rated" and impact.get("estimate", {}).get("material_impact", False):
-        return "expand", "material function impact; enumerate this effect's supported caller relation"
-    return "review", "access or material function impact unresolved; no automatic deferral"
+        return "expand", "material effect impact; enumerate this effect's supported caller relation"
+    return "review", "access or material effect impact unresolved; no automatic deferral"
 
 
 def assess_formulas(
@@ -41,10 +41,12 @@ def assess_formulas(
     limits: ReportLimits = ReportLimits(),
 ) -> dict:
     report = selection_report(artifact, reads=reads, contracts=contracts, limits=limits)
-    ratings = rate_functions(artifact, cache=cache, client=client, model=model)
+    ratings = rate_effects(artifact, cache=cache, client=client, model=model)
     requests = {}
     for row in report["rows"]:
-        row["decision"], row["reason"] = _decision(row, ratings["functions"][row["function"]])
+        group = ratings["functions"][row["function"]]
+        impact = group["effects"].get(str(row["effect_index"]), {"model_status": "no_modeled_effects"})
+        row["decision"], row["reason"] = _decision(row, impact)
         if row["decision"] == "expand":
             request = requests.setdefault(
                 row["function"],
@@ -56,22 +58,40 @@ def assess_formulas(
                 },
             )
             request["effect_indices"].append(row["effect_index"])
+            if row["access"].get("projection") == "write_power":
+                request.setdefault("power_indices", []).append(row["effect_index"])
     verified = artifact.get("status") != "not_verified"
-    complete = verified and all(r["model_status"] == "rated" for r in ratings["functions"].values())
+    complete = (
+        verified
+        and not artifact.get("pending_functions")
+        and all(r["model_status"] == "rated" for r in ratings["functions"].values())
+    )
     status = (
         "not_verified"
         if not verified
         else "nothing_to_assess"
-        if not artifact["functions"]
+        if not artifact["functions"] and not artifact.get("pending_functions")
         else "assessed"
         if complete
         else "incomplete"
     )
     report.update(
         kind="expansion_selection",
+        pending_functions={
+            name: {
+                "reason": row["reason"],
+                "action": "resolve_call"
+                if row["reason"] == "call"
+                else "resolve_operation"
+                if row["reason"] == "operation"
+                else "resume_generation",
+                **({"blocker": row["blocker"]} if row.get("blocker") else {}),
+            }
+            for name, row in artifact.get("pending_functions", {}).items()
+        },
         artifact_hash=artifact_hash(artifact),
         suggested_expansions=[requests[k] for k in sorted(requests)],
         summary=dict(Counter(r["decision"] for r in report["rows"])),
-        assessment={"schema": 2, "status": status, "judgments_complete": complete, **ratings},
+        assessment={"schema": 3, "status": status, "judgments_complete": complete, **ratings},
     )
     return report

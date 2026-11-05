@@ -1,0 +1,26 @@
+[
+  {
+    "name": "typed_raw",
+    "source": "pragma solidity ^0.8.10;\ncontract T {mapping(uint=>uint) values;\nfunction rawSet(uint key,uint v) external {assembly{mstore(0,key)mstore(32,0)sstore(keccak256(0,64),v)}}\nfunction typedSet(uint key,uint v) external {values[key]=v;}\nfunction typedGet(uint key) external view returns(uint){return values[key];}\nfunction rawGet(uint key) external view returns(uint v){assembly{mstore(0,key)mstore(32,0)v:=sload(keccak256(0,64))}}\n}\ncontract C {T t;constructor(address a){t=T(a);}\nfunction a() external{t.rawSet(0,1);require(t.typedGet(0)==1);}\nfunction b() external{t.typedSet(0,1);require(t.rawGet(0)==1);}}\n",
+    "functions": {
+      "a": true,
+      "b": true
+    }
+  },
+  {
+    "name": "raw_word",
+    "source": "pragma solidity ^0.8.10;\ncontract T {function set(int key,int value) external {assembly{sstore(key,value)}}\nfunction get(uint key) external view returns(uint value){assembly{value:=sload(key)}}}\ncontract C {T t;constructor(address a){t=T(a);}\nfunction a() external{t.set(-1,7);require(t.get(type(uint256).max)==7);}\nfunction b() external{t.set(1,-1);require(t.get(1)==type(uint256).max);}}\n",
+    "functions": {
+      "a": true,
+      "b": true
+    }
+  },
+  {
+    "name": "namespace",
+    "source": "pragma solidity ^0.8.10;\ncontract T {struct A {uint x;} struct B {uint y;}\nfunction one() internal pure returns(A storage s){assembly{s.slot:=3840}}\nfunction two() internal pure returns(B storage s){assembly{s.slot:=3840}}\nfunction put() external {one().x=1;}\nfunction get() external view returns(uint){return two().y;}}\ncontract C {T t;constructor(address a){t=T(a);}\nfunction a() external{t.put();require(t.get()==1);}\nfunction b() external{t.put();require(t.get()==0);}}\n",
+    "functions": {
+      "a": true,
+      "b": false
+    }
+  }
+]

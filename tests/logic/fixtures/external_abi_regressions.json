@@ -1,0 +1,83 @@
+[
+  {
+    "name": "enum_probe",
+    "source": "pragma solidity ^0.8.10;\ninterface I {function allowed(uint8 who) external pure returns(bool);}\ncontract B {enum E {A,B} function allowed(E) public pure virtual returns(bool){return false;}}\ncontract M is B {function allowed(E) public pure override returns(bool){return true;}}\ncontract C {I m; uint public value;constructor(address a){m=I(a);}function act() external {require(m.allowed(2));value=1;}}\n",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false
+  },
+  {
+    "name": "enum_return_probe",
+    "source": "pragma solidity ^0.8.10;\ninterface I {enum E {A,B} function allowed() external pure returns(E);}\ncontract B {function allowed() public pure virtual returns(uint8){return 0;}}\ncontract M is B {function allowed() public pure override returns(uint8){return 2;}}\ncontract C {I m;uint public value;constructor(address a){m=I(a);}function act() external {require(uint8(m.allowed())==2);value=1;}}\n",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false
+  },
+  {
+    "name": "arg_width_probe",
+    "source": "pragma solidity ^0.8.10;\ncontract B {function allowed(uint8) public pure virtual returns(bool){return false;}}\ncontract M is B {function allowed(uint8) public pure override returns(bool){return true;}}\ncontract C {address m;uint public value;constructor(address a){m=a;}function act() external {\n(bool ok,bytes memory data)=m.staticcall(abi.encodeWithSignature(\"allowed(uint8)\",uint256(256)));\nrequire(ok);require(abi.decode(data,(bool)));value=1;}}\n",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false
+  },
+  {
+    "name": "revert_probe",
+    "source": "pragma solidity ^0.8.10;\ncontract M {function allowed(address who) external pure returns(bool){if(who != address(0)){assembly{mstore(0,1) revert(0,32)}} return false;}}\ncontract C {address m;uint public value;constructor(address a){m=a;}\nfunction act() external { (,bytes memory data)=m.staticcall(abi.encodeWithSignature(\"allowed(address)\",msg.sender)); require(abi.decode(data,(bool)));value=1;}\nfunction failOnly() external { (bool ok,bytes memory data)=m.staticcall(abi.encodeWithSignature(\"allowed(address)\",msg.sender)); require(!ok);require(abi.decode(data,(bool)));value=1;}}\n",
+    "functions": [
+      "act",
+      "failOnly"
+    ],
+    "chain_success": true
+  },
+  {
+    "name": "nested_enum_return",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false,
+    "source": "pragma solidity ^0.8.10;\ninterface I {enum E {A,B} struct R {E e;} function allowed() external pure returns(R memory);}\ncontract M {struct R {uint8 e;} function allowed() external pure returns(R memory){return R(2);}}\ncontract C {I m;uint value;constructor(address a){m=I(a);}function act() external {require(uint8(m.allowed().e)==2);value=1;}}\n"
+  },
+  {
+    "name": "nested_enum_input",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false,
+    "source": "pragma solidity ^0.8.10;\ninterface I {function allowed(uint8[] memory x) external pure returns(bool);}\ncontract M {enum E {A,B} function allowed(E[] memory) external pure returns(bool){return true;}}\ncontract C {I m;uint value;constructor(address a){m=I(a);}function act() external {uint8[] memory x=new uint8[](1);x[0]=2;require(m.allowed(x));value=1;}}\n"
+  },
+  {
+    "name": "different_struct_field_order",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false,
+    "source": "pragma solidity ^0.8.10;\ninterface I {struct S {uint a;uint b;} function allowed(S memory x) external pure returns(bool);}\ncontract M {struct S {uint b;uint a;} function allowed(S memory x) external pure returns(bool){return x.b==1;}}\ncontract C {I m;uint value;constructor(address a){m=I(a);}function act() external {require(m.allowed(I.S(0,1)));value=1;}}\n"
+  },
+  {
+    "name": "return_cleanup",
+    "source": "pragma solidity ^0.8.10;\ninterface I {function allowed() external pure returns(uint8);}\ncontract B {function allowed() public pure virtual returns(uint8){return 0;}}\ncontract M is B {function allowed() public pure override returns(uint8 x){assembly{x:=256}}}\ncontract C {I m;uint public value;constructor(address a){m=I(a);}function act() external {require(m.allowed()!=0);value=1;}}\n",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false
+  },
+  {
+    "name": "struct_cleanup",
+    "source": "pragma solidity ^0.8.10;\ninterface I {struct S {uint8 x;} function allowed(S memory s) external pure returns(bool);}\ncontract B is I {function allowed(S memory) public pure virtual override returns(bool){return false;}}\ncontract M is B {function allowed(S memory s) public pure override returns(bool){return s.x!=0;}}\ncontract C {I m;uint public value;constructor(address a){m=I(a);}function act() external {uint8 x;assembly{x:=256}require(m.allowed(I.S(x)));value=1;}}\n",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false
+  },
+  {
+    "name": "scalar_cleanup",
+    "source": "pragma solidity ^0.8.10;\ninterface I {function allowed(uint8 x) external pure returns(bool);}\ncontract B is I {function allowed(uint8) public pure virtual override returns(bool){return false;}}\ncontract M is B {function allowed(uint8 x) public pure override returns(bool){return x>255;}}\ncontract C {I m;uint public value;constructor(address a){m=I(a);}function act() external {uint8 x;assembly{x:=caller()}require(m.allowed(x));value=1;}}\n",
+    "functions": [
+      "act"
+    ],
+    "chain_success": false
+  }
+]

@@ -17,9 +17,10 @@ from .terms import subterms
 
 
 def digest(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
-    ).hexdigest()
+    result = hashlib.sha256()
+    for part in json.JSONEncoder(sort_keys=True, ensure_ascii=False, separators=(",", ":")).iterencode(value):
+        result.update(part.encode())
+    return result.hexdigest()
 
 
 def _hash(text: str) -> str:
@@ -29,6 +30,16 @@ def _hash(text: str) -> str:
 class ContextContracts(Mapping):
     def __init__(self, contracts, address, contract):
         self.contracts, self.used, self.missing = contracts, {address: contract}, set()
+        self.code_contexts = {}
+        self.own_sources = {}
+
+    def record_code(self, address, code, contract):
+        if contract is None:
+            self.missing.add(code)
+        else:
+            self.code_contexts[address, code] = contract
+            self.own_sources[code] = contract
+            self.missing.discard(code)
 
     def get(self, address, default=None):
         contract = self.contracts.get(address, default)
@@ -36,6 +47,14 @@ class ContextContracts(Mapping):
             self.used[address] = contract
         elif isinstance(address, int):
             self.missing.add(address)
+        return contract
+
+    def own_code(self, address):
+        if address in self.own_sources:
+            return self.own_sources[address]
+        own = getattr(self.contracts, "own_code", None)
+        contract = own(address) if own is not None else self.contracts.get(address)
+        self.record_code(address, address, contract)
         return contract
 
     def __getitem__(self, address):
@@ -51,11 +70,23 @@ class ContextContracts(Mapping):
         return len(self.used)
 
 
-def build_bundle(contracts: Mapping, *, max_chars=48_000, missing_sources=(), code_addresses=None) -> dict:
+def build_bundle(
+    contracts: Mapping, *, max_chars=48_000, missing_sources=(), code_addresses=None, code_contexts=None
+) -> dict:
     if type(max_chars) is not int or max_chars <= 0:
         raise ValueError("positive context size required")
     files, deployments, missing = {}, [], list(missing_sources)
-    for address, contract in sorted(contracts.items()):
+    entries = [
+        (address, (code_addresses or {}).get(address, address), contract, None)
+        for address, contract in sorted(contracts.items())
+    ]
+    present = {(address, code) for address, code, _, _ in entries}
+    entries += [
+        (address, code, contract, "dispatcher" if address == code else "implementation")
+        for (address, code), contract in sorted((code_contexts or {}).items())
+        if (address, code) not in present
+    ]
+    for address, code, contract, role in entries:
         sources = contract.compilation_unit.core.source_code
         refs = []
         if not sources:
@@ -67,7 +98,8 @@ def build_bundle(contracts: Mapping, *, max_chars=48_000, missing_sources=(), co
         deployments.append(
             {
                 "address": f"0x{address:040x}",
-                "code_address": f"0x{(code_addresses or {}).get(address, address):040x}",
+                "code_address": f"0x{code:040x}",
+                **({"role": role} if role else {}),
                 "contract": contract.name,
                 "files": sorted(set(refs)),
             }
@@ -90,6 +122,7 @@ def build_context(formula: Formula, function, bundle: dict) -> dict:
     terms = [formula.success, *(e.guard for e in formula.effects), *(e.value for e in formula.effects)]
     gaps = sorted(
         {str(t[1]) for term in terms for kind in ("unknown", "opaque", "assumed") for t in subterms(term, kind)}
+        | ({"unsupported:numeric_memory_address"} if any(subterms(t, "memory_address") for t in terms) else set())
     )
     body = {
         "schema": 2,
@@ -173,6 +206,10 @@ def artifact_hash(artifact: dict) -> str:
                 "block",
                 "status",
                 "functions",
+                "pending_functions",
+                "generation_scope",
+                "code_locations",
+                "entry_code_addresses",
                 "contexts",
                 "source_bundle",
             )

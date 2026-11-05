@@ -48,14 +48,33 @@ def _supported(chain_id: int):
 def generate(body: GenerateRequest, actor: str = Depends(deps.admin_actor)) -> dict:
     chain = _supported(body.chain_id)
     with deps.SessionLocal() as session:
+        params = body.model_dump(mode="json")
+        input_hash = None
+        if body.resume_job_id is not None:
+            _, previous = _result(session, body.resume_job_id, "generate")
+            if (previous["address"].lower(), previous["chain_id"]) != (body.address, body.chain_id):
+                raise HTTPException(409, "Resume target does not match generation")
+            if body.block is not None and body.block != previous["block"]:
+                raise HTTPException(409, "Resume must use the original block")
+            if not previous.get("pending_functions"):
+                raise HTTPException(409, "Generation has no pending functions")
+            scope = previous.get("generation_scope", {})
+            for key in ("related_addresses", "context_chars"):
+                if key in scope:
+                    if key in body.model_fields_set and params[key] != scope[key]:
+                        raise HTTPException(409, "Resume must preserve the generation scope")
+                    params[key] = scope[key]
+            params["block"] = previous["block"]
+            input_hash = digest(previous)
         job = enqueue(
             session,
             "generate",
-            body.model_dump(mode="json"),
+            params,
             chain=chain.name,
             chain_id=chain.chain_id,
             address=body.address,
             actor=actor,
+            input_hash=input_hash,
         )
         deps.log_admin_mutation("logic_generate", actor=actor, job_id=str(job.id))
         return status(job)

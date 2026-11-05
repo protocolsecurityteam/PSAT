@@ -31,13 +31,19 @@ class JevClient:
         *,
         model: str = DEFAULT_MODEL,
         max_requests: int = 8,
-        max_request_bytes: int = 100_000,
+        max_request_bytes: int | None = None,
+        long_context: bool = False,
         timeout: float = 45,
         session: Any = None,
     ):
         if not api_key:
             raise ValueError("TYPESAFE_API_KEY or JEV_API_KEY is required for live requests")
         validate_model(model)
+        if type(long_context) is not bool:
+            raise ValueError("long_context must be a boolean")
+        if max_request_bytes is None:
+            max_request_bytes = 1_000_000 if long_context else 100_000
+        self.long_context = long_context
         if max_requests < 0 or max_request_bytes <= 0 or timeout <= 0:
             raise ValueError("invalid Jev request limits")
         self.model, self.max_requests, self.max_request_bytes = model, max_requests, max_request_bytes
@@ -59,12 +65,23 @@ class JevClient:
             response = self._session.post(
                 ENDPOINT,
                 data=body,
-                headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                    **({"TypeSafe-Danger-Zone-Long-Context": "true"} if self.long_context else {}),
+                },
                 timeout=self.timeout,
                 allow_redirects=False,
             )
         except requests.RequestException:
             raise JevError("Jev transport failed; no automatic retry") from None
+        if response.status_code == 400:
+            try:
+                detail = response.json().get("detail", {})
+            except (ValueError, AttributeError):
+                detail = {}
+            if isinstance(detail, dict) and detail.get("error_type") == "max_tokens_exceeded":
+                raise JevBudgetExceeded("Jev model context limit exceeded; no answer accepted")
         if response.status_code != 200:
             raise JevError(f"Jev HTTP {response.status_code}; no answer accepted")
         try:

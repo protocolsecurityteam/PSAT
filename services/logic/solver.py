@@ -12,7 +12,7 @@ from eth_utils.crypto import keccak
 
 from .model import BudgetExceeded, Issue, Limits, Reads, SolutionSet
 from .storage import Storage
-from .terms import CALLER, Term, cheapest_first, fits, mk
+from .terms import CALLER, Term, cheapest_first, const, contains, fits, mk, mk_and, mk_cmp, mk_op, subterms
 
 WORD = 2**256
 ADDRESS = 2**160
@@ -41,6 +41,33 @@ def boolean(v: Any) -> Any:
 def signed(v: Any, bits: int = 256) -> Any:
     low = integer(v) % 2**bits
     return z3.If(low >= 2 ** (bits - 1), low - 2**bits, low)
+
+
+def word(value: z3.ArithRef) -> z3.BitVecRef:
+    """Distribute word conversion over conditionals, preserving the expression DAG.
+
+    Int2BV(If(c, a, b)) == If(c, Int2BV(a), Int2BV(b)). This lets Z3 fold
+    concrete storage values before mixing integer and bitvector arithmetic.
+    """
+    converted: dict[int, z3.BitVecRef] = {}
+    pending = [value]
+    while pending:
+        node = pending[-1]
+        key = node.get_id()
+        if key in converted:
+            pending.pop()
+            continue
+        if z3.is_app_of(node, z3.Z3_OP_ITE):
+            left, right = (cast(z3.ArithRef, node.arg(i)) for i in (1, 2))
+            missing = [child for child in (left, right) if child.get_id() not in converted]
+            if missing:
+                pending.extend(missing)
+                continue
+            converted[key] = cast(z3.BitVecRef, z3.If(node.arg(0), converted[left.get_id()], converted[right.get_id()]))
+        else:
+            converted[key] = z3.Int2BV(node, 256)
+        pending.pop()
+    return converted[value.get_id()]
 
 
 class Translation:
@@ -87,6 +114,114 @@ class Translation:
         self.variables[term] = v
         return v
 
+    def byte_chunk(self, data: Term, index: Term):
+        """Finite read-only array elimination: equal indices must have equal word values."""
+        at = integer(self.translate(index))
+        bound = self.bindings.get(data)
+        if isinstance(bound, str):
+            bound = bound.encode("utf-8")
+        if isinstance(bound, bytes):
+            fixed = number(at)
+            if fixed is not None:
+                start = 32 * fixed
+                chunk = bound[start : start + 32] if fixed >= 0 else b""
+                return z3.IntVal(int.from_bytes(chunk.ljust(32, b"\0"), "big"))
+            stream = z3.K(z3.IntSort(), z3.IntVal(0))
+            for i in range(0, len(bound), 32):
+                stream = z3.Store(stream, i // 32, int.from_bytes(bound[i : i + 32].ljust(32, b"\0"), "big"))
+            return cast(z3.ArithRef, z3.Select(stream, at))
+        if data in self.bindings:
+            return self.missing(mk("byte_chunk", data, index), "ABI bytes binding")
+        fixed = number(at)
+        if fixed is not None:
+            index = const(fixed)
+        term = mk("byte_chunk", data, index)
+        if term in self.variables:
+            return self.variables[term]
+        previous = [(t, v) for t, v in self.variables.items() if t[0] == "byte_chunk" and t[1] == data]
+        value = self.variable(term)
+        for other, old in previous:
+            self.bounds.append(z3.Implies(at == integer(self.translate(other[2])), value == old))
+        return value
+
+    def byte_window(self, data: Term, offset: Term):
+        """One EVM byte window over a single caller-controlled stream, padded past its length."""
+        bound = data[1] if data[0] == "const" else self.bindings.get(data)
+        at = integer(self.translate(offset)) % WORD
+        block, shift = at / 32, (at % 32) * 8
+        aligned = number(shift) == 0
+        if isinstance(bound, str):
+            bound = bound.encode("utf-8")
+        if isinstance(bound, bytes):
+            position = number(at)
+            if position is not None:
+                return z3.IntVal(int.from_bytes(bound[position : position + 32].ljust(32, b"\0"), "big"))
+            # Concrete streams need no quantified array: this is a fixed finite store.
+            stream = z3.K(z3.BitVecSort(256), z3.BitVecVal(0, 256))
+            for i in range(0, len(bound), 32):
+                value = int.from_bytes(bound[i : i + 32].ljust(32, b"\0"), "big")
+                stream = z3.Store(stream, z3.BitVecVal(i // 32, 256), z3.BitVecVal(value, 256))
+            length = z3.IntVal(len(bound))
+            left = z3.Select(stream, z3.Int2BV(block, 256))
+            left_value = z3.BV2Int(left)
+            right = z3.Select(stream, z3.Int2BV(block + 1, 256)) if not aligned else None
+        else:
+            if data in self.bindings:
+                return self.missing(mk("elem", data, offset), "ABI bytes binding")
+            index = mk_op("div", (mk("conv", "uint256", offset), const(32)))
+            left_value = self.byte_chunk(data, index)
+            left = word(left_value)
+            right = word(self.byte_chunk(data, mk_op("add", (index, const(1))))) if not aligned else None
+            length = integer(self.translate(mk("len", data)))
+        available = cast(z3.ArithRef, z3.If(length <= at, 0, z3.If(length - at >= 32, 32, length - at)))
+        mask = z3.BitVecVal(WORD - 1, 256) << z3.Int2BV((32 - available) * 8, 256)
+        if aligned:
+            return z3.If(length - at >= 32, left_value, z3.BV2Int(left & mask))
+        assert right is not None
+        combined = (left << z3.Int2BV(shift, 256)) | z3.LShR(right, z3.Int2BV(256 - shift, 256))
+        return z3.BV2Int(combined & mask)
+
+    def view_window(self, data: Term, offset: Term):
+        """Read a byte view without inventing new independent input words."""
+        at = integer(self.translate(offset)) % WORD
+        length = integer(self.translate(mk("len", data)))
+        if data[0] == "bytes_slice":
+            origin = integer(self.translate(data[2])) % WORD
+            source_at = mk_op("add", (data[2], offset))
+            source = word(integer(self.translate(mk("elem", data[1], source_at))))
+            available = cast(z3.ArithRef, z3.If(length <= at, 0, z3.If(length - at >= 32, 32, length - at)))
+            mask = z3.BitVecVal(WORD - 1, 256) << z3.Int2BV((32 - available) * 8, 256)
+            # Source offsets past the word domain pad with zero, never wrap to
+            # the first byte of the source (even though EVM arithmetic wraps).
+            return z3.If(origin + at >= WORD, 0, z3.BV2Int(source & mask))
+        if data[0] == "bytes_patch":
+            current = word(integer(self.translate(mk("elem", data[1], offset))))
+            for position, value, skip, width in data[2]:
+                if type(position) is not int or position < 0 or not 0 <= skip < skip + width <= 32:
+                    return self.missing(mk("elem", data, offset), "unsupported:byte_patch")
+                low = cast(z3.ArithRef, z3.If(at > position, at, position))
+                high = cast(z3.ArithRef, z3.If(at + 32 < position + width, at + 32, position + width))
+                high = cast(z3.ArithRef, z3.If(high < length, high, length))
+                count, output_skip = high - low, low - at
+                mask = z3.LShR(
+                    z3.BitVecVal(WORD - 1, 256) << z3.Int2BV((32 - count) * 8, 256),
+                    z3.Int2BV(output_skip * 8, 256),
+                )
+                source = word(integer(self.translate(value))) << z3.Int2BV((skip + low - position) * 8, 256)
+                placed = z3.LShR(source, z3.Int2BV(output_skip * 8, 256))
+                current = cast(z3.BitVecRef, z3.If(high > low, (current & ~mask) | (placed & mask), current))
+            return z3.BV2Int(current)
+        raise ValueError("not a byte view")
+
+    def unbound(self):
+        """An independent query with the same translation policy and pinned storage."""
+        from copy import copy
+
+        other = copy(self)
+        Translation.__init__(other, self.reads, self.contracts, self.address, self.selector, self.limits)
+        other.storage = self.storage
+        return other
+
     def translate(self, term: Term) -> Any:
         if self.storage is None:
             self.storage = Storage(self.reads, self.contracts, self.limits, term)
@@ -112,6 +247,15 @@ class Translation:
             return z3.BoolVal(v) if isinstance(v, bool) else z3.IntVal(v) if isinstance(v, int) else v
         kind = t[0]
         go = self.translate
+        if kind == "write_power":
+            from .power import translate_power
+
+            return translate_power(t, self)
+        if kind == "storage_key_equal":
+            self.assumptions.add("keccak256 storage-key collision resistance")
+            return go(t[3])
+        if kind == "memory_address":
+            return self.missing(t, "unsupported:numeric_memory_address")
         if kind == "const":
             v = t[1]
             return z3.BoolVal(v) if isinstance(v, bool) else z3.IntVal(v) if isinstance(v, int) else v
@@ -127,6 +271,36 @@ class Translation:
             if t[2] in ("bytes", "string") or "[" in t[2] or t[2].startswith("("):
                 return self.missing(t, f"symbolic argument:{t[2]}")
             return self.variable(t, t[2])
+        if kind == "byte_chunk":
+            return self.byte_chunk(t[1], t[2])
+        if kind == "bytes_prefix":
+            tail = go(t[2])
+            if isinstance(tail, str):
+                tail = tail.encode("utf-8")
+            return t[1] + tail if isinstance(tail, bytes) else self.missing(t, "symbolic byte sequence")
+        if kind in ("bytes_slice", "bytes_patch"):
+            data = go(t[1])
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            if not isinstance(data, bytes):
+                return self.missing(t, "symbolic byte sequence")
+            if kind == "bytes_slice":
+                start, count = number(go(t[2])), number(go(t[3]))
+                if start is None or count is None:
+                    return self.missing(t, "symbolic byte sequence")
+                start, count = start % WORD, count % WORD
+                if count > 2048:
+                    return self.missing(t, "ABI bytes copy", "budget")
+                return data[start : start + count].ljust(count, b"\0")
+            output = bytearray(data)
+            for offset, value, skip, width in t[2]:
+                fixed = number(go(value))
+                if fixed is None:
+                    return self.missing(t, "symbolic byte sequence")
+                count = max(0, min(width, len(output) - offset))
+                raw = (fixed % WORD).to_bytes(32, "big")
+                output[offset : offset + count] = raw[skip : skip + count]
+            return bytes(output)
         if kind == "time":
             return z3.IntVal(self.reads.block_field(t[1]))
         if kind == "load":
@@ -180,6 +354,8 @@ class Translation:
             return z3.If(condition, a, b)
         if kind == "conv":
             value = integer(go(t[2]))
+            if not isinstance(value, z3.ExprRef):
+                return self.missing(t, "scalar conversion of composite value")
             type_ = t[1]
             if type_ == "bool":
                 return boolean(value)
@@ -225,17 +401,103 @@ class Translation:
                 if isinstance(exc, (ValueError, BadSignature)):
                     return z3.IntVal(0)
                 raise
+        if kind == "abi_bytes_valid":
+            value = t[1]
+            if value[0] == "load":
+                at = number(go(value[1]))
+                path = tuple((k, number(go(v)) if k == "k" else v) for k, v in value[3])
+                if at is None or any(k == "k" and v is None for k, v in path):
+                    return self.missing(t, "symbolic ABI bytes layout")
+                try:
+                    assert self.storage is not None
+                    code = number(go(value[4][1])) if len(value) > 4 else None
+                    word = self.storage.bytes_header(at, value[2], path, code)
+                except ValueError:
+                    return self.missing(t, "ABI bytes layout")
+                short = word % 2 == 0
+                length = (word % 256) // 2 if short else word // 2
+                if (short and length > 31) or (not short and length < 32):
+                    return z3.BoolVal(False)
+                if length > 2048:
+                    return self.missing(t, "ABI bytes copy", "budget")
+                return z3.BoolVal(True)
+            if value[0] == "const" and isinstance(value[1], (str, bytes)):
+                data = value[1].encode("utf-8") if isinstance(value[1], str) else value[1]
+                return z3.BoolVal(True) if len(data) <= 2048 else self.missing(t, "ABI bytes copy", "budget")
+            if value[0] in ("arg", "enc", "calldata", "array", "bytes_prefix", "bytes_slice", "bytes_patch"):
+                return z3.BoolVal(True)
+            return self.missing(t, "ABI bytes value")
+        if kind == "len" and t[1][0] == "bytes_prefix":
+            length = integer(go(mk("len", t[1][2]))) + len(t[1][1])
+            self.bounds.append(length < WORD)
+            return length
+        if kind == "len" and t[1][0] == "bytes_slice":
+            return integer(go(t[1][3])) % WORD
+        if kind == "len" and t[1][0] == "bytes_patch":
+            return go(mk("len", t[1][1]))
+        if kind in ("len", "abi_word", "elem") and t[1][0] == "enc":
+            from .abi_values import encoded_region
+
+            layout = encoded_region(t[1])
+            if layout is not None:
+                size, chunks = layout
+                if kind == "len":
+                    return z3.IntVal(size)
+                data = mk("bytes_patch", const(bytes(size), "bytes"), tuple((at, v, 0, n) for at, v, n in chunks))
+                return go(mk("elem", data, const(32 * t[2]) if kind == "abi_word" else t[2]))
+        if kind in ("abi_word", "elem") and t[1][0] in ("bytes_slice", "bytes_patch"):
+            return self.view_window(t[1], const(32 * t[2]) if kind == "abi_word" else t[2])
+        if kind in ("abi_word", "elem") and t[1][0] == "bytes_prefix":
+            from .memory import prefix_word
+
+            go(mk("len", t[1]))  # A concatenated stream must still fit the EVM size domain.
+            return go(prefix_word(t[1], const(32 * t[2]) if kind == "abi_word" else t[2]))
+        if kind in ("abi_word", "elem") and (
+            (t[1][0] == "arg" and t[1][2] in ("bytes", "string"))
+            or (t[1][0] == "const" and isinstance(t[1][1], (bytes, str)))
+        ):
+            if kind == "abi_word" and (type(t[2]) is not int or t[2] < 0):
+                return self.missing(t, "ABI word index")
+            return self.byte_window(t[1], const(32 * t[2]) if kind == "abi_word" else t[2])
+        if kind == "abi_word" or (kind == "len" and t[1][0] == "arg" and t[1][2] in ("bytes", "string")):
+            data = self.bindings.get(t[1])
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            if kind == "abi_word" and t[1][0] != "arg":
+                data = go(t[1])
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                if not isinstance(data, bytes):
+                    return self.missing(t, "ABI word requires decoded bytes")
+            if isinstance(data, bytes):
+                if kind == "len":
+                    return z3.IntVal(len(data))
+                offset = 32 * t[2]
+                return z3.IntVal(int.from_bytes(data[offset : offset + 32].ljust(32, b"\0"), "big"))
+            if t[1] in self.bindings:
+                return self.missing(t, "ABI bytes binding")
+            # Scalar decoding reads disjoint 32-byte words of this same byte sequence.
+            # Its minimum length and per-type validation are explicit path conditions.
+            return self.variable(t)
         if kind in ("len", "word", "elem"):
             if kind == "elem" and t[1][0] == "load":
+                from .cells import child_load
+
                 container = t[1]
-                return go(mk("load", container[1], container[2], (*container[3], ("k", t[2]))))
+                return go(child_load(container, (("k", t[2]),)))
             if kind == "len" and t[1][0] == "array":
                 return go(t[1][1])
             value = go(t[1])
-            if isinstance(value, (bytes, str, tuple, list)):
+            if isinstance(value, str):
+                value = value.encode("utf-8")
+            if isinstance(value, (bytes, tuple, list)):
                 if kind == "len":
                     return z3.IntVal(len(value))
                 offset = number(go(t[2]))
+                if kind == "elem" and isinstance(value, bytes) and offset is not None and offset >= 0:
+                    # Byte containers expose a word from this byte offset: byte_at()
+                    # extracts its high byte, and calldataload reads the whole word.
+                    return z3.IntVal(int.from_bytes(value[offset : offset + 32].ljust(32, b"\0"), "big"))
                 if offset is not None and 0 <= offset < len(value):
                     if kind == "word":
                         if not isinstance(value, bytes) or offset + 32 > len(value):
@@ -265,6 +527,12 @@ class Translation:
         address = number(go(t[1]))
         if address is None:
             return self.missing(t, "symbolic storage address")
+        code = number(go(t[4][1])) if len(t) > 4 else None
+        if len(t) > 4 and code is None:
+            return self.missing(t, "symbolic storage code context")
+        if len(t) > 4 and (t[4][2] is None or t[4][3] is None):
+            if code not in getattr(self.contracts, "own_sources", {}):
+                return self.missing(t, "unplaced storage code context")
         name = t[2]
         if isinstance(name, tuple) and name[:1] == ("slot",):
             root = number(go(name[1])) if isinstance(name[1], Term) else name[1]
@@ -272,19 +540,44 @@ class Translation:
                 return self.missing(t, "symbolic namespace")
             name = ("slot", root, name[2])
         path = tuple((k, go(v) if k == "k" and v[0] != "hash" else v) for k, v in t[3])
-        concrete = all(k != "k" or number(v) is not None for k, v in path)
+        concrete = all(k != "k" or number(v) is not None or isinstance(v, (str, bytes)) for k, v in path)
         try:
             if concrete:
-                value = self.storage.read(address, name, tuple((k, number(v) if k == "k" else v) for k, v in path))
+                from .abi_values import from_name, static_words
+
+                meta = t[4] if len(t) > 4 else None
+                if meta and meta[2] is not None and meta[3] is not None and static_words(from_name(meta[5])) == 1:
+                    slot, offset = number(go(meta[2])), number(go(meta[3]))
+                    if slot is None or offset is None:
+                        return self.missing(t, "symbolic physical storage")
+                    value = self.storage.read_cell(address, slot, offset, meta[4], meta[5])
+                else:
+                    value = self.storage.read(
+                        address,
+                        name,
+                        tuple((k, number(v) if k == "k" and number(v) is not None else v) for k, v in path),
+                        code,
+                    )
                 return z3.BoolVal(value) if isinstance(value, bool) else z3.IntVal(value)
-            self.storage.register_root(address, name)
-            snap = self.storage.snapshot(address)
+            deferred = self._defer_load(address, name, path, code)
+            if deferred is not None:
+                return deferred
+            if len(t) > 4 and t[4][2] is not None:
+                from .cells import annotate
+
+                source = self.storage.contract(address, code)
+                actual = annotate(source, t[4][1], (t[1], t[2], t[3]))[3] if source is not None else None
+                if actual is None or actual[2:] != t[4][2:]:
+                    return self.missing(t, "storage code layout does not match physical cell")
+            self.storage.register_root(address, name, code)
+            snap = self.storage.snapshot(address, code)
         except ValueError as exc:
             return self.missing(t, str(exc))
         if not snap.complete:
             self._dependencies[-1] = True
             self.issues.extend(snap.issues)
-            self.issues.append(Issue("enumeration", f"{address:#x}: {len(snap.unexplained)} unattributed slots"))
+            if snap.slot_count is not None:
+                self.issues.append(Issue("enumeration", f"{address:#x}: {len(snap.unexplained)} unattributed slots"))
             default = self.variable(t)
         else:
             default = z3.IntVal(0)
@@ -306,6 +599,9 @@ class Translation:
             else:
                 result = z3.If(z3.And(*conditions), int(value), integer(result))
         return result
+
+    def _defer_load(self, address: int, name: Any, path: tuple, code: int | None = None) -> Any:
+        return None
 
     def _key_equals(self, term: Term, key: int, preimages: dict[int, bytes]) -> Any:
         """Invert a known hash equality through its verified encoding, never guess a preimage."""
@@ -399,9 +695,9 @@ class Translation:
             q = absolute(x) / absolute(y) if name == "sdiv" else absolute(x) % absolute(y)
             negative = z3.Xor(x < 0, y < 0) if name == "sdiv" else x < 0
             return cast(z3.ArithRef, z3.If(y == 0, 0, z3.If(negative, -q, q))) % WORD
-        av = z3.Int2BV(a, 256)
-        bv = z3.Int2BV(b, 256) if b is not None else None
         if name in ("and", "or", "xor", "bnot", "shl", "shr", "sar"):
+            av = word(a)
+            bv = word(b) if b is not None else None
             v = (
                 (av & bv)
                 if name == "and"
@@ -432,11 +728,25 @@ class Translation:
         return self.missing(t, f"symbolic operation:{name}")
 
     def _encode(self, t: Term) -> Any:
-        kind, args = t[1:]
+        from .abi_values import encoded_region
+
+        layout = encoded_region(t)
+        if layout is not None:
+            data = bytearray(layout[0])
+            for offset, word, width in layout[1]:
+                value = number(self.translate(word))
+                if value is None:
+                    return self.missing(t, "symbolic ABI encoding")
+                data[offset : offset + width] = (value % WORD).to_bytes(32, "big")[:width]
+            return bytes(data)
+        kind, args = t[1:3]
         types, values = [], []
         for arg in args:
             value = self.translate(arg)
             type_ = arg[2] if arg[0] in ("const", "arg") else arg[1] if arg[0] == "conv" else None
+            if kind == "abi.encodePacked" and arg[0] == "slice" and 1 <= arg[3] <= 32:
+                # A memory slice has this exact byte length, independent of its source type.
+                type_ = f"uint{8 * arg[3]}"
             n = number(value)
             if n is not None and type_ is not None:
                 value = n
@@ -474,20 +784,91 @@ class Translation:
         return None
 
 
-def project(formula: Term, translation: Translation, identity: Term = CALLER) -> SolutionSet:
-    """Return an exact finite/cofinite set or the original symbolic predicate with qualifications."""
-    if translation.limits.solver_ms <= 0:
-        return SolutionSet(formula, identity, "symbolic", issues=(Issue("budget", "solver"),))
+class _DeferredStorage(Translation):
+    """Unknown keyed storage is fixed state, represented by consistent functions of its keys.
+
+    Function interpretations never enter the existential call-argument variables. The
+    projection must be proved independent of every interpretation before using it.
+    """
+
+    def __init__(self, original: Translation):
+        super().__init__(
+            original.reads, original.contracts, original.address, original.selector, original.limits, original.bindings
+        )
+        self.state_functions: dict[tuple, Any] = {}
+
+    def _defer_load(self, address: int, name: Any, path: tuple, code: int | None = None) -> Any:
+        from .layout import _size, locate
+
+        contract = self.storage.contract(address, code) if self.storage is not None else self.contracts.get(address)
+        dummy = tuple((kind, 0 if kind == "k" else key) for kind, key in path)
+        where = locate(contract, name, dummy) if contract is not None else None
+        if where is None or _size(where[2]) is None:
+            return self.missing(mk("unknown", "unsupported:deferred_storage_layout"))
+        keys = [integer(key) for kind, key in path if kind == "k"]
+        if not all(isinstance(key, z3.ArithRef) for key in keys):
+            return self.missing(mk("unknown", "unsupported:deferred_storage_layout"))
+        root = address, code, name, tuple((kind, None if kind == "k" else key) for kind, key in path)
+        if root not in self.state_functions:
+            self.state_functions[root] = z3.Function(
+                f"storage{len(self.state_functions)}", *([z3.IntSort()] * len(keys)), z3.IntSort()
+            )
+        return self.state_functions[root](*keys)
+
+
+def _projected_goal(formula: Term, translation: Translation, identity: Term):
+    if translation.storage is None:
+        translation.storage = Storage(translation.reads, translation.contracts, translation.limits, formula)
+    else:
+        translation.storage.constants.update(
+            int(t[1]) for t in subterms(formula, "const") if isinstance(t[1], (int, bool))
+        )
     selected = translation.translate(identity)
     goal = boolean(translation.translate(formula))
-    issues = tuple(dict.fromkeys(translation.issues))
+    others = [v for t, v in translation.variables.items() if t != identity]
+    allowed = z3.And(*translation.bounds, goal)
+    return selected, z3.Exists(others, allowed) if others else allowed
+
+
+def _state_independent(formula: Term, original: Translation, identity: Term):
+    """Return a projection only after proving it is identical for all deferred storage.
+
+    Zero-valued storage supplies a candidate expression, never evidence about chain state.
+    UNSAT of a difference query certifies that every possible fixed storage interpretation
+    has exactly the same caller set, with the call arguments quantified inside each set.
+    """
+    if type(original) is not Translation or not any(
+        contains(load, frozenset({"caller", "origin", "signer", "arg"})) for load in subterms(formula, "load")
+    ):
+        return None
+    translated = _DeferredStorage(original)
+    selected, predicate = _projected_goal(formula, translated, identity)
+    if translated.issues or not translated.state_functions:
+        return None
+    candidate = z3.substitute_funs(predicate, *((f, z3.IntVal(0)) for f in translated.state_functions.values()))
+    verifier = z3.Solver()
+    verifier.set(timeout=original.limits.solver_ms)
+    verifier.add(selected >= 0, selected < ADDRESS, predicate != candidate)
+    if verifier.check() != z3.unsat:
+        return None
+    return translated, selected, candidate
+
+
+def project(formula: Term, translation: Translation, identity: Term = CALLER) -> SolutionSet:
+    """Project callers over nonzero addresses; other address-valued identities retain zero."""
+    if identity == CALLER:
+        formula = mk_and([formula, mk_cmp("lt", const(0), CALLER)])
+    if translation.limits.solver_ms <= 0:
+        return SolutionSet(formula, identity, "symbolic", issues=(Issue("budget", "solver"),))
+    independent = _state_independent(formula, translation, identity)
+    if independent is not None:
+        translation, selected, predicate = independent
+    else:
+        selected, predicate = _projected_goal(formula, translation, identity)
+    issues = tuple(dict.fromkeys(translation.issues)) if translation.uncertain.get(formula, True) else ()
     assumptions = tuple(sorted(translation.assumptions))
     if issues:
         return SolutionSet(formula, identity, "symbolic", issues=issues, assumptions=assumptions)
-    others = [v for t, v in translation.variables.items() if t != identity]
-    # Bounds of existential variables belong inside the quantifier, not outside its negation.
-    allowed = z3.And(*translation.bounds, goal)
-    predicate = z3.Exists(others, allowed) if others else allowed
     domain = z3.And(selected >= 0, selected < ADDRESS)
     positive, negative = z3.Solver(), z3.Solver()
     for solver in (positive, negative):
@@ -496,8 +877,14 @@ def project(formula: Term, translation: Translation, identity: Term = CALLER) ->
     positive.add(predicate)
     negative.add(z3.Not(predicate))
     members, excluded = [], []
+    # A side whose solver ran out of time once: asking again spends the same budget for the same answer.
+    spent: set[str] = set()
     for _ in range(translation.limits.members + 1):
+        if len(spent) == 2:
+            break
         for solver, found, representation in ((positive, members, "finite"), (negative, excluded, "cofinite")):
+            if representation in spent:
+                continue
             result = solver.check()
             if result == z3.unsat:
                 return SolutionSet(
@@ -510,6 +897,7 @@ def project(formula: Term, translation: Translation, identity: Term = CALLER) ->
                 )
             if result == z3.unknown:
                 issues = (*issues, Issue("solver", solver.reason_unknown()))
+                spent.add(representation)
                 continue
             if len(found) >= translation.limits.members:
                 continue

@@ -14,11 +14,12 @@ import z3
 
 from services.logic.expansion import Selection, formula_hash
 from services.logic.model import BudgetExceeded, Formula, Issue, Limits, Reads, decode_formula
+from services.logic.power import write_power
 from services.logic.solver import ADDRESS, Translation, boolean, integer
 from services.logic.source_context import artifact_hash
 from services.logic.terms import CALLER, FALSE, IDENTITY_KINDS, Term, conjuncts, contains, mk_not, stable, subterms
 
-POLICY_VERSION = "access-evidence-v2"
+POLICY_VERSION = "access-evidence-v3"
 
 
 def selections_from_report(artifact: dict, report: dict) -> dict[str, Selection]:
@@ -34,7 +35,11 @@ def selections_from_report(artifact: dict, report: dict) -> dict[str, Selection]
     keys = [(r["function"], r["effect_index"]) for r in report["rows"]]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate selection row")
-    if report.get("assessment", {}).get("schema") != 2 or report.get("artifact_hash") != artifact_hash(artifact):
+    if report.get("assessment", {}).get("schema") != 3:
+        raise ValueError("effect-level assessment required; re-run assess")
+    if report.get("policy") != POLICY_VERSION:
+        raise ValueError("assessment access policy changed; re-run assess")
+    if report.get("artifact_hash") != artifact_hash(artifact):
         raise ValueError("assessment does not match current formulas and source context")
     approved = {(r["function"], r["effect_index"]): r for r in report["rows"] if r["decision"] == "expand"}
     selections = {}
@@ -46,13 +51,20 @@ def selections_from_report(artifact: dict, report: dict) -> dict[str, Selection]
         fingerprint = formula_hash(formula)
         if (formula.address, formula.block, formula.signature) != (address, block, name):
             raise ValueError("formula identity does not match artifact")
-        selection = Selection(request["callers"], tuple(request["effect_indices"]))
+        selection = Selection(
+            request["callers"], tuple(request["effect_indices"]), tuple(request.get("power_indices", ()))
+        )
         selection.validate(formula)
         targets = (*selection.effect_indices, *((None,) if selection.callers else ()))
         if request.get("formula_hash") != fingerprint or any(
             approved.get((name, i), {}).get("formula_hash") != fingerprint for i in targets
         ):
             raise ValueError("expansion request is not backed by matching selected rows")
+        if any(
+            (i in selection.power_indices) != (approved[(name, i)]["access"].get("projection") == "write_power")
+            for i in selection.effect_indices
+        ):
+            raise ValueError("expansion query scope does not match assessed effect")
         selections[name] = selection
     if not selections:
         raise ValueError("selection report recommends no expansions")
@@ -167,7 +179,8 @@ def _access(formula, predicate, reads, contracts, limits, queries):
     if translation.issues:
         result["issues"] = [asdict(i) for i in dict.fromkeys(translation.issues)]
         return result, translation, None
-    whole = z3.And(goal, *translation.bounds)
+    caller = integer(identities[0])
+    whole = z3.And(goal, caller > 0, caller < ADDRESS, *translation.bounds)
     reachable = queries.check(whole)
     if reachable == z3.unsat:
         result["activity"] = "inactive_at_block"
@@ -179,7 +192,7 @@ def _access(formula, predicate, reads, contracts, limits, queries):
     result["activity"] = "reachable_in_call_frame"
     arguments = [v for t, v in translation.variables.items() if t[0] not in IDENTITY_KINDS]
     permitted = z3.Exists(arguments, whole) if arguments else whole
-    identity_domain = z3.And(*(z3.And(integer(v) >= 0, integer(v) < ADDRESS) for v in identities))
+    identity_domain = z3.And(caller > 0, *(z3.And(integer(v) >= 0, integer(v) < ADDRESS) for v in identities))
     refused = queries.check(z3.And(identity_domain, z3.Not(permitted)))
     if refused == z3.unsat:
         result["status"] = "unrestricted"
@@ -190,11 +203,44 @@ def _access(formula, predicate, reads, contracts, limits, queries):
     return result, translation, whole
 
 
+def _write_access(formula, effect, reads, contracts, limits, queries):
+    """Separate access to some write from control of its attainable outcomes."""
+    occurrence, translation, whole = _access(formula, effect.guard, reads, contracts, limits, queries)
+    if occurrence["status"] == "restricted" or occurrence["activity"] == "inactive_at_block":
+        # If some caller cannot write at all, every reachable outcome is non-universal.
+        return occurrence, translation, whole
+    if any(d != "caller" for d in _dimensions(write_power(effect))):
+        occurrence["status"] = "unresolved"
+        occurrence["issues"] = [asdict(Issue("unsupported", "outcome control includes origin or signing authority"))]
+        return occurrence, translation, whole
+    if occurrence["status"] != "unrestricted":
+        # Defer this exact query to explicit expansion if symbolic state is the only missing input.
+        occurrence["projection"] = "write_power"
+        return occurrence, translation, whole
+    power, translated, relation = _access(formula, write_power(effect), reads, contracts, limits, queries)
+    if power["activity"] == "inactive_at_block":
+        occurrence["outcome_access"] = "uniform"
+        return occurrence, translation, whole
+    power.update(
+        projection="write_power",
+        occurrence_status=occurrence["status"],
+        outcome_access="varies_by_caller" if power["activity"] == "reachable_in_call_frame" else "unresolved",
+        basis="successful_single_write_target_value_relation",
+        domain="nonzero callers with an outcome unavailable to some other caller; single write, not joint control",
+    )
+    return power, translated, relation
+
+
 def _location(load: Term) -> tuple:
-    return (load[1], load[2], load[3]) if load[0] == "load" else ("raw", load[1], load[2])
+    return tuple(load[1:]) if load[0] == "load" else ("raw", load[1], load[2])
 
 
 def _may_alias(write: tuple, read: tuple) -> bool:
+    from services.logic.cells import view
+    from services.logic.lower import _may_alias as physical_alias
+
+    if view(write) is not None and view(read) is not None:
+        return physical_alias(write, read)
     if write[:2] != read[:2]:
         return False
     if write[0] == "raw":
@@ -216,29 +262,45 @@ def _necessary(guard: Term, condition: Term, queries: _Queries) -> bool:
     """
     if guard != FALSE and condition in conjuncts(guard):
         return True
+    if not queries.available:
+        return False
     atoms: dict[Term, Any] = {}
-    serial = [0]
+    possibilities: dict[Term, tuple[Any, Any]] = {}
+    unmodelled = frozenset({"unknown", "opaque", "assumed", "call", "delegate"})
 
-    def atom(t):
-        serial[0] += 1
-        if contains(t, frozenset({"unknown", "opaque", "assumed", "call", "delegate"})):
-            return z3.Bool(f"unmodelled{serial[0]}")
-        if t not in atoms:
-            atoms[t] = z3.Bool(f"atom{serial[0]}")
-        return atoms[t]
+    def build(root):
+        # May-be-true / may-be-false formulas preserve independent unknown occurrences,
+        # while sharing the original DAG. Reusing one Boolean for an unknown label would
+        # incorrectly make U && !U impossible; expanding every occurrence is exponential.
+        stack = [(root, False)]
+        while stack:
+            t, ready = stack.pop()
+            if t in possibilities:
+                continue
+            children = sorted(t[1], key=stable) if t[0] in ("and", "or") else [t[1]] if t[0] == "not" else []
+            if children and not ready:
+                stack.append((t, True))
+                stack.extend((child, False) for child in children if child not in possibilities)
+                continue
+            if t[0] == "const" and isinstance(t[1], (bool, int)):
+                pair = z3.BoolVal(bool(t[1])), z3.BoolVal(not t[1])
+            elif t[0] == "and":
+                pair = z3.And(*(possibilities[c][0] for c in children)), z3.Or(*(possibilities[c][1] for c in children))
+            elif t[0] == "or":
+                pair = z3.Or(*(possibilities[c][0] for c in children)), z3.And(*(possibilities[c][1] for c in children))
+            elif t[0] == "not":
+                pair = possibilities[t[1]][::-1]
+            elif contains(t, unmodelled):
+                pair = z3.BoolVal(True), z3.BoolVal(True)
+            else:
+                atom = atoms.setdefault(t, z3.Bool(f"atom{len(atoms)}"))
+                pair = atom, z3.Not(atom)
+            possibilities[t] = pair
+        return possibilities[root]
 
-    def build(t):
-        if t[0] == "const" and isinstance(t[1], (bool, int)):
-            return z3.BoolVal(bool(t[1]))
-        if t[0] in ("and", "or"):
-            values = [build(v) for v in sorted(t[1], key=stable)]
-            return z3.And(*values) if t[0] == "and" else z3.Or(*values)
-        if t[0] == "not":
-            return z3.Not(build(t[1]))
-        return atom(t)
-
-    required, predicate = build(condition), build(guard)
-    return queries.check(predicate) == z3.sat and queries.check(z3.And(predicate, z3.Not(required))) == z3.unsat
+    can_be_false = build(condition)[1]
+    predicate = build(guard)[0]
+    return queries.check(predicate) == z3.sat and queries.check(z3.And(predicate, can_be_false)) == z3.unsat
 
 
 def _authority_loads(guard: Term, queries: _Queries):
@@ -326,8 +388,11 @@ def selection_report(
             required = set(_authority_loads(effect.guard, queries))
             for load in (*subterms(effect.guard, "load"), *subterms(effect.guard, "rawload")):
                 references.append((name, i, _location(load), load in required))
+    from services.logic.deployment import saved_contracts
+
     rows, comparisons = [], 0
     for name, f in formulas.items():
+        view = saved_contracts(artifact, name, contracts)
         for index, effect in enumerate(f.effects or (None,)):
             predicate = effect.guard if effect is not None else f.success
             if len(rows) >= limits.assessed_effects:
@@ -340,7 +405,11 @@ def selection_report(
                 }
                 translation, whole = None, None
             else:
-                access, translation, whole = _access(f, predicate, limited, contracts, limits, queries)
+                access, translation, whole = (
+                    _write_access(f, effect, limited, view, limits, queries)
+                    if effect is not None and effect.kind == "write"
+                    else _access(f, predicate, limited, view, limits, queries)
+                )
             facts = []
             scan_complete = True
             if effect is not None and effect.kind == "write":
