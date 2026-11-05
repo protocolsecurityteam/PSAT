@@ -203,7 +203,8 @@ Assessment schema3 stores ratings at `assessment.functions[signature].effects[in
 `formula_hash`. The effect-impact-v3 rubric generates exact effect-prefixed question IDs. Missing, extra or
 legacy unscoped answers invalidate that function's batch; they are never copied across effects. Effects without
 context, model budget or answers remain unknown. Functions without modeled effects remain visible for review
-as no_modeled_effects; pending operations remain explicit. Neither receives a fabricated low rating.
+as no_modeled_effects with a review decision; they need no judgment, so they do not hold assessment incomplete.
+Pending operations remain explicit. Neither receives a fabricated low rating.
 
 The report holds each effect rating once. `rows` retain effect access evidence and decisions;
 `suggested_expansions` is an execution plan, not an automatic job. `artifact_hash` binds the plan to all saved formulas
@@ -691,3 +692,13 @@ indexed by exact source spans. The assigned temporary's width is not the operati
 Legacy signed right shift follows SDIV by the wrapped EVM power of two, and signed negative
 Solidity shift counts are rejected. Yul keeps its own EVM word semantics. These rules apply by
 language/compiler semantics, not function or protocol names.
+
+### Low-level call gas outcomes (2026-11-04)
+
+Each low-level call keeps its resource-outcome term in the formula. Projection (`project`, selection access)
+assumes that outcome succeeds only where the predicate needs the call to succeed: positively, including the
+assembly word tests `ok != 0` / `ok == 1`. Raising such an outcome to TRUE can only admit more callers, and with
+ample gas it is exact, so the result is complete and carries the assumption "low-level calls receive enough
+gas to complete". An outcome that also appears negatively (a path that needs the call to fail, which a sender may
+force with limited gas, subject to the 63/64 rule) or inside a word operation stays unknown, and that result
+stays qualified. Formulas are unchanged; only their projection applies the assumption.

@@ -15,9 +15,20 @@ import z3
 from services.logic.expansion import Selection, formula_hash
 from services.logic.model import BudgetExceeded, Formula, Issue, Limits, Reads, decode_formula
 from services.logic.power import write_power
-from services.logic.solver import ADDRESS, Translation, boolean, integer
+from services.logic.solver import ADDRESS, RESOURCE_ASSUMPTION, Translation, assume_resources, boolean, integer
 from services.logic.source_context import artifact_hash
-from services.logic.terms import CALLER, FALSE, IDENTITY_KINDS, Term, conjuncts, contains, mk_not, stable, subterms
+from services.logic.terms import (
+    CALLER,
+    FALSE,
+    IDENTITY_KINDS,
+    Term,
+    conjuncts,
+    contains,
+    mk_cmp,
+    mk_not,
+    stable,
+    subterms,
+)
 
 POLICY_VERSION = "access-evidence-v3"
 
@@ -169,6 +180,9 @@ def _access(formula, predicate, reads, contracts, limits, queries):
     if not queries.available:
         result["issues"] = [asdict(Issue("budget", "selection solver"))]
         return result, None, None
+    predicate, assumed = assume_resources(predicate)
+    if assumed:
+        result["assumptions"] = [RESOURCE_ASSUMPTION]
     translation = _AssessmentTranslation(reads, contracts, formula, limits)
     goal = boolean(translation.translate(predicate))
     # Caller always belongs to the domain. Other identities are NOT free arguments that
@@ -217,7 +231,7 @@ def _write_access(formula, effect, reads, contracts, limits, queries):
         # Defer this exact query to explicit expansion if symbolic state is the only missing input.
         occurrence["projection"] = "write_power"
         return occurrence, translation, whole
-    power, translated, relation = _access(formula, write_power(effect), reads, contracts, limits, queries)
+    power, _, _ = _access(formula, write_power(effect), reads, contracts, limits, queries)
     if power["activity"] == "inactive_at_block":
         occurrence["outcome_access"] = "uniform"
         return occurrence, translation, whole
@@ -228,7 +242,8 @@ def _write_access(formula, effect, reads, contracts, limits, queries):
         basis="successful_single_write_target_value_relation",
         domain="nonzero callers with an outcome unavailable to some other caller; single write, not joint control",
     )
-    return power, translated, relation
+    # Value bounds must cover every permitted write, not only the outcomes some callers lack.
+    return power, translation, whole
 
 
 def _location(load: Term) -> tuple:
@@ -236,11 +251,15 @@ def _location(load: Term) -> tuple:
 
 
 def _may_alias(write: tuple, read: tuple) -> bool:
-    from services.logic.cells import view
+    from services.logic.cells import annotation, view
     from services.logic.lower import _may_alias as physical_alias
 
     if view(write) is not None and view(read) is not None:
         return physical_alias(write, read)
+    if annotation(write) or annotation(read):
+        # Without coordinates on both sides, names from different layouts (proxy vs implementation) prove nothing.
+        storage = [x[1] if x[0] == "raw" else x[0] for x in (write, read)]
+        return mk_cmp("eq", *storage) != FALSE
     if write[:2] != read[:2]:
         return False
     if write[0] == "raw":

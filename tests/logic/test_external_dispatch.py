@@ -86,7 +86,7 @@ def compile_and_check(d, name, *, raw=False):
     result = expand_formula(f, d.chain(), d.contracts(*d.at))
     if raw:
         assert gaps and all(t[1] == "unsupported:raw_call_resources" for t in gaps)
-        assert not result.callers.complete and result.callers.issues
+        O.assumes_gas(result.callers, {O.OWNER})
         successful = replace(f, success=replace_terms(f.success, {t: TRUE for t in gaps}))
         projected = expand_formula(successful, d.chain(), d.contracts(*d.at)).callers
         assert projected.complete and projected.members == (O.OWNER,)

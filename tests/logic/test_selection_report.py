@@ -21,6 +21,7 @@ contract C {
     uint limit;
     uint counter;
     mapping(address => bool) members;
+    uint8 tier;
     constructor() { owner = msg.sender; }
     function setOwner(address value) external { require(msg.sender == owner); owner = value; }
     function publicOwner(address value) external { owner = value; }
@@ -32,6 +33,7 @@ contract C {
     function guardedMember() external { require(members[msg.sender]); counter = 1; }
     function limitUse(uint value) external { require(value <= limit); counter = value; }
     function impossible() external { revert(); }
+    function tiered(uint8 v) external { require(v <= 100); require(msg.sender == owner || v >= 50); tier = v; }
 }
 """
 
@@ -117,6 +119,16 @@ def test_value_bound_is_not_called_an_economic_loss_bound(source_bundle):
     assert bound is not None and bound["upper"] == 10
     assert "not an asset-loss" in bound["meaning"]
     assert "impact" not in result
+
+
+def test_value_bound_covers_every_permitted_write_not_only_privileged_outcomes(source_bundle):
+    result = row(run(source_bundle), "tiered")
+    assert result["access"]["projection"] == "write_power"
+    assert result["value_bound"]["upper"] == 100
+    d = source_bundle[0]
+    fn = O.function(d, "C", "tiered")
+    assert O.passes(d, "C", fn, [100], O.ACCOUNTS[2])
+    assert not O.passes(d, "C", fn, [101], O.OWNER)
 
 
 def test_membership_needs_state_without_scanning_it(source_bundle):
@@ -327,3 +339,16 @@ def test_unknown_occurrences_are_not_correlated_by_dag_reuse():
     owner = mk_cmp("eq", CALLER, const(7))
     guard = mk("or", frozenset({mk("and", frozenset({u, mk("not", u)})), owner}))
     assert not _necessary(guard, owner, _Queries(ReportLimits()))
+
+
+def test_alias_without_coordinates_on_both_sides_is_not_ruled_out_by_names():
+    from services.logic.cells import child_load
+    from services.resolution.logic_selection import _location, _may_alias
+
+    proxy = const(0xAA)
+    write = (proxy, "impl_owner", (), ("cell", 0xBB, const(0), const(0), 20, "address"))
+    projected = child_load(
+        mk("load", proxy, "admin", (), ("cell", 0xCC, const(0), const(0), 32, "uint256")), (("f", "x"),)
+    )
+    assert _may_alias(write, _location(projected))
+    assert not _may_alias((const(0xDD), *write[1:]), _location(projected))

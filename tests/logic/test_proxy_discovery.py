@@ -82,11 +82,9 @@ def test_new_address_discovers_target_and_keeps_native_admin(monkeypatch, anvil,
         members = expanded["functions"][name]["expansion"]["value"]["callers"]
         formula = decode_formula(output["functions"][name])
         if name == "act()":
-            assert members["representation"] == "symbolic"
-            exact = O.callers_with_resources(formula, reads, d.contracts("Proxy", "Impl"))
-            assert exact.complete and exact.members == (expected,)
+            O.assumes_gas(members, {expected})
         else:
-            assert members["members"] == {"tuple": [expected]}, members
+            assert members["representation"] == "finite" and members["members"] == {"tuple": [expected]}, members
         fn = O.function(d, "Proxy" if name.startswith("upgrade") else "Impl", name.split("(")[0])
         args = (impl,) if fn.parameters else ()
         for sender in (O.OWNER, O.ACCOUNTS[1]):

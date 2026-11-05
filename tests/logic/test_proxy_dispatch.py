@@ -153,7 +153,7 @@ def _compile(d, contract, at, proxy, impl, own=None):
 
 
 def _resource_case(d, formula, proxy, impl):
-    """EVM oracle case with ample gas; production retains the resource uncertainty."""
+    """EVM oracle case with ample gas; production lets the sender choose each resource outcome."""
     resources = subterms(formula.success, "unknown")
     assert all(t[1] == "unsupported:raw_call_resources" for t in resources), resources
     known, _, _ = _views(d, proxy, impl)
@@ -188,9 +188,9 @@ def test_forwarding_proxy_proves_the_implementation_gate(d, name):
         proxy, impl = _proxy(d, name)
     d.proxy_name = name
     formula, callers = _compile(d, "Impl", proxy, proxy, impl)
-    assert not callers.complete
-    callers = _resource_case(d, formula, proxy, impl)
-    assert callers.complete and set(callers.members) == {O.OWNER} == _admitted(d, proxy)
+    O.assumes_gas(callers, {O.OWNER})
+    assert _resource_case(d, formula, proxy, impl).members == callers.members
+    assert set(callers.members) == _admitted(d, proxy)
 
 
 @pytest.mark.parametrize("name", ["PTransparent4", "PTransparent5"])
@@ -222,9 +222,8 @@ def test_selector_the_proxy_answers_itself_is_not_dispatched(d):
 def test_rewritten_calldata_preserves_runtime_authorization(d):
     proxy, impl = _proxy(d, "PRewrite")
     d.proxy_name = "PRewrite"
-    formula, callers = _compile(d, "Impl", proxy, proxy, impl)
-    assert not callers.complete
-    case = _resource_case(d, formula, proxy, impl)
+    formula, case = _compile(d, "Impl", proxy, proxy, impl)
+    O.assumes_gas(case)
     # The proxy also rewrote init(owner): the initializer's sender became owner.
     owner = int(rpc(d.url, "eth_getStorageAt", [O.hex20(proxy), "0x0", "latest"]), 16)
     assert owner == O.ACCOUNTS[2]
@@ -257,7 +256,9 @@ def test_callee_behind_a_proxy(d, name):
     formula, callers = _compile(d, "C", caller, proxy, impl)
     resources = subterms(formula.success, "unknown")
     assert resources and {t[1] for t in resources} == {"unsupported:raw_call_resources"}
-    assert not callers.complete  # A concrete gas/resource outcome is not a universal proof.
+    O.assumes_gas(callers)
+    admitted = {s for s in O.ACCOUNTS if _chain_admits(d, caller, s)}
+    assert {s for s in O.ACCOUNTS if (s in callers.members) is (callers.representation == "finite")} == admitted
     contracts, _, _ = _views(d, proxy, impl)
     for sender in O.ACCOUNTS:
         tr = Translation(
@@ -275,10 +276,8 @@ def test_callee_behind_a_proxy(d, name):
 def test_a_return_without_the_delegate_is_not_the_implementation(d):
     proxy, impl = _proxy(d, "PSkip", ("address",), (STRANGER,))
     d.proxy_name = "PSkip"
-    formula, callers = _compile(d, "Impl", proxy, proxy, impl)
-    assert not callers.complete
-    actual = _resource_case(d, formula, proxy, impl)
-    assert actual.complete and set(actual.members) == {O.OWNER, STRANGER}
+    formula, actual = _compile(d, "Impl", proxy, proxy, impl)
+    O.assumes_gas(actual, {O.OWNER, STRANGER})
     assert any(e.kind == "write" for e in formula.effects)
     assert _admitted(d, proxy) == {O.OWNER, STRANGER}
 
@@ -300,8 +299,7 @@ def test_assembly_store_to_a_constant_slot_is_a_guarded_write(d):
 def test_a_fallback_that_writes_before_forwarding_is_not_a_plain_forward(d):
     proxy, impl = _proxy(d, "PWrites")
     d.proxy_name = "PWrites"
-    formula, callers = _compile(d, "Impl", proxy, proxy, impl)
-    assert not callers.complete
-    actual = _resource_case(d, formula, proxy, impl)
-    assert actual.complete and set(actual.members) == {O.OWNER}
+    formula, actual = _compile(d, "Impl", proxy, proxy, impl)
+    O.assumes_gas(actual, {O.OWNER})
+    assert set(actual.members) == _admitted(d, proxy)
     assert any(e.kind == "write" and e.target[0] == "raw" and e.target[2][1] == 0x1234 for e in formula.effects)

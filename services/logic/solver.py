@@ -12,7 +12,21 @@ from eth_utils.crypto import keccak
 
 from .model import BudgetExceeded, Issue, Limits, Reads, SolutionSet
 from .storage import Storage
-from .terms import CALLER, Term, cheapest_first, const, contains, fits, mk, mk_and, mk_cmp, mk_op, subterms
+from .terms import (
+    CALLER,
+    TRUE,
+    Term,
+    cheapest_first,
+    const,
+    contains,
+    fits,
+    mk,
+    mk_and,
+    mk_cmp,
+    mk_op,
+    replace_terms,
+    subterms,
+)
 
 WORD = 2**256
 ADDRESS = 2**160
@@ -32,6 +46,50 @@ def number(value: Any) -> int | None:
 
 def integer(v: Any) -> Any:
     return z3.If(v, 1, 0) if z3.is_bool(v) else z3.IntVal(v) if isinstance(v, int) else v
+
+
+RESOURCE_OUTCOME = "unsupported:raw_call_resources"
+RESOURCE_ASSUMPTION = "low-level calls receive enough gas to complete"
+
+
+def _flag_test(t: Term) -> tuple[Term, int] | None:
+    for flag, other in ((t[2], t[3]), (t[3], t[2])):
+        if flag[:2] == ("unknown", RESOURCE_OUTCOME) and other[0] == "const" and other[1] in (0, 1):
+            return flag, int(other[1])
+    return None
+
+
+def assume_resources(predicate: Term) -> tuple[Term, bool]:
+    """Assume enough gas for each low-level call that the predicate only ever requires to succeed.
+
+    Then raising the outcome to TRUE can only admit more, and with ample gas it is exact. An outcome
+    that also appears negatively (a path that needs the call to fail, which a sender may force with
+    little gas, subject to the 63/64 rule) or inside a non-Boolean term stays unknown.
+    """
+    negative: set[Term] = set()
+    seen: set[tuple[Term, bool]] = set()
+    stack = [(predicate, True)]
+    while stack:
+        t, positive = stack.pop()
+        if (t, positive) in seen or not isinstance(t, tuple) or not t:
+            continue
+        seen.add((t, positive))
+        if t[0] in ("and", "or"):
+            stack.extend((c, positive) for c in t[1])
+        elif t[0] == "not":
+            stack.append((t[1], not positive))
+        elif t[0] == "ite":
+            stack.extend(((t[1], True), (t[1], False), (t[2], positive), (t[3], positive)))
+        elif t[0] == "unknown" and t[1] == RESOURCE_OUTCOME:
+            if not positive:
+                negative.add(t)
+        elif t[0] == "cmp" and t[1] == "eq" and (flag := _flag_test(t)) is not None:
+            # Assembly reads the outcome as a 0/1 word: ``ok == 0`` is its negation, ``ok == 1`` itself.
+            stack.append((flag[0], positive if flag[1] else not positive))
+        else:
+            negative.update(u for u in subterms(t, "unknown") if u[1] == RESOURCE_OUTCOME)
+    assumed = {t: TRUE for t in subterms(predicate, "unknown") if t[1] == RESOURCE_OUTCOME and t not in negative}
+    return (replace_terms(predicate, assumed), True) if assumed else (predicate, False)
 
 
 def boolean(v: Any) -> Any:
@@ -826,8 +884,11 @@ def _projected_goal(formula: Term, translation: Translation, identity: Term):
     selected = translation.translate(identity)
     goal = boolean(translation.translate(formula))
     others = [v for t, v in translation.variables.items() if t != identity]
-    allowed = z3.And(*translation.bounds, goal)
-    return selected, z3.Exists(others, allowed) if others else allowed
+    return selected, others, z3.And(*translation.bounds, goal)
+
+
+def _exists(others, body):
+    return z3.Exists(others, body) if others else body
 
 
 def _state_independent(formula: Term, original: Translation, identity: Term):
@@ -842,31 +903,32 @@ def _state_independent(formula: Term, original: Translation, identity: Term):
     ):
         return None
     translated = _DeferredStorage(original)
-    selected, predicate = _projected_goal(formula, translated, identity)
+    selected, others, body = _projected_goal(formula, translated, identity)
     if translated.issues or not translated.state_functions:
         return None
-    candidate = z3.substitute_funs(predicate, *((f, z3.IntVal(0)) for f in translated.state_functions.values()))
+    candidate = z3.substitute_funs(body, *((f, z3.IntVal(0)) for f in translated.state_functions.values()))
     verifier = z3.Solver()
     verifier.set(timeout=original.limits.solver_ms)
-    verifier.add(selected >= 0, selected < ADDRESS, predicate != candidate)
+    verifier.add(selected >= 0, selected < ADDRESS, _exists(others, body) != _exists(others, candidate))
     if verifier.check() != z3.unsat:
         return None
-    return translated, selected, candidate
+    return translated, selected, others, candidate
 
 
 def project(formula: Term, translation: Translation, identity: Term = CALLER) -> SolutionSet:
     """Project callers over nonzero addresses; other address-valued identities retain zero."""
+    formula, assumed = assume_resources(formula)
     if identity == CALLER:
         formula = mk_and([formula, mk_cmp("lt", const(0), CALLER)])
     if translation.limits.solver_ms <= 0:
         return SolutionSet(formula, identity, "symbolic", issues=(Issue("budget", "solver"),))
     independent = _state_independent(formula, translation, identity)
     if independent is not None:
-        translation, selected, predicate = independent
+        translation, selected, others, body = independent
     else:
-        selected, predicate = _projected_goal(formula, translation, identity)
+        selected, others, body = _projected_goal(formula, translation, identity)
     issues = tuple(dict.fromkeys(translation.issues)) if translation.uncertain.get(formula, True) else ()
-    assumptions = tuple(sorted(translation.assumptions))
+    assumptions = tuple(sorted(translation.assumptions | ({RESOURCE_ASSUMPTION} if assumed else set())))
     if issues:
         return SolutionSet(formula, identity, "symbolic", issues=issues, assumptions=assumptions)
     domain = z3.And(selected >= 0, selected < ADDRESS)
@@ -874,8 +936,9 @@ def project(formula: Term, translation: Translation, identity: Term = CALLER) ->
     for solver in (positive, negative):
         solver.set(timeout=translation.limits.solver_ms)
         solver.add(domain)
-    positive.add(predicate)
-    negative.add(z3.Not(predicate))
+    # Existence over the other inputs is satisfiability with them free; only the complement needs the quantifier.
+    positive.add(body)
+    negative.add(z3.Not(_exists(others, body)))
     members, excluded = [], []
     # A side whose solver ran out of time once: asking again spends the same budget for the same answer.
     spent: set[str] = set()

@@ -84,28 +84,34 @@ class _Overlay(Mapping):
         return len(self.contracts)
 
 
+def special_entry(contract, kind: str) -> Any:
+    """The deployed ``fallback`` or ``receive``. Slither also lists the overridden ones, and its
+    ``fallback_function``/``receive_function`` return the first declared, a base contract's."""
+    flag = "is_fallback" if kind == "fallback" else "is_receive"
+    return next((f for f in contract.functions if getattr(f, flag) and not f.is_shadowed), None)
+
+
 def _entry(contract, signature) -> Any:
     """Compiler entrypoints, including the scalar getters Slither leaves as declarations."""
     from types import SimpleNamespace
 
     from .layout import _size
 
-    fn = next(
-        (
-            f
-            for f in contract.functions_entry_points
-            if abi_signature(f) == signature and not (f.is_constructor or f.is_fallback or f.is_receive)
-        ),
-        None,
-    )
-    if fn is not None:
-        return fn
+    # A public state variable can override a function but never be overridden, so its getter is
+    # the deployed entry even where Slither keeps the base function unshadowed.
     var = next(
         (v for v in contract.state_variables if v.visibility == "public" and abi_signature(v) == signature),
         None,
     )
     if var is None:
-        return None
+        return next(
+            (
+                f
+                for f in contract.functions_entry_points
+                if abi_signature(f) == signature and not (f.is_constructor or f.is_fallback or f.is_receive)
+            ),
+            None,
+        )
     keys, value_type = getter_shape(var.type)
     if _size(value_type) is None:
         return None
@@ -134,7 +140,6 @@ def runtime_signatures(contract):
 
 def runtime_entry(contract, selector, size):
     """Solidity dispatcher selection, including fallback and receive entries."""
-    entries = contract.functions_entry_points
     if size is None or size >= 4:
         found = [s for s in runtime_signatures(contract) if _selector(s) == selector]
         if len(found) == 1:
@@ -145,10 +150,10 @@ def runtime_entry(contract, selector, size):
         if len(found) > 1:
             raise ValueError("unsupported:selector_collision")
     if size == 0:
-        received = next((f for f in entries if f.is_receive), None)
+        received = special_entry(contract, "receive")
         if received is not None:
             return received
-    return next((f for f in entries if f.is_fallback), None)
+    return special_entry(contract, "fallback")
 
 
 def _forwarding_only(store: dict, at: int) -> bool:
@@ -357,7 +362,7 @@ class Linker:
             for f in own.functions_entry_points
         ) or any(v.visibility == "public" and _selector(abi_signature(v)) == selector for v in own.state_variables):
             return unknown(f"unsupported:proxy_selector:{at:#x}:{signature}")
-        fallback = own.fallback_function
+        fallback = special_entry(own, "fallback")
         if fallback is None:
             return unknown(f"unsupported:proxy_fallback:{at:#x}")
         # The fallback's own storage and immutables are the proxy's: read through its layout and its bytecode, never

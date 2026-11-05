@@ -179,7 +179,12 @@ def test_unmodeled_call_modes_do_not_inherit_a_stale_answer(d, name, args, value
     answer, tr = predicted(d, fn, f, known, args, value=value)
     assert O.passes(d, d.at["C"], fn, args, value=value) is actual
     assert answer is None, tr.issues
-    assert not expand_formula(f, d.chain(), known).callers.complete
+    callers = expand_formula(f, d.chain(), known).callers
+    if name == "rawAfterWrite":  # only its success is required: complete under the ample-gas assumption
+        O.assumes_gas(callers, {O.OWNER})
+        assert not O.passes(d, d.at["C"], fn, args, sender=O.ACCOUNTS[1])
+    else:
+        assert not callers.complete
 
 
 @pytest.mark.parametrize("style", ["raw", "bounded"])
@@ -313,7 +318,9 @@ function act() external {beacon.set(next);require(proxy.allowed());value=1;}}
     assert O.passes(d, "C", fn) is (not initial if changed else initial)
     assert answer is None or answer is (not initial if changed else initial)
     if answer is None:
-        assert not expand_formula(f, d.chain(), known).callers.complete
+        callers = expand_formula(f, d.chain(), known).callers
+        O.assumes_gas(callers)
+        assert callers.representation == "cofinite" and O.passes(d, "C", fn, sender=O.ACCOUNTS[1])
 
 
 def test_packed_beacon_and_unrelated_caller_writes_preserve_dispatch(anvil, tmp_path):
@@ -352,4 +359,6 @@ function act() external {value=1;beacon.change();require(proxy.allowed());}}
     assert O.passes(d, "C", fn)
     assert answer is None or answer is True, tr.issues
     if answer is None:
-        assert not expand_formula(f, d.chain(), known).callers.complete
+        callers = expand_formula(f, d.chain(), known).callers
+        O.assumes_gas(callers)
+        assert callers.representation == "cofinite" and O.passes(d, "C", fn, sender=O.ACCOUNTS[1])

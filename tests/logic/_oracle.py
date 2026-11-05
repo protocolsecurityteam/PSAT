@@ -191,11 +191,33 @@ def labels(formula):
     return {str(t[1]) for k in ("unknown", "opaque", "assumed") for t in subterms(formula, k)}
 
 
-def callers_with_resources(formula, reads, contracts):
-    """Test-only caller projection assuming the raw calls have enough execution resources.
+def assumes_gas(callers, members=None):
+    """Production's complete answer, labelled with the ample-gas assumption for low-level calls.
 
-    Pair this with EVM execution and keep production's qualified result assertion.
-    This does not certify transaction gas feasibility or remove any other unknown.
+    Accepts a SolutionSet or its encoded form. ``members`` checks a finite set exactly.
+    """
+    from services.logic.solver import RESOURCE_ASSUMPTION
+
+    if isinstance(callers, dict):
+        representation, issues = callers["representation"], callers["issues"]["tuple"]
+        found, assumptions = tuple(callers["members"]["tuple"]), callers["assumptions"]["tuple"]
+    else:
+        representation, issues, found, assumptions = (
+            callers.representation,
+            callers.issues,
+            callers.members,
+            callers.assumptions,
+        )
+    assert representation != "symbolic" and not issues, callers
+    assert RESOURCE_ASSUMPTION in assumptions, callers
+    if members is not None:
+        assert representation == "finite" and set(found) == set(members), callers
+
+
+def callers_with_resources(formula, reads, contracts):
+    """Test-only caller projection with every raw call's resources sufficient, including outcomes
+    production leaves unknown because some path needs that call to fail (``assume_resources``).
+    This does not certify gas feasibility.
     """
     from services.logic.solver import project
     from services.logic.terms import TRUE, replace_terms

@@ -69,9 +69,10 @@ def test_nested_proxy_view_does_not_receive_outer_value(anvil, tmp_path):
             bindings={CALLER: O.OWNER, mk("callvalue"): amount, **{t: True for t in resources}},
         )
         assert tr.truth(f.success) is O.passes(d, root, fn, sender=O.OWNER, value=amount) is (amount == 1)
-    assert not expand_formula(f, d.chain(), known).callers.complete
+    production = expand_formula(f, d.chain(), known).callers
+    O.assumes_gas(production)
     successful = replace(f, success=replace_terms(f.success, {t: TRUE for t in resources}))
-    assert expand_formula(successful, d.chain(), known).callers.complete
+    assert expand_formula(successful, d.chain(), known).callers.members == production.members
 
 
 def test_discarded_delegate_is_an_effect_even_without_a_success_check(anvil, tmp_path):
@@ -80,8 +81,7 @@ def test_discarded_delegate_is_an_effect_even_without_a_success_check(anvil, tmp
     other = d.deploy("Extra")
     proxy = d.deploy("PExtra", ("address", "address"), (impl, other))
     _, f, known = compiled(d, impl, proxy, "PExtra")
-    result = expand_formula(f, d.chain(), known).callers
-    assert not result.complete and result.issues
+    O.assumes_gas(expand_formula(f, d.chain(), known).callers)
     assert any(e.kind == "write" for e in f.effects)
     resources = subterms(f.success, "unknown")
     assert resources and all(t[1] == "unsupported:raw_call_resources" for t in resources)

@@ -2260,13 +2260,13 @@ class Lowerer:
             # runtime. For modern unsigned counts this follows from their type.
             conditions.append(mk_cmp("ge", b, const(0)))
         constants = isinstance(ir.variable_left, Constant) and isinstance(ir.variable_right, Constant)
-        checked = (
-            op in ("add", "sub", "mul", "pow")
-            and not yul
+        in_checked = (
+            not yul
             and not constants  # literals are folded by the compiler, rationally: never a runtime overflow
             and bool(getattr(getattr(node, "scope", None), "is_checked", False))
             and _checked_version(self.contract)
         )
+        checked = in_checked and op in ("add", "sub", "mul", "pow")
         if is_signed:
             name = f"int{bits}"
             x = _convert(name, a)
@@ -2287,6 +2287,9 @@ class Lowerer:
             conditions.append(mk_cmp("le", y, x))  # an unsigned difference in range: exactly ``b <= a``
         elif checked:
             conditions.append(mk_op("fits", (const(op, "string"), x, y, const(bits), const(is_signed, "bool"))))
+        if in_checked and op == "div" and is_signed:
+            # The one signed quotient out of range: type(intN).min / -1 (Panic 0x11).
+            conditions.append(mk_not(mk_and([mk_cmp("eq", x, const(-(2 ** (bits - 1)))), mk_cmp("eq", y, const(-1))])))
         return (_evm_word(value) if yul and is_signed else value), conditions
 
     def _short_circuit(self, irs: list[Any], binary: Any, st: State, depth: int) -> State:

@@ -201,7 +201,7 @@ def test_function_without_reported_effects_remains_visible_without_a_fabricated_
     summary = result["assessment"]["functions"][formula.signature]
     assert summary["model_status"] == "no_modeled_effects" and summary["effects"] == {}
     assert result["rows"][0]["decision"] == "review"
-    assert not result["assessment"]["judgments_complete"]
+    assert result["assessment"]["judgments_complete"] and result["assessment"]["status"] == "assessed"
     assert result["suggested_expansions"] == []
 
 

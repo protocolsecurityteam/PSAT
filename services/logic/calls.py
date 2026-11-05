@@ -15,7 +15,7 @@ from .abi_values import (
     strict_decoder,
     transfer,
 )
-from .linker import Linker, _selector, runtime_entry, runtime_signatures
+from .linker import Linker, _selector, runtime_entry, runtime_signatures, special_entry
 from .lower import Lowerer, State, _acted, _solc_version, _spent, merge
 from .model import BudgetExceeded, CallFrame, CallRequest, CallResult, DeferredCall, Update
 from .terms import (
@@ -208,10 +208,10 @@ class CallExecutor(Linker):
         # Keep each exclusion explicit: overlapping invocations can carry these
         # same conditions through multiple forwarding layers.
         fallback_guard = mk_and(mk_not(guard) for _, guard in named)
-        received = next((f for f in contract.functions_entry_points if f.is_receive), None)
+        received = special_entry(contract, "receive")
         if received is not None:
             fallback_guard = mk_and([fallback_guard, mk_not(mk_cmp("eq", length, const(0)))])
-        fallback = next((f for f in contract.functions_entry_points if f.is_fallback), None)
+        fallback = special_entry(contract, "fallback")
         if fallback_only:
             return [(fallback, fallback_guard)]
         # Resolve a named body only after its domain is known reachable. An

@@ -19,7 +19,7 @@ from services.clients.logic_reads import ChainReads
 from .abi_values import abi_signature
 from .continuation import PendingCompilation, generate_function
 from .expansion import Selection, expand_formula, formula_hash
-from .linker import Linker, _Overlay, _selector
+from .linker import Linker, _Overlay, _selector, special_entry
 from .lower import Lowerer
 from .model import Limits, ReadError, decode_formula, encode
 from .source_context import ContextContracts, build_bundle, build_context
@@ -85,7 +85,9 @@ class Builds(Mapping):
                 # A metadata implementation pointer does not make a verified contract
                 # forward unknown selectors when it has no fallback at all.
                 hint = (
-                    self._implementation(_hex20(address)) if own is None or own.fallback_function is not None else None
+                    self._implementation(_hex20(address))
+                    if own is None or special_entry(own, "fallback") is not None
+                    else None
                 )
                 target = int(hint, 16) if hint else address
             self.resolved[address] = target
@@ -102,10 +104,11 @@ class Builds(Mapping):
             return None
         code = address if code is None else code
         own = self.own_code(code)
-        if own is None or own.fallback_function is None:
+        fallback = special_entry(own, "fallback") if own is not None else None
+        if fallback is None:
             return None
         lowerer = Lowerer(own, this=const(address, "address"), code=const(code, "address"))
-        lowerer.success(own.fallback_function)
+        lowerer.success(fallback)
         linker = Linker(
             self.reads,
             _Overlay(self, address, own),
@@ -322,7 +325,7 @@ def deployment_formulas(
         current = primary_code
         # Discover the finite, cycle-checked inventory before spending per-function
         # proof depth, so a depth cut produces a resumable function, not a missing one.
-        while layers[-1][1].fallback_function is not None:
+        while special_entry(layers[-1][1], "fallback") is not None:
             target = builds._discover_target(at, current)
             if target is None or target in seen_codes:
                 break
@@ -335,13 +338,17 @@ def deployment_formulas(
             current = target
         entries, claimed = [], set()
         for code, owner in layers:
+            # Getters first: a public state variable overrides a same-signature base function.
+            getters = {_selector(abi_signature(v)) for v in owner.state_variables if v.visibility == "public"}
             for fn in owner.functions_entry_points:
+                if fn.is_shadowed:  # overridden fallback/receive, which Slither keeps listed
+                    continue
                 sig = abi_signature(fn)
                 key = sig if fn.is_fallback or fn.is_receive else _selector(sig)
-                if key not in claimed:
+                if key not in claimed and key not in getters:
                     entries.append((fn, owner, code))
                     claimed.add(key)
-            claimed.update(_selector(abi_signature(v)) for v in owner.state_variables if v.visibility == "public")
+            claimed.update(getters)
         if resume is not None and (set(previous) | set(finished)) != {
             abi_signature(fn)
             for fn, owner, entry_code in entries

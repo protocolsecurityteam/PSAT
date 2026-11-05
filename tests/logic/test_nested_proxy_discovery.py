@@ -93,9 +93,7 @@ def test_nested_entries_have_their_own_code_and_one_storage_address(nested):
     result = deployment.deployment_expansions(None, artifact, "unused", selections)
     for name in selections:
         row = result["functions"][name]["expansion"]["value"]["callers"]
-        assert row["representation"] == "symbolic" and row["issues"]["tuple"], (name, row)
-        case = O.callers_with_resources(decode_formula(artifact["functions"][name]), d.chain(), d.contracts(*d.at))
-        assert case.complete and case.members == (O.OWNER,), case
+        O.assumes_gas(row, {O.OWNER})
         fn = O.function(d, "Core" if name in ("coreAct()", "shared()") else "Admin", name[:-2])
         assert O.passes(d, proxy, fn, (), sender=O.OWNER)
         assert not O.passes(d, proxy, fn, (), sender=O.ACCOUNTS[1])
@@ -111,14 +109,8 @@ def test_same_variable_name_in_different_layers_uses_each_layout(nested):
     )
     admin = result["functions"]["adminAct()"]["expansion"]["value"]["callers"]
     core = result["functions"]["coreAct()"]["expansion"]["value"]["callers"]
-    assert admin["representation"] == "symbolic" and admin["issues"]["tuple"]
-    admin_case = O.callers_with_resources(
-        decode_formula(artifact["functions"]["adminAct()"]), d.chain(), d.contracts(*d.at)
-    )
-    assert admin_case.complete and admin_case.members == (), admin_case
-    assert core["representation"] == "symbolic" and core["issues"]["tuple"]
-    case = O.callers_with_resources(decode_formula(artifact["functions"]["coreAct()"]), d.chain(), d.contracts(*d.at))
-    assert case.complete and case.members == (O.OWNER,), case
+    O.assumes_gas(admin, set())
+    O.assumes_gas(core, {O.OWNER})
     for sender in O.ACCOUNTS:
         assert not O.passes(d, proxy, O.function(d, "Admin", "adminAct"), (), sender=sender)
 
@@ -361,9 +353,7 @@ revert(0,returndatasize())}
         artifact = deployment.deployment_formulas(None, O.hex20(root), 1, "unused", loop_iterations=2, resume=artifact)
     expanded = deployment.deployment_expansions(None, artifact, "unused", {"act()": Selection()})
     result = expanded["functions"]["act()"]["expansion"]["value"]["callers"]
-    assert result["representation"] == "symbolic" and result["issues"]["tuple"], result
-    case = O.callers_with_resources(decode_formula(artifact["functions"]["act()"]), dr.chain(), own)
-    assert case.complete and set(case.members) == set(O.ACCOUNTS[:2]), case
+    O.assumes_gas(result, set(O.ACCOUNTS[:2]))
     for who in O.ACCOUNTS:
         assert O.passes(dr, root, O.function(da, "Admin", "act"), (), sender=who) is (who in O.ACCOUNTS[:2])
     f = decode_formula(artifact["functions"]["act()"])

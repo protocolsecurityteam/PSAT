@@ -64,7 +64,8 @@ def assess_formulas(
     complete = (
         verified
         and not artifact.get("pending_functions")
-        and all(r["model_status"] == "rated" for r in ratings["functions"].values())
+        # A function without modeled effects has nothing to judge; its row stays a visible "review" decision.
+        and all(r["model_status"] in ("rated", "no_modeled_effects") for r in ratings["functions"].values())
     )
     status = (
         "not_verified"

@@ -163,7 +163,8 @@ def _check(d, name, fname, extra=()):
 
 def test_proxy_storage_reads_through_the_proxy_s_own_layout(d):
     callers, admitted = _check(d, "PLayout", "act")
-    assert not callers.complete and callers.issues and admitted == {O.OWNER}
+    O.assumes_gas(callers, {O.OWNER})
+    assert admitted == {O.OWNER}
 
 
 def test_a_selector_clash_under_another_signature_is_the_proxy_s(d):
@@ -179,7 +180,7 @@ def test_a_selector_clash_under_another_signature_is_the_proxy_s(d):
 
 def test_a_second_forward_is_not_the_call_made(d):
     callers, _ = _check(d, "PTwice", "once", extra=(("address", O.OWNER),))
-    assert not callers.complete
+    assert not callers.complete  # ``and(r, s)`` mixes the outcomes as words: no ample-gas assumption
 
 
 @pytest.mark.parametrize("name", ["PCopy", "PCopy2"])

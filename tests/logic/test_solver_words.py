@@ -79,3 +79,22 @@ def test_role_bitmaps_project_to_the_complete_known_set(anvil, tmp_path):
     # Fixture truth comes from the independently compiled constructor and actual EVM execution.
     for caller in [0, 99, *range(100, 125), 2**160 - 1]:
         assert O.chain_says(d, fn, (), sender=caller) is (caller in expected)
+
+
+def test_ample_gas_is_assumed_only_where_success_needs_the_call_to_succeed():
+    from services.logic.solver import RESOURCE_OUTCOME, assume_resources
+    from services.logic.terms import CALLER, TRUE, const, mk, mk_and, mk_cmp, mk_not, mk_op, mk_or, subterms
+
+    owner_call = mk_cmp("eq", CALLER, const(1, "address"))
+    ok, other = mk("unknown", RESOURCE_OUTCOME, 0, 1, 2), mk("unknown", RESOURCE_OUTCOME, 0, 2, 3)
+    word_ok = mk_not(mk_cmp("eq", const(0), ok))  # Yul: ``if iszero(ok) { revert }``
+    assert assume_resources(word_ok) == (TRUE, True)
+    # A path that needs the call to fail is the sender's to force with little gas: keep it unknown.
+    for needs_failure in (mk_or([mk_not(ok), owner_call]), mk_cmp("eq", const(0), ok)):
+        assert assume_resources(needs_failure) == (needs_failure, False)
+    # Only the outcome used negatively stays unknown; ``other`` is still assumed.
+    mixed, assumed = assume_resources(mk_and([mk_or([mk_not(ok), owner_call]), other]))
+    assert assumed and ok in subterms(mixed, "unknown") and other not in subterms(mixed, "unknown")
+    # A word operation (``and(r, s)``) is not read as a Boolean.
+    both = mk_not(mk_cmp("eq", const(0), mk_op("and", (ok, other))))
+    assert assume_resources(both) == (both, False)
