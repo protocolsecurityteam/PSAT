@@ -1448,6 +1448,41 @@ def _tx_row_for(event, tx_rows):
     return tx_rows.get((int(event.chain_id), str(event.tx_hash).lower()))
 
 
+def _witnessed_creation_txs(events, tx_rows, creation_rows) -> dict[int, str]:
+    """Contract id -> its witnessed creation tx hash: a receipt showing the tx created the proxy, or a creation witness
+    whose indexer hash and empty-code probe are both present.
+    """
+    out: dict[int, str] = {}
+    for event in events:
+        cid = int(event.contract_id)
+        proxy = (event.proxy_address or "").lower()
+        tx_row = _tx_row_for(event, tx_rows)
+        if (
+            tx_row is not None
+            and tx_row.tx_status == 1
+            and tx_row.is_contract_creation
+            and (tx_row.created_contract_address or "").lower() == proxy
+        ):
+            out[cid] = str(tx_row.tx_hash).lower()
+            continue
+        if cid in out or event.chain_id is None:
+            continue
+        witness = creation_rows.get((int(event.chain_id), proxy))
+        if witness is not None and witness.creation_tx_hash and witness.code_absent_at_probe is True:
+            out[cid] = str(witness.creation_tx_hash).lower()
+    return out
+
+
+def _deployment_decided(event, excluded: bool, creation_txs: dict[int, str]) -> bool:
+    """A counted-or-excluded event's deployment question is settled: proven the deployment, or in a tx other than the
+    witnessed creation tx. Anything else (no creation witness, the creation tx itself, no tx hash) is undecided.
+    """
+    if excluded:
+        return True
+    creation_tx = creation_txs.get(int(event.contract_id))
+    return bool(creation_tx and event.tx_hash and str(event.tx_hash).lower() != creation_tx)
+
+
 def _fold_actions(context) -> dict[int, dict]:
     """Fold each contract's events (a loaded ``_load_action_context``) into its action set plus the counters every
     figure cites.
@@ -1456,6 +1491,7 @@ def _fold_actions(context) -> dict[int, dict]:
 
     events, tx_rows, creation_rows = context
     pair_counts = _event_pair_counts(events)
+    creation_txs = _witnessed_creation_txs(events, tx_rows, creation_rows)
 
     per_contract: dict[int, dict] = {}
     for event in events:
@@ -1469,12 +1505,16 @@ def _fold_actions(context) -> dict[int, dict]:
                 "tx_facts_present": 0,
                 "events_unlinked": 0,
                 "deployments_excluded": 0,
+                "events_deployment_undecided": 0,
                 "kinds": {},
                 "direct_blocks": [],
                 "chain_id": None,
             },
         )
         state["events_total"] += 1
+        excluded = _is_proven_deployment(event, _tx_row_for(event, tx_rows), creation_rows, pair_counts)
+        if not _deployment_decided(event, excluded, creation_txs):
+            state["events_deployment_undecided"] += 1
         # A written ``upgrade_events.chain_id`` wins; else the mainnet-coalesced chain name. Unknown names aren't
         # guessed.
         if state["chain_id"] is None:
@@ -1493,7 +1533,7 @@ def _fold_actions(context) -> dict[int, dict]:
         state["kinds"][tx_row.executor_kind] = state["kinds"].get(tx_row.executor_kind, 0) + 1
         if tx_row.executor_kind == EXECUTOR_KIND_SAFE_DIRECT:
             state["direct_blocks"].append(tx_row.block_number)
-        if _is_proven_deployment(event, tx_row, creation_rows, pair_counts):
+        if excluded:
             state["deployments_excluded"] += 1
             continue
         state["actions"].add(tx_lc)
@@ -1507,13 +1547,13 @@ UPGRADE_COUNT_UPPER_BOUND = "upper_bound"
 def _recorded_count_relation(fetch_status: str | None, state: dict, published: int | None) -> str:
     """How the published action count relates to the ERC-1967 upgrade actions in the fetched history.
 
-    Events with no receipt fact or no tx hash are each counted, so they can only over-count; a fetch that didn't
-    complete leaves the history itself partial, so nothing is proven either way. With no published count (a
-    post-exclusion zero is never proven) there is nothing to relate.
+    Events with no receipt fact or no tx hash, and events not proven either way to be the deployment, are each
+    counted, so they can only over-count; a fetch that didn't complete leaves the history itself partial, so nothing is
+    proven either way. With no published count (a post-exclusion zero is never proven) there is nothing to relate.
     """
     if published is None or fetch_status != UPGRADE_FETCH_COMPLETE:
         return NOT_DETERMINED
-    if state["events_unlinked"] + state["events_without_tx_hash"] > 0:
+    if state["events_unlinked"] + state["events_without_tx_hash"] + state["events_deployment_undecided"] > 0:
         return UPGRADE_COUNT_UPPER_BOUND
     return UPGRADE_COUNT_EXACT
 
@@ -1572,6 +1612,7 @@ def upgrade_figures(
                 "tx_facts_present": 0,
                 "events_unlinked": 0,
                 "deployments_excluded": 0,
+                "events_deployment_undecided": 0,
                 "kinds": {},
                 "direct_blocks": [],
                 "chain_id": None,
@@ -1592,6 +1633,7 @@ def upgrade_figures(
                 "events_unlinked": state["events_unlinked"],
                 "events_without_tx_hash": state["events_without_tx_hash"],
                 "deployments_excluded": state["deployments_excluded"],
+                "events_deployment_undecided": state["events_deployment_undecided"],
                 "executor_kinds": dict(sorted(state["kinds"].items())),
                 # Only ERC-1967 topics are folded, so no event doesn't prove no upgrade.
                 "recorded_event_coverage": NOT_DETERMINED,
@@ -1637,11 +1679,13 @@ def _last_upgrades(context, fetch_status: dict[int, str]) -> dict[int, dict]:
     """Per contract with a recorded non-deployment upgrade: the latest one's block and timestamp, from one row.
 
     ``state`` is ``established`` only when the history fetch completed (the rule the count follows: a partial or
-    unknown read may miss the latest) and one row is provably no earlier than all others. Otherwise, including rows with
-    no common ordering, it is ``not_determined`` with no pair; an errored fetch with no rows says so too.
+    unknown read may miss the latest), one row is provably no earlier than all others, and that row is proven not to be
+    the deployment. Otherwise, including rows with no common ordering, it is ``not_determined`` with no pair; an errored
+    fetch with no rows says so too.
     """
     events, tx_rows, creation_rows = context
     pair_counts = _event_pair_counts(events)
+    creation_txs = _witnessed_creation_txs(events, tx_rows, creation_rows)
     by_contract: dict[int, list[Any]] = {}
     for event in events:
         if _is_proven_deployment(event, _tx_row_for(event, tx_rows), creation_rows, pair_counts):
@@ -1653,6 +1697,8 @@ def _last_upgrades(context, fetch_status: dict[int, str]) -> dict[int, dict]:
     }
     for cid, rows in by_contract.items():
         latest = _latest_event(rows) if fetch_status.get(cid) == UPGRADE_FETCH_COMPLETE else None
+        if latest is not None and not _deployment_decided(latest, False, creation_txs):
+            latest = None
         out[cid] = (
             {"block": latest.block_number, "timestamp": latest.timestamp, "state": LAST_UPGRADE_ESTABLISHED}
             if latest is not None

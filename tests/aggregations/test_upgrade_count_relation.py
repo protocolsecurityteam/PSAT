@@ -85,7 +85,7 @@ def _entry(session, protocol, contract):
 @pytest.mark.parametrize(
     ("status", "rows", "count", "relation"),
     [
-        pytest.param(UPGRADE_FETCH_COMPLETE, ["linked", "linked"], 2, "exact", id="complete-all-linked"),
+        pytest.param(UPGRADE_FETCH_COMPLETE, ["deployment", "linked", "linked"], 2, "exact", id="complete-all-linked"),
         pytest.param(UPGRADE_FETCH_COMPLETE, ["linked", "unlinked"], 2, "upper_bound", id="complete-unlinked"),
         pytest.param(UPGRADE_FETCH_COMPLETE, ["linked", "poll"], 2, "upper_bound", id="complete-no-tx-hash"),
         pytest.param(UPGRADE_FETCH_ERROR, ["linked"], None, "not_determined", id="errored"),

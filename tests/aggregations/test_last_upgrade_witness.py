@@ -113,6 +113,7 @@ def test_a_block_only_row_beside_a_time_only_row_is_not_ordered(db_session):
 
 def test_a_newer_block_without_a_time_outranks_an_older_timed_block(db_session):
     p, c = _proxy(db_session)
+    _deployment(db_session, c, block=10, ts=datetime(2023, 1, 1, tzinfo=timezone.utc))
     _event(db_session, c, block=500, ts=datetime(2024, 1, 1, tzinfo=timezone.utc))
     _event(db_session, c, block=900, source="event_scan")
     db_session.commit()

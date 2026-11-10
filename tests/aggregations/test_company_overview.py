@@ -18,6 +18,7 @@ from db.models import (
     JobStatus,
     PrincipalLabel,
     UpgradeEvent,
+    UpgradeTransaction,
 )
 from services.aggregations.company_overview import (
     _build_principal_lookup,
@@ -906,7 +907,8 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     # Two events with no receipt facts are two unwitnessed actions.
     assert norm["upgrade_events_count"][contract_a.id]["count"] == 2
     assert norm["upgrade_events_count"][contract_a.id]["basis"]["events_without_tx_hash"] == 2
-    assert norm["upgrade_events_last"][contract_a.id]["block"] == 22345
+    # Hashless rows can't be told apart from the deployment, so the latest isn't established.
+    assert norm["upgrade_events_last"][contract_a.id]["state"] == "not_determined"
 
 
 def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
@@ -2332,11 +2334,42 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    assert entry["last_upgrade_timestamp"] == "2025-06-01T00:00:00+00:00"
-    assert entry["last_upgrade_block"] is None, (
-        "the newest upgrade is poll-detected (block not determined); pairing "
-        "the older event's block 500 with the poll timestamp fabricates a "
-        f"composite event, got block {entry['last_upgrade_block']}"
+    # The newest row is poll-detected: no tx to tell it from the deployment, so no pair is established, and the older
+    # event's block 500 is never paired with the poll timestamp.
+    assert entry["last_upgrade_state"] == "not_determined"
+    assert (entry["last_upgrade_block"], entry["last_upgrade_timestamp"]) == (None, None)
+
+
+def _creation_receipt(session, contract, block: int) -> None:
+    """The proxy's deployment, witnessed by its creation receipt, as a backfill from genesis records it."""
+    tx_hash = "0x" + uuid.uuid4().hex * 2
+    session.add(
+        UpgradeTransaction(
+            chain_id=1,
+            tx_hash=tx_hash,
+            block_number=block,
+            block_hash="0x" + "b" * 64,
+            tx_status=1,
+            receipt_from=_addr("deployer"),
+            receipt_to=None,
+            created_contract_address=contract.address.lower(),
+            is_contract_creation=True,
+            executor_kind="not_determined",
+            receipt_log_set_complete_for_tx=True,
+            receipt_upgraded_counts={contract.address.lower(): 1},
+        )
+    )
+    session.flush()
+    session.add(
+        UpgradeEvent(
+            contract_id=contract.id,
+            proxy_address=contract.address,
+            new_impl=_addr("i0"),
+            block_number=block,
+            tx_hash=tx_hash,
+            chain_id=1,
+            source="backfill",
+        )
     )
 
 
@@ -2346,6 +2379,7 @@ def test_last_upgrade_pair_block_carrying_control(db_session):
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
     c.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
+    _creation_receipt(db_session, c, 10)
 
     db_session.add_all(
         [
