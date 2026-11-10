@@ -1601,7 +1601,7 @@ def upgrade_figures(
                 "direct_upgrade_witnessed_at_block": min(direct) if direct else None,
             },
         }
-    return out, _last_upgrades(context)
+    return out, _last_upgrades(context, fetch_status)
 
 
 LAST_UPGRADE_ESTABLISHED = "established"
@@ -1625,19 +1625,18 @@ def _latest_event(events):
     # A dominating event holds the max block if it has one, else the max time.
     candidates = [e for e in events if blocks and e.block_number == max(blocks)]
     candidates += [e for e in events if e.block_number is None and times and e.timestamp == max(times)]
-    if len(events) == 1:
-        candidates = list(events)
     dominating = [m for m in candidates if all(e is m or _not_before(m, e) for e in events)]
     if not dominating:
         return None
     return max(dominating, key=lambda e: (e.timestamp is not None, e.id))
 
 
-def _last_upgrades(context) -> dict[int, dict]:
+def _last_upgrades(context, fetch_status: dict[int, str]) -> dict[int, dict]:
     """Per contract with a recorded non-deployment upgrade: the latest one's block and timestamp, from one row.
 
-    ``state`` is ``established`` only when one row is provably no earlier than all others; rows with no common
-    ordering (a block-only scan row beside a time-only poll row) publish ``not_determined`` with no pair.
+    ``state`` is ``established`` only when the history fetch completed (the rule the count follows: a partial or
+    unknown read may miss the latest) and one row is provably no earlier than all others. Otherwise, including rows with
+    no common ordering, it is ``not_determined`` with no pair; an errored fetch with no rows says so too.
     """
     events, tx_rows, creation_rows = context
     pair_counts = _event_pair_counts(events)
@@ -1646,13 +1645,16 @@ def _last_upgrades(context) -> dict[int, dict]:
         if _is_proven_deployment(event, _tx_row_for(event, tx_rows), creation_rows, pair_counts):
             continue
         by_contract.setdefault(int(event.contract_id), []).append(event)
-    out: dict[int, dict] = {}
+    undetermined = {"block": None, "timestamp": None, "state": NOT_DETERMINED}
+    out: dict[int, dict] = {
+        cid: dict(undetermined) for cid, status in fetch_status.items() if status == UPGRADE_FETCH_ERROR
+    }
     for cid, rows in by_contract.items():
-        latest = _latest_event(rows)
+        latest = _latest_event(rows) if fetch_status.get(cid) == UPGRADE_FETCH_COMPLETE else None
         out[cid] = (
             {"block": latest.block_number, "timestamp": latest.timestamp, "state": LAST_UPGRADE_ESTABLISHED}
             if latest is not None
-            else {"block": None, "timestamp": None, "state": NOT_DETERMINED}
+            else dict(undetermined)
         )
     return out
 

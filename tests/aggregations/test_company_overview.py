@@ -687,6 +687,7 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     job_a = _add_job(db_session, address=addr_a, protocol_id=p.id, name="ContractA")
     job_b = _add_job(db_session, address=addr_b, protocol_id=p.id, name="ContractB")
     contract_a = _add_contract(db_session, address=addr_a, job=job_a, protocol_id=p.id, contract_name="ContractA")
+    contract_a.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
     contract_b = _add_contract(db_session, address=addr_b, job=job_b, protocol_id=p.id, contract_name="ContractB")
 
     safe_addr = _addr("psafe").lower()
@@ -2251,6 +2252,7 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
     addr = _addr("upgl")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+    c.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
 
     db_session.add_all(
         [
@@ -2291,6 +2293,7 @@ def test_last_upgrade_pair_block_carrying_control(db_session):
     addr = _addr("upgx")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+    c.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
 
     db_session.add_all(
         [
