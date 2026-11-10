@@ -1504,13 +1504,14 @@ UPGRADE_COUNT_EXACT = "exact"
 UPGRADE_COUNT_UPPER_BOUND = "upper_bound"
 
 
-def _recorded_count_relation(fetch_status: str | None, state: dict) -> str:
-    """How the action count relates to the ERC-1967 upgrade actions in the fetched history.
+def _recorded_count_relation(fetch_status: str | None, state: dict, published: int | None) -> str:
+    """How the published action count relates to the ERC-1967 upgrade actions in the fetched history.
 
     Events with no receipt fact or no tx hash are each counted, so they can only over-count; a fetch that didn't
-    complete leaves the history itself partial, so nothing is proven either way.
+    complete leaves the history itself partial, so nothing is proven either way. With no published count (a
+    post-exclusion zero is never proven) there is nothing to relate.
     """
-    if fetch_status != UPGRADE_FETCH_COMPLETE:
+    if published is None or fetch_status != UPGRADE_FETCH_COMPLETE:
         return NOT_DETERMINED
     if state["events_unlinked"] + state["events_without_tx_hash"] > 0:
         return UPGRADE_COUNT_UPPER_BOUND
@@ -1580,11 +1581,12 @@ def upgrade_figures(
         count = len(state["actions"]) + state["events_without_tx_hash"]
         direct = [b for b in state["direct_blocks"] if b is not None]
         fetch_errored = fetch_status.get(cid) == UPGRADE_FETCH_ERROR
+        published = count if count > 0 and not fetch_errored else None
         out[cid] = {
-            "count": count if count > 0 and not fetch_errored else None,
+            "count": published,
             "basis": {
                 "history_fetch_status": fetch_status.get(cid) or NOT_DETERMINED,
-                "recorded_count_relation": _recorded_count_relation(fetch_status.get(cid), state),
+                "recorded_count_relation": _recorded_count_relation(fetch_status.get(cid), state, published),
                 "events_total": state["events_total"],
                 "tx_facts_present": state["tx_facts_present"],
                 "events_unlinked": state["events_unlinked"],

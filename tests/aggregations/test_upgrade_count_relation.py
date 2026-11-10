@@ -90,8 +90,8 @@ def _entry(session, protocol, contract):
         pytest.param(UPGRADE_FETCH_COMPLETE, ["linked", "poll"], 2, "upper_bound", id="complete-no-tx-hash"),
         pytest.param(UPGRADE_FETCH_ERROR, ["linked"], None, "not_determined", id="errored"),
         pytest.param(None, ["linked"], 1, "not_determined", id="legacy-no-status"),
-        pytest.param(UPGRADE_FETCH_COMPLETE, [], None, "exact", id="complete-zero-events"),
-        pytest.param(UPGRADE_FETCH_COMPLETE, ["deployment"], None, "exact", id="complete-deployment-only"),
+        pytest.param(UPGRADE_FETCH_COMPLETE, [], None, "not_determined", id="complete-zero-events"),
+        pytest.param(UPGRADE_FETCH_COMPLETE, ["deployment"], None, "not_determined", id="complete-deployment-only"),
         pytest.param(UPGRADE_FETCH_ERROR, [], None, "not_determined", id="errored-zero-events"),
     ],
 )
@@ -115,6 +115,7 @@ def test_recorded_count_relation(db_session, status, rows, count, relation):
     assert basis["recorded_count_relation"] == relation
     assert basis["history_fetch_status"] == (status or "not_determined")
     assert basis["events_total"] == len(rows)
+    assert basis["deployments_excluded"] == rows.count("deployment")
     assert basis["recorded_event_coverage"] == "not_determined"
 
 
