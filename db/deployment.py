@@ -31,3 +31,17 @@ def deployment_scope(column: Any, deployment_address: str | None):
     if dep is None:
         return column.is_(None)
     return or_(column == dep, column.is_(None))
+
+
+def resolved_against(row_deployment: str | None, holder_address: str | None, deployment: str | None) -> bool:
+    """Whether a row filed on *holder_address*'s contract was resolved against *deployment*'s storage.
+
+    A tagged row names its deployment. An untagged row is the holder's own storage, so on any other contract (a shared
+    impl's legacy set, or the impl read standalone) it is never attributed to *deployment*.
+    """
+    target = (deployment or "").lower()
+    if not target:
+        return False
+    if row_deployment is not None:
+        return row_deployment.lower() == target
+    return (holder_address or "").lower() == target

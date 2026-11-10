@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from db.deployment import resolved_against
 from db.models import (
     CONTROL_EDGE_RELATIONS,
     Contract,
@@ -74,7 +75,7 @@ def build_governance_view(
         return balance_fetch_by_id.get(int(fetch_id)) if fetch_id is not None else None
 
     # Fold secondary-impl rows into the primary impl's buckets so a Safe with authority only on the admin impl still
-    # surfaces as a proxy controller.
+    # surfaces as a proxy controller. Controller values are per deployment and are selected per entry instead.
     for job in jobs:
         cr = contracts_by_job_id.get(job.id)
         secondaries = _secondary_impl_contracts(cr, impl_job_by_entity, contracts_by_job_id)
@@ -90,9 +91,6 @@ def build_governance_view(
         for sc in secondaries:
             if sc.id == primary_cid:
                 continue
-            cv_extra = controller_values_by_cid.get(sc.id)
-            if cv_extra:
-                controller_values_by_cid[primary_cid] = list(controller_values_by_cid.get(primary_cid) or []) + cv_extra
             fpg_extra = fp_governance_by_cid.get(sc.id)
             if fpg_extra:
                 fp_governance_by_cid[primary_cid] = list(fp_governance_by_cid.get(primary_cid) or []) + fpg_extra
@@ -112,6 +110,7 @@ def build_governance_view(
 
     contracts: list[dict[str, Any]] = []
     owner_groups: dict[str, list[dict]] = {}
+    controller_values_by_entity: dict[str, list[ControllerValue]] = {}
 
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
@@ -135,21 +134,20 @@ def build_governance_view(
         if not summary_row and contract_row:
             summary_row = contract_row.summary
 
-        # Prefer the logic contract's controller snapshot (read against proxy storage).
-        lookup_contract = contract_row
-        if is_proxy:
-            for candidate in [impl_contract, *secondary_impl_contracts]:
-                if candidate and controller_values_by_cid.get(candidate.id):
-                    lookup_contract = candidate
-                    break
+        lookup_contract, entry_cvs = _entry_controller_values(
+            job.address,
+            contract_row,
+            [impl_contract, *secondary_impl_contracts] if is_proxy else [],
+            controller_values_by_cid,
+        )
+        controller_values_by_entity[_entity_key(contract_row.chain if contract_row else None, job.address)] = entry_cvs
 
         owner = None
         controllers: dict[str, Any] = {}
-        if lookup_contract:
-            for cv in controller_values_by_cid.get(lookup_contract.id, []):
-                controllers[cv.controller_id] = cv.value
-                if _is_active_owner_controller(cv.controller_id) and cv.value and cv.value.startswith("0x"):
-                    owner = cv.value.lower()
+        for cv in entry_cvs:
+            controllers[cv.controller_id] = cv.value
+            if _is_active_owner_controller(cv.controller_id) and cv.value and cv.value.startswith("0x"):
+                owner = cv.value.lower()
 
         upgrade_entry = (upgrade_events_count_by_cid.get(contract_row.id) if contract_row else None) or {}
         # ``None`` when no proven upgrade exists, including post-exclusion zero, which would render as "0 upgrades".
@@ -397,7 +395,7 @@ def build_governance_view(
     fund_flows, principals = _build_flows_and_principals(
         contracts,
         contracts_by_job_id,
-        controller_values_by_cid,
+        controller_values_by_entity,
         fp_governance_by_cid,
         cgn_by_cid,
         cge_by_cid,
@@ -738,7 +736,7 @@ def _control_edge_witness(
 def _build_flows_and_principals(
     contracts: list[dict[str, Any]],
     contracts_by_job_id: dict[Any, Contract],
-    controller_values_by_cid: dict[int, list[ControllerValue]],
+    controller_values_by_entity: dict[str, list[ControllerValue]],
     fp_governance_by_cid: dict[int, list[dict[str, Any]]],
     cgn_by_cid: dict[int, list[ControlGraphNode]],
     cge_by_cid: dict[int, list[ControlGraphEdge]],
@@ -909,7 +907,7 @@ def _build_flows_and_principals(
                 details: dict[str, Any] = dict(lookup_meta.get("details") or {})
                 if isinstance(cgn.details, dict):
                     details.update(cgn.details)
-                for cv in controller_values_by_cid.get(lookup_c.id, []):
+                for cv in controller_values_by_entity.get(prefix + target, []):
                     if (cv.value or "").lower() != node_addr:
                         continue
                     if cv.details and isinstance(cv.details, dict):
@@ -976,6 +974,42 @@ def _build_flows_and_principals(
     for pr in principals_out:
         pr["chains"] = sorted(pr["chains"])
     return fund_flows, principals_out
+
+
+def _entry_controller_values(
+    address: str | None,
+    own_contract: Contract | None,
+    logic_contracts: list[Contract | None],
+    controller_values_by_cid: dict[int, list[ControllerValue]],
+) -> tuple[Contract | None, list[ControllerValue]]:
+    """The contract an entry's controller snapshot is read from, and the rows resolved against the entry's address.
+
+    The logic contracts' rows (read against the proxy's storage) win over the proxy's own; a shared implementation holds
+    one set per proxy, so only this deployment's rows are taken.
+    """
+
+    def _selected(holder: Contract) -> list[ControllerValue]:
+        rows = [
+            cv
+            for cv in controller_values_by_cid.get(holder.id, [])
+            if resolved_against(cv.deployment_address, holder.address, address)
+        ]
+        return sorted(rows, key=lambda cv: cv.id or 0)
+
+    seen: set[int] = set()
+    logic_rows: list[ControllerValue] = []
+    first_with_rows: Contract | None = None
+    for holder in logic_contracts:
+        if holder is None or holder.id in seen:
+            continue
+        seen.add(holder.id)
+        rows = _selected(holder)
+        if rows and first_with_rows is None:
+            first_with_rows = holder
+        logic_rows.extend(rows)
+    if logic_rows:
+        return (logic_contracts[0] or first_with_rows), logic_rows
+    return own_contract, (_selected(own_contract) if own_contract else [])
 
 
 def _contract_order(entry: dict[str, Any]) -> tuple[str, str]:

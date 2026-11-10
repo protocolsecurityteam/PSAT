@@ -122,3 +122,38 @@ def test_poll_rotation_records_no_block_rather_than_the_stale_one(db_session, su
     assert row.observed_via == CONTROLLER_OBSERVED_VIA_STORAGE_POLL
     # A poll reads a slot, not a log; the old block would misdate the value.
     assert row.block_number is None
+
+
+def test_rotation_moves_only_rows_resolved_against_the_watched_address(db_session, subject, monkeypatch):
+    """The holder can carry another deployment's set (a shared implementation read in proxy context)."""
+    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
+    other_proxy = "0x5555555555555555555555555555555555555555"
+    for deployment in (None, SUBJECT, other_proxy):
+        db_session.add(
+            ControllerValue(
+                contract_id=subject.id,
+                deployment_address=deployment,
+                controller_id="state_variable:owner",
+                value=OLD_TIMELOCK,
+                block_number=18_000_000,
+                observed_via="eth_call",
+            )
+        )
+    db_session.commit()
+    _monitored(db_session, subject)
+
+    with patch(
+        "services.monitoring.unified_watcher.rpc_batch_request_classified",
+        side_effect=lambda _url, calls: [(_word(NEW_EOA), "ok") for _ in calls],
+    ):
+        poll_for_state_changes(db_session, "http://rpc")
+    db_session.commit()
+    db_session.expire_all()
+
+    values = {
+        row.deployment_address: (row.value or "").lower()
+        for row in db_session.execute(select(ControllerValue).where(ControllerValue.contract_id == subject.id))
+        .scalars()
+        .all()
+    }
+    assert values == {None: NEW_EOA, SUBJECT: NEW_EOA, other_proxy: OLD_TIMELOCK}
