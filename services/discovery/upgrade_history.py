@@ -1394,6 +1394,9 @@ def _load_action_context(session, contract_ids):
             Contract.chain,
             UpgradeEvent.id,
             UpgradeEvent.timestamp,
+            UpgradeEvent.source,
+            UpgradeEvent.old_impl,
+            UpgradeEvent.new_impl,
         )
         .join(Contract, Contract.id == UpgradeEvent.contract_id)
         .where(UpgradeEvent.contract_id.in_(ids))
@@ -1474,11 +1477,18 @@ def _witnessed_creation_txs(events, tx_rows, creation_rows) -> dict[int, str]:
 
 
 def _deployment_decided(event, excluded: bool, creation_txs: dict[int, str]) -> bool:
-    """A counted-or-excluded event's deployment question is settled: proven the deployment, or in a tx other than the
-    witnessed creation tx. Anything else (no creation witness, the creation tx itself, no tx hash) is undecided.
+    """A counted-or-excluded event's deployment question is settled: proven the deployment, in a tx other than the
+    witnessed creation tx, or a poll detection whose recorded predecessor differs (the watcher writes one only on an
+    observed change, so the contract was already seen with another implementation). Anything else (no creation witness,
+    the creation tx itself, no tx hash, a poll row with no predecessor) is undecided.
     """
+    from db.models import UPGRADE_SOURCE_POLL
+
     if excluded:
         return True
+    if event.source == UPGRADE_SOURCE_POLL and event.old_impl and event.new_impl:
+        if event.old_impl.lower() != event.new_impl.lower():
+            return True
     creation_tx = creation_txs.get(int(event.contract_id))
     return bool(creation_tx and event.tx_hash and str(event.tx_hash).lower() != creation_tx)
 

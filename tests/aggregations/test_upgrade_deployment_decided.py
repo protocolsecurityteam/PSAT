@@ -5,6 +5,7 @@ one; an event the deployment test merely failed to prove stays undecided.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from db.models import ContractCreationWitness, UpgradeEvent, UpgradeTransaction
 from schemas.upgrade_history import UPGRADE_FETCH_COMPLETE
@@ -122,3 +123,30 @@ def test_an_event_in_the_creation_tx_not_proven_the_deployment_is_undecided(db_s
     # Two Upgraded logs in the creation tx: not a plain deployment, so the exclusion doesn't fire.
     _event(db_session, c, 50, creation=True, upgraded_logs=2)
     assert _figures(db_session, p, c) == (1, "upper_bound", 2, "not_determined", None)
+
+
+def _poll(session, c, *, old_impl):
+    session.add(
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=c.address,
+            old_impl=old_impl,
+            new_impl=_addr("i"),
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            source="poll",
+        )
+    )
+
+
+def test_a_poll_detected_change_from_a_seen_implementation_is_decided(db_session):
+    p, c = _proxy(db_session)
+    _poll(db_session, c, old_impl=_addr("seen"))
+    count, relation, undecided, state, block = _figures(db_session, p, c)
+    # Hashless, so still an upper bound on the count; the change itself is not the deployment.
+    assert (count, relation, undecided, state, block) == (1, "upper_bound", 0, "established", None)
+
+
+def test_a_poll_row_with_no_recorded_predecessor_is_undecided(db_session):
+    p, c = _proxy(db_session)
+    _poll(db_session, c, old_impl=None)
+    assert _figures(db_session, p, c) == (1, "upper_bound", 1, "not_determined", None)

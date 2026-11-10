@@ -2308,12 +2308,13 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
     c.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
 
+    first_impl = _addr("j1")
     db_session.add_all(
         [
             UpgradeEvent(
                 contract_id=c.id,
                 proxy_address=addr,
-                new_impl=_addr("j1"),
+                new_impl=first_impl,
                 block_number=500,
                 timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
                 tx_hash="0x" + "c" * 64,
@@ -2322,6 +2323,7 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
             UpgradeEvent(
                 contract_id=c.id,
                 proxy_address=addr,
+                old_impl=first_impl,
                 new_impl=_addr("j2"),
                 block_number=None,
                 timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
@@ -2334,10 +2336,12 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    # The newest row is poll-detected: no tx to tell it from the deployment, so no pair is established, and the older
-    # event's block 500 is never paired with the poll timestamp.
-    assert entry["last_upgrade_state"] == "not_determined"
-    assert (entry["last_upgrade_block"], entry["last_upgrade_timestamp"]) == (None, None)
+    assert entry["last_upgrade_timestamp"] == "2025-06-01T00:00:00+00:00"
+    assert entry["last_upgrade_block"] is None, (
+        "the newest upgrade is poll-detected (block not determined); pairing "
+        "the older event's block 500 with the poll timestamp fabricates a "
+        f"composite event, got block {entry['last_upgrade_block']}"
+    )
 
 
 def _creation_receipt(session, contract, block: int) -> None:
