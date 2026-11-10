@@ -1,6 +1,7 @@
 import { Handle, Position } from "@xyflow/react";
 
-import { formatDelay, formatUsd, shortAddr } from "../format.js";
+import { formatDelay, shortAddr } from "../format.js";
+import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 import { ROLE_META } from "../meta.js";
 import { upgradeCountText } from "../../vocab/upgradeFacts.js";
 
@@ -97,7 +98,7 @@ export function ContractNode({ data }) {
         </div>
       )}
       <div className="ps-node-role" style={{ color: accent }}>{roleLabel}</div>
-      {m.total_usd ? <div className="ps-node-balance">{formatUsd(m.total_usd)}</div> : null}
+      {m.total_usd ? <div className="ps-node-balance">{formatUsdTotal(m.total_usd, usdIsLowerBound(m))}</div> : null}
     </div>
   );
 }

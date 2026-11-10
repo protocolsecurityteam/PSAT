@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { formatUsd } from "../format.js";
+import { usdIsLowerBound } from "../../vocab/usdBound.js";
 
 // `usd_value: 0` is priced (under half a cent); `null` is unpriced (most rows).
 // Both are falsy in JS and used to print the same dash; `formatUsd` also
@@ -74,7 +75,12 @@ export function BalanceTable({ machine }) {
     <section className="ps-balance-section">
       <div className="ps-balance-header">
         <span>Balances</span>
-        {machine.total_usd != null ? <span className="ps-balance-total">{formatUsd(machine.total_usd) || "$0.00"} observed</span> : null}
+        {machine.total_usd != null ? (
+          <span className="ps-balance-total">
+            {usdIsLowerBound(machine) ? "≥ " : ""}
+            {formatUsd(machine.total_usd) || "$0.00"} observed
+          </span>
+        ) : null}
       </div>
       {note ? <div className="ps-balance-coverage" role="note">{note}</div> : null}
       <button

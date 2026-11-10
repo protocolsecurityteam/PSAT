@@ -441,3 +441,31 @@ describe("EntityCard analysis provenance", () => {
     expect(getByText("analysis provenance not determined")).toBeInTheDocument();
   });
 });
+
+describe("EntityCard USD lower bound", () => {
+  it("badges a total over unvalued holdings as a lower bound", () => {
+    const { getByText } = render(
+      <EntityCard
+        machine={machine({ total_usd: 5_000_000, holdings_coverage: { unvalued_rows: 2 } })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    expect(getByText("≥ $5.0M")).toBeInTheDocument();
+  });
+
+  it("carries the bound onto Governs rows", () => {
+    const pool = { address: POOL, name: "LiquidityPool", total_usd: 2_000_000, holdings_coverage: { unvalued_rows: 1 } };
+    const { getByText } = render(
+      <EntityCard
+        machine={machine()}
+        machines={[pool]}
+        onSelectGuard={vi.fn()}
+        onPreview={vi.fn()}
+        governsIndex={governsWith([{ contractAddress: POOL, contractName: "LiquidityPool", functions: ["pause"] }])}
+      />,
+    );
+    fireEvent.click(getByText("Governs").closest("button"));
+    expect(getByText("≥ $2.0M")).toBeInTheDocument();
+  });
+});

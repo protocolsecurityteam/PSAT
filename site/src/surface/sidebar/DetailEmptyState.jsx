@@ -11,6 +11,7 @@ import { formatUsd } from "../format.js";
 import { buildSearchResults } from "../layout/search.js";
 import { memberAnalysisNote } from "../../vocab/memberAnalysis.js";
 import { lastUpgradeStateWord } from "../../vocab/upgradeFacts.js";
+import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 
 // Promises cached per company so remounts and concurrent mounts share one
 // request.
@@ -423,7 +424,7 @@ export function DetailEmptyState({
                   title="custodied balance at this contract — not a share of TVL"
                 >
                   <span className="ps-glance-vrow-name">{c.name || c.address}</span>
-                  <span className="ps-glance-vrow-usd">{formatUsd(c.total_usd)}</span>
+                  <span className="ps-glance-vrow-usd">{formatUsdTotal(c.total_usd, usdIsLowerBound(c))}</span>
                 </button>
               ))}
             </>

@@ -20,3 +20,12 @@ describe("SearchNavigator — Safe threshold", () => {
     expect(el).toHaveTextContent("2/3 signers");
   });
 });
+
+describe("SearchNavigator — USD lower bound", () => {
+  it("renders a value summed over unvalued holdings as a lower bound", () => {
+    const m = { address: "0xa", name: "A", total_usd: 2_500_000, holdings_coverage: { unvalued_rows: 1 }, totalFunctions: 1 };
+    expect(preview([m], [], "contracts")).toHaveTextContent("≥ $2.5M");
+    const exact = { ...m, holdings_coverage: { unvalued_rows: 0 } };
+    expect(preview([exact], [], "contracts").textContent).not.toContain("≥");
+  });
+});

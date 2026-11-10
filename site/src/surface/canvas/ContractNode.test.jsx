@@ -142,3 +142,12 @@ describe("ContractNode — reach chip", () => {
     expect(c.querySelector(".ps-node").className).not.toContain("ps-node-reach-nd");
   });
 });
+
+describe("ContractNode — USD lower bound", () => {
+  it("marks a balance over unvalued holdings as a lower bound", () => {
+    const c = renderNode({ address: "0x9", name: "V", role: "value_handler", total_usd: 3_000_000, holdings_coverage: { unvalued_rows: 1 } });
+    expect(c.querySelector(".ps-node-balance").textContent).toBe("≥ $3.0M");
+    const exact = renderNode({ address: "0x9", name: "V", role: "value_handler", total_usd: 3_000_000, holdings_coverage: { unvalued_rows: 0 } });
+    expect(exact.querySelector(".ps-node-balance").textContent).toBe("$3.0M");
+  });
+});

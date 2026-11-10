@@ -201,6 +201,26 @@ describe("buildGraphLayout", () => {
     expect(edges.some((e) => e.id.startsWith("agg-"))).toBe(true);
   });
 
+  it("marks a group's USD sum as a lower bound when any child's total is one", () => {
+    const valued = machines.map((m, i) => ({
+      ...m,
+      total_usd: 1000,
+      holdings_coverage: { unvalued_rows: i === 0 ? 1 : 0 },
+    }));
+    const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
+      address: p.address,
+      type: p.resolved_type,
+      label: p.display_name,
+      details: p.details,
+      controls: [valued[0].address],
+      primary_for: p.resolved_type === "safe" ? [valued[0].address] : [],
+    }));
+    const group = buildGraphLayout(valued, [], principals).nodes.find((n) => n.type === "group");
+    expect(group.data.totalUsdLowerBound).toBe(true);
+    const exact = valued.map((m) => ({ ...m, holdings_coverage: { unvalued_rows: 0 } }));
+    expect(buildGraphLayout(exact, [], principals).nodes.find((n) => n.type === "group").data.totalUsdLowerBound).toBe(false);
+  });
+
   it("collapses every principal→child edge into containment", () => {
     // Same fixture, but the Safe is now the server-marked primary for
     // both contracts — exactly the fanout the grouping is meant to

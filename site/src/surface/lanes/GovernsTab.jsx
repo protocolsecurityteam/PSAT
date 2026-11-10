@@ -1,4 +1,5 @@
-import { fnChipClass, formatUsd } from "../format.js";
+import { fnChipClass } from "../format.js";
+import { formatUsdTotal } from "../../vocab/usdBound.js";
 import { EntityRef } from "../EntityRef.jsx";
 
 // Shared row: head previews, arrow commits. The "N fns" button appears only on
@@ -10,7 +11,7 @@ function GovernsRow({ row, onPreview, onNavigate }) {
       address={row.address}
       name={row.name}
       tag={row.tag}
-      value={formatUsd(row.total_usd)}
+      value={formatUsdTotal(row.total_usd, row.usdLowerBound)}
       summary={functions.length > 0 ? `${functions.length} fns` : null}
       onPreview={onPreview}
       onNavigate={onNavigate}

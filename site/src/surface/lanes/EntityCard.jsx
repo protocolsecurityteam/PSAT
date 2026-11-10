@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { chainColor, chainLabel } from "../chainMeta.js";
-import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
+import { formatDelay, principalLabel, shortAddr } from "../format.js";
+import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
 import { controllerValuesNote } from "../../vocab/controllerReads.js";
 import { analysisProvenanceLine } from "../../vocab/analysisProvenance.js";
@@ -58,6 +59,7 @@ export function EntityCard({
         name: row.contractName,
         is_proxy: Boolean(m?.is_proxy),
         total_usd: m?.total_usd || 0,
+        usdLowerBound: usdIsLowerBound(m),
         functions: row.functions,
       };
     });
@@ -71,7 +73,13 @@ export function EntityCard({
     for (const addr of reachDistances ? reachDistances.keys() : []) {
       const m = machineByAddr.get(addr);
       if (!m) continue;
-      rows.push({ address: m.address, name: m.name, is_proxy: Boolean(m.is_proxy), total_usd: m.total_usd || 0 });
+      rows.push({
+        address: m.address,
+        name: m.name,
+        is_proxy: Boolean(m.is_proxy),
+        total_usd: m.total_usd || 0,
+        usdLowerBound: usdIsLowerBound(m),
+      });
     }
     return dedupeAndTagRows(rows);
   }, [reachDistances, machineByAddr]);
@@ -95,7 +103,7 @@ export function EntityCard({
   const name = machine?.name || (principal ? principalLabel(principal.label, principal.type, principal.address) : shortAddr(address));
   const fullAddress = machine?.address || principal?.address || address;
 
-  const usdLabel = isMachine ? formatUsd(machine.total_usd) : null;
+  const usdLabel = isMachine ? formatUsdTotal(machine.total_usd, usdIsLowerBound(machine)) : null;
   const enumerationNote = controllerEnumerationNote(machine) || controllerEnumerationNote(principal);
   const valuesNote = isMachine ? controllerValuesNote(machine) : null;
   // One badge for every route to an unread controller set; the title names each.

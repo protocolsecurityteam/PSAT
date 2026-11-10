@@ -89,3 +89,20 @@ describe("buildSearchResults — Safe threshold", () => {
     expect(items.map((i) => i.address)).toEqual(["0xone", "0xnd"]);
   });
 });
+
+describe("buildSearchResults — USD lower bounds", () => {
+  const bound = { address: "0xa", name: "A", total_usd: 100, holdings_coverage: { unvalued_rows: 1 }, totalFunctions: 1 };
+  const exact = { address: "0xb", name: "B", total_usd: 50, holdings_coverage: { unvalued_rows: 0 }, totalFunctions: 1 };
+
+  it("marks a contract's value as a lower bound when it holds unvalued rows", () => {
+    const items = buildSearchResults([bound, exact], [], "contracts", "name", "");
+    expect(items.map((i) => [i.address, i.valueLowerBound])).toEqual([["0xa", true], ["0xb", false]]);
+  });
+
+  it("marks a principal's sum as a lower bound when any summed total is one", () => {
+    const p = (address, controls) => ({ address, type: "safe", label: "s", controls, details: { threshold: 1, owners: ["0x1"] } });
+    const [mixed, clean] = buildSearchResults([bound, exact], [p("0xs1", ["0xa", "0xb"]), p("0xs2", ["0xb"])], "safe", "value", "");
+    expect(mixed).toMatchObject({ address: "0xs1", value: 150, valueLowerBound: true });
+    expect(clean).toMatchObject({ address: "0xs2", value: 50, valueLowerBound: false });
+  });
+});

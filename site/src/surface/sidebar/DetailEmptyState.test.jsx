@@ -248,6 +248,15 @@ describe("DetailEmptyState — freshness and value", () => {
     expect(screen.getByText(/Largest tracked balances/i)).toBeInTheDocument();
     expect(screen.getByText("$3.2B")).toBeInTheDocument();
   });
+
+  it("marks a largest-balance row as a lower bound when the contract holds unvalued rows", async () => {
+    renderPanel({
+      companyData: companyData({
+        contracts: [{ address: A, name: "WeETH", total_usd: 3498555472, holdings_coverage: { unvalued_rows: 3 } }],
+      }),
+    });
+    expect(await screen.findByText("≥ $3.5B")).toBeInTheDocument();
+  });
 });
 
 
