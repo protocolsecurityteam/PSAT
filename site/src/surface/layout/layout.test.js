@@ -61,6 +61,45 @@ describe("collectDirectCallers", () => {
     expect(direct[0].resolvedType).toBe("safe");
   });
 
+  it("dates a caller from its entry's controller read only when the read's value is the caller", () => {
+    const SAFE = "0xaaaa000000000000000000000000000000000aaa";
+    const fn = {
+      direct_owner: { address: SAFE, resolved_type: "safe", source_controller_id: "owner", details: {} },
+      authority_roles: [],
+      controllers: [],
+    };
+    const ownerRead = { value: SAFE, block_number: 7, block_basis: "log_block", observed_via: "event_log" };
+    expect(collectDirectCallers(fn, { controller_reads: { owner: ownerRead } })[0].controllerRead).toBe(ownerRead);
+    const rotated = { ...ownerRead, value: "0xbbbb000000000000000000000000000000000bbb" };
+    expect(collectDirectCallers(fn, { controller_reads: { owner: rotated } })[0].controllerRead).toBeNull();
+    expect(collectDirectCallers(fn)[0].controllerRead).toBeNull();
+  });
+
+  it("threads the contract entry through buildMachines", () => {
+    const SAFE = "0xaaaa000000000000000000000000000000000aaa";
+    const VAULT = ETHERFI_COMPANY_RICH.contracts[0].address;
+    const ownerRead = { value: SAFE, block_number: 9, block_basis: "head_before_read", observed_via: "eth_call" };
+    const company = {
+      ...ETHERFI_COMPANY_RICH,
+      contracts: [{ ...ETHERFI_COMPANY_RICH.contracts[0], controller_reads: { owner: ownerRead } }],
+    };
+    const fns = {
+      [entityKey(undefined, VAULT)]: [
+        {
+          function: "pause()",
+          selector: "0x8456cb59",
+          effect_labels: ["pause"],
+          direct_owner: { address: SAFE, resolved_type: "safe", source_controller_id: "owner", details: {} },
+          authority_roles: [],
+          controllers: [],
+        },
+      ],
+    };
+    const [vault] = buildMachines(company, fns);
+    const all = [...vault.lanes.top, ...vault.lanes.ops, ...vault.lanes.left, ...vault.lanes.right];
+    expect(all[0].principals[0].controllerRead).toBe(ownerRead);
+  });
+
   it("returns no direct caller for a public-authority function", () => {
     const fn = ETHERFI_COMPANY_RICH.contracts[0].functions.find((f) => f.function === "deposit");
     const direct = collectDirectCallers(fn);

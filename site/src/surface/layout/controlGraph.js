@@ -6,6 +6,7 @@
 
 import { isRoleIdAddress } from "../format.js";
 import { principalOnChain } from "../entityKey.js";
+import { controllerReadFor } from "../../vocab/controllerReads.js";
 import {
   agencyRoute,
   buildAgencyIndex,
@@ -35,17 +36,20 @@ export function buildControlNodeIndex(companyData) {
 
 // Exactly what effective_permissions emits. Contract principals are not
 // replaced by the first reachable Safe/EOA: that produced false claims like
-// "Safe can pause" on role-gated functions.
-export function collectDirectCallers(fn) {
+// "Safe can pause" on role-gated functions. `contract` is the function's
+// overview entry; it only dates a caller from its matching controller read.
+export function collectDirectCallers(fn, contract = null) {
   const byAddress = new Map();
 
   function pushPrincipal(principal, origin) {
     const address = String(principal?.address || "").toLowerCase();
     if (!address.startsWith("0x")) return;
     if (isRoleIdAddress(address)) return;
+    const controllerRead = controllerReadFor(contract, principal.source_controller_id, address);
     const existing = byAddress.get(address);
     if (existing) {
       if (!existing.origins.includes(origin)) existing.origins.push(origin);
+      if (!existing.controllerRead && controllerRead) existing.controllerRead = controllerRead;
       return;
     }
     byAddress.set(address, {
@@ -55,6 +59,7 @@ export function collectDirectCallers(fn) {
       label: principal.label || null,
       sourceContract: principal.source_contract || null,
       sourceControllerId: principal.source_controller_id || null,
+      controllerRead,
       origins: [origin],
     });
   }

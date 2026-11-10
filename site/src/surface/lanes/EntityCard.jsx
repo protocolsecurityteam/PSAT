@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { chainColor, chainLabel } from "../chainMeta.js";
 import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
 import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
+import { controllerValuesNote } from "../../vocab/controllerReads.js";
 import { upgradeCountText } from "../../vocab/upgradeFacts.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
@@ -95,6 +96,12 @@ export function EntityCard({
 
   const usdLabel = isMachine ? formatUsd(machine.total_usd) : null;
   const enumerationNote = controllerEnumerationNote(machine) || controllerEnumerationNote(principal);
+  const valuesNote = isMachine ? controllerValuesNote(machine) : null;
+  // One badge for every route to an unread controller set; the title names each.
+  const controllersUnread = [
+    ...(enumerationNote ? enumerationNote.statuses.map((s) => s.word) : []),
+    ...(valuesNote?.notDetermined ? [valuesNote.word] : []),
+  ];
   const upgradeText = isMachine ? upgradeCountText(machine) : null;
 
   const tabCounts = isMachine
@@ -162,14 +169,17 @@ export function EntityCard({
               ) : null}
             </>
           )}
-          {enumerationNote && (
+          {(enumerationNote || valuesNote?.notDetermined) && (
             <span
               className="tag tag-md ps-badge ps-badge-not-determined"
               style={{ "--badge-accent": "#b45309" }}
-              title={enumerationNote.statuses.map((s) => s.word).join("; ")}
+              title={controllersUnread.join("; ")}
             >
               Controllers not determined
             </span>
+          )}
+          {valuesNote && !valuesNote.notDetermined && (
+            <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#b45309" }}>{valuesNote.word}</span>
           )}
           {principal && (
             <>

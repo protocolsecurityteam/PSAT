@@ -325,6 +325,40 @@ describe("EntityCard controller enumeration", () => {
     expect(getByText("Controllers not determined")).toHaveAttribute("title", "enumeration timed out");
   });
 
+  it("badges an entry whose controller values were never read for this deployment", () => {
+    const { getByText } = render(
+      <EntityCard machine={machine({ controller_values_state: "not_determined" })} onSelectGuard={vi.fn()} governsIndex={new Map()} />,
+    );
+    expect(getByText("Controllers not determined")).toHaveAttribute(
+      "title",
+      "controller values not determined for this deployment",
+    );
+  });
+
+  it("names both routes in one badge when the replay and the values are both unread", () => {
+    const { getAllByText } = render(
+      <EntityCard
+        machine={machine({
+          controller_values_state: "not_determined",
+          controller_enumeration: { state: "not_determined", status: "error" },
+        })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const badges = getAllByText("Controllers not determined");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveAttribute("title", "enumeration errored; controller values not determined for this deployment");
+  });
+
+  it("renders an unknown controller_values_state token raw", () => {
+    const { getByText, queryByText } = render(
+      <EntityCard machine={machine({ controller_values_state: "partial" })} onSelectGuard={vi.fn()} governsIndex={new Map()} />,
+    );
+    expect(getByText("partial")).toBeInTheDocument();
+    expect(queryByText("Controllers not determined")).toBeNull();
+  });
+
   it("shows nothing extra for a complete member set", () => {
     const { queryByText } = render(
       <EntityCard
