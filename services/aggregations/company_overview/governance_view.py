@@ -856,8 +856,6 @@ def _build_flows_and_principals(
         if resolved_type == "safe":
             if not details.get("owners"):
                 details["owners"] = safe_owners_map.get(principal_key, [])
-            if "threshold" not in details and details.get("owners"):
-                details["threshold"] = len(details["owners"])
         return {
             "address": _entity_addr(principal_key),
             "chain": _entity_chain(principal_key),
