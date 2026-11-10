@@ -78,7 +78,6 @@ def test_overview_reads_upgrade_events_once(db_session):
     p = _protocol_with_proxies(db_session, 3)
     with _statements(db_session) as seen:
         build_company_overview(db_session, p.name)
-    print(f"overview statements={len(seen)} upgrade_reads={len(_upgrade_reads(seen))}")
     # One event read plus one receipt-fact read, shared by the count and the last upgrade.
     assert len(_upgrade_reads(seen)) == 2
 
@@ -92,5 +91,4 @@ def test_inventory_analysis_states_do_not_scale_with_rows(db_session):
             rows = all_addresses_for_protocol(db_session, protocol)
         assert len(rows) == n
         counts.append(len(seen))
-    print(f"addresses statements rows=2:{counts[0]} rows=6:{counts[1]}")
     assert counts[0] == counts[1]
