@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 
 import ETHERFI from "../test/fixtures/score_etherfi.json";
 import ScoreBand from "./ScoreBand.jsx";
+import { scoreComputedAt } from "./GradeHeader.jsx";
 
 const CONTRACTS = [
   { address: "0x352180974c71f84a934953cf49c4e538a6f9c997", chain: "ethereum", name: "BoringVault" },
@@ -403,12 +404,26 @@ describe("ScoreBand — computed grade", () => {
     renderBand({ score: { ...ETHERFI, model_version: "9.9.9-unreleased" } });
     expect(screen.getByText("78.6")).toBeInTheDocument();
     expect(screen.queryByText("B+")).not.toBeInTheDocument();
-    expect(screen.getByText(/bands uncalibrated for this model version/)).toBeInTheDocument();
+    expect(screen.getByText("bands uncalibrated for model version 9.9.9-unreleased")).toBeInTheDocument();
+  });
+
+  it("names the model version and when the score was computed", () => {
+    renderBand({ score: ETHERFI });
+    expect(
+      screen.getByText(`model 1.4.1-provisional · computed ${scoreComputedAt(ETHERFI.computed_at)}`),
+    ).toBeInTheDocument();
+    expect(scoreComputedAt(ETHERFI.computed_at)).toMatch(/2026/);
+  });
+
+  it("keeps a missing model version or computed time visible as not determined", () => {
+    renderBand({ score: { ...ETHERFI, model_version: null, computed_at: null } });
+    expect(screen.getByText("model version not determined · computed time not determined")).toBeInTheDocument();
+    expect(screen.getByText("bands uncalibrated: model version not determined")).toBeInTheDocument();
   });
 
   it("hides the provisional badge once confidence clears 50%", () => {
     renderBand({ score: { ...ETHERFI, confidence_pct: 72.4 } });
-    expect(screen.queryByText(/provisional/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/provisional · confidence/)).not.toBeInTheDocument();
   });
 });
 
