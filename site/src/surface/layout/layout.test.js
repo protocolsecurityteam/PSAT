@@ -115,6 +115,17 @@ describe("guardSummary", () => {
     expect(guard.sublabel).toBe("2/3");
   });
 
+  it("keeps a Safe's unread threshold not determined, never N required signatures", () => {
+    const fn = {
+      direct_owner: { address: "0xaaaa000000000000000000000000000000000aaa", resolved_type: "safe", details: { owners: ["0xa", "0xb", "0xc"] } },
+      authority_roles: [],
+      controllers: [],
+    };
+    const guard = guardSummary(fn, {});
+    expect(guard.sublabel).toBe("3 signers · threshold not determined");
+    expect(guard.principals[0].display.sub).toBe("3 signers · threshold not determined");
+  });
+
   it("classifies a Timelock-guarded function with a delay sublabel", () => {
     const fn = ETHERFI_COMPANY_RICH.contracts[0].functions.find((f) => f.function === "upgrade");
     const guard = guardSummary(fn, ETHERFI_COMPANY_RICH);
