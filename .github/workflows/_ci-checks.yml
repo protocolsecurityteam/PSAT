@@ -88,7 +88,8 @@ jobs:
   frontend-test:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci-config == 'true'
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest is 26.04, which Playwright does not support; visual baselines are 24.04 renders.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: site
@@ -115,7 +116,8 @@ jobs:
   test:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci-config == 'true'
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest is 26.04, which Playwright does not support; visual baselines are 24.04 renders.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 4
