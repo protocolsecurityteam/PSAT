@@ -1448,11 +1448,13 @@ def _tx_row_for(event, tx_rows):
     return tx_rows.get((int(event.chain_id), str(event.tx_hash).lower()))
 
 
-def _fold_actions(session, contract_ids) -> dict[int, dict]:
-    """Fold each contract's events into its action set plus the counters every figure cites."""
+def _fold_actions(context) -> dict[int, dict]:
+    """Fold each contract's events (a loaded ``_load_action_context``) into its action set plus the counters every
+    figure cites.
+    """
     from db.models import EXECUTOR_KIND_SAFE_DIRECT
 
-    events, tx_rows, creation_rows = _load_action_context(session, contract_ids)
+    events, tx_rows, creation_rows = context
     pair_counts = _event_pair_counts(events)
 
     per_contract: dict[int, dict] = {}
@@ -1515,8 +1517,33 @@ def _recorded_count_relation(fetch_status: str | None, state: dict) -> str:
     return UPGRADE_COUNT_EXACT
 
 
+def _fetch_statuses(session, ids: list[int]) -> dict[int, str]:
+    from sqlalchemy import select
+
+    from db.models import Contract
+
+    if not ids:
+        return {}
+    return dict(
+        session.execute(
+            select(Contract.id, Contract.upgrade_history_status).where(
+                Contract.id.in_(ids), Contract.upgrade_history_status.is_not(None)
+            )
+        ).all()
+    )
+
+
 def upgrade_action_counts(session, contract_ids, *, with_completed_empty: bool = False) -> dict[int, dict]:
-    """Per contract: how many upgrade actions its rows support, plus the basis.
+    """Per contract: how many upgrade actions its rows support, plus the basis; see ``upgrade_figures``."""
+    return upgrade_figures(session, contract_ids, with_completed_empty=with_completed_empty)[0]
+
+
+def upgrade_figures(
+    session, contract_ids, *, with_completed_empty: bool = False
+) -> tuple[dict[int, dict], dict[int, dict]]:
+    """``(counts, last)`` per contract from one read of the upgrade rows.
+
+    Counts: how many upgrade actions the rows support, plus the basis.
 
     * The unit is the transaction, not the log (one tx carried 19 ``Upgraded`` logs).
     * Deployments are excluded (a proxy's creation emits ``Upgraded``).
@@ -1527,24 +1554,13 @@ def upgrade_action_counts(session, contract_ids, *, with_completed_empty: bool =
     * An errored fetch publishes its basis even with no rows; so does a completed one with *with_completed_empty*.
 
     ``recorded_count_relation`` states what the counters prove about the count; see ``_recorded_count_relation``.
+
+    Last: see ``_last_upgrades``.
     """
-    from sqlalchemy import select
-
-    from db.models import Contract
-
     ids = [int(cid) for cid in (contract_ids or [])]
-    fetch_status = (
-        dict(
-            session.execute(
-                select(Contract.id, Contract.upgrade_history_status).where(
-                    Contract.id.in_(ids), Contract.upgrade_history_status.is_not(None)
-                )
-            ).all()
-        )
-        if ids
-        else {}
-    )
-    folded = _fold_actions(session, ids)
+    fetch_status = _fetch_statuses(session, ids)
+    context = _load_action_context(session, ids)
+    folded = _fold_actions(context)
     for cid, status in fetch_status.items():
         placeholder = status == UPGRADE_FETCH_ERROR or (with_completed_empty and status == UPGRADE_FETCH_COMPLETE)
         if placeholder and cid not in folded:
@@ -1585,7 +1601,7 @@ def upgrade_action_counts(session, contract_ids, *, with_completed_empty: bool =
                 "direct_upgrade_witnessed_at_block": min(direct) if direct else None,
             },
         }
-    return out
+    return out, _last_upgrades(context)
 
 
 LAST_UPGRADE_ESTABLISHED = "established"
@@ -1617,13 +1633,13 @@ def _latest_event(events):
     return max(dominating, key=lambda e: (e.timestamp is not None, e.id))
 
 
-def last_upgrade_actions(session, contract_ids) -> dict[int, dict]:
+def _last_upgrades(context) -> dict[int, dict]:
     """Per contract with a recorded non-deployment upgrade: the latest one's block and timestamp, from one row.
 
     ``state`` is ``established`` only when one row is provably no earlier than all others; rows with no common
     ordering (a block-only scan row beside a time-only poll row) publish ``not_determined`` with no pair.
     """
-    events, tx_rows, creation_rows = _load_action_context(session, contract_ids)
+    events, tx_rows, creation_rows = context
     pair_counts = _event_pair_counts(events)
     by_contract: dict[int, list[Any]] = {}
     for event in events:
@@ -1650,7 +1666,7 @@ def governance_actions_for(session, contract_ids) -> set[tuple[int, str]]:
     ``upgrade_action_counts``.
     """
     actions: set[tuple[int, str]] = set()
-    for state in _fold_actions(session, contract_ids).values():
+    for state in _fold_actions(_load_action_context(session, contract_ids)).values():
         chain_id = state["chain_id"]
         if chain_id is None:
             continue

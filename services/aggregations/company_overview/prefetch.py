@@ -38,6 +38,8 @@ logger = logging.getLogger("services.aggregations.company_overview")
 _DB_POOL_SIZE = int(os.environ.get("PSAT_DB_POOL_SIZE", "5"))
 _DB_MAX_OVERFLOW = int(os.environ.get("PSAT_DB_MAX_OVERFLOW", "10"))
 _PREFETCH_MAX_WORKERS = max(1, min(4, (_DB_POOL_SIZE + _DB_MAX_OVERFLOW - 1) // 2))
+# One stage fills both upgrade keys, so the count and the last upgrade share a single read of the rows.
+_UPGRADE_FIGURES = "upgrade_figures"
 
 
 def terminal_walk_by_entity(session: Session, contract_ids: list[int]) -> tuple[dict[str, dict[str, Any]], int]:
@@ -322,24 +324,16 @@ def _prefetch_child_tables(
             )
         return local, rows
 
-    def _upgrade_count(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
-        """Upgrade actions per contract, not Upgraded logs, with the basis.
+    def _upgrade_figures(s: Session) -> tuple[dict[str, dict[int, dict[str, Any]]], int]:
+        """Upgrade actions per contract (transactions, not logs) and the last upgrade, from one read of the rows.
 
-        Distinct ``tx_hash`` (one tx can emit several ``Upgraded``); NULL-tx poll rows each count. A proxy's own
-        deployment emits ``Upgraded``; ``upgrade_action_counts`` excludes only proven deployments and never publishes a
-        post-exclusion zero as proven.
+        A proxy's own deployment emits ``Upgraded``; both figures exclude only proven deployments, and a post-exclusion
+        zero is never published as proven.
         """
-        from services.discovery.upgrade_history import upgrade_action_counts
+        from services.discovery.upgrade_history import upgrade_figures
 
-        local: dict[int, dict[str, Any]] = upgrade_action_counts(s, id_list, with_completed_empty=True)
-        return local, len(local)
-
-    def _upgrade_last(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
-        """Block and timestamp from the same last row, with proven deployments excluded as the count excludes them."""
-        from services.discovery.upgrade_history import last_upgrade_actions
-
-        local: dict[int, dict[str, Any]] = last_upgrade_actions(s, id_list)
-        return local, len(local)
+        counts, last = upgrade_figures(s, id_list, with_completed_empty=True)
+        return {"upgrade_events_count": counts, "upgrade_events_last": last}, len(counts)
 
     def _balances(s: Session) -> tuple[dict[int, list[Any]], int]:
         # Base table is insert-only and holds every cycle.
@@ -436,8 +430,7 @@ def _prefetch_child_tables(
         ("fp_in_contract_principals", "fp_in_contract_principals", _fp_in_contract_principals),
         ("fp_all_addrs", "fp_all_addrs", _fp_all_addrs),
         ("fp_function_detail", "fp_function_detail", _fp_function_detail),
-        ("upgrade_events_count", "upgrade_events_count", _upgrade_count),
-        ("upgrade_events_last", "upgrade_events_last", _upgrade_last),
+        ("upgrade_figures", _UPGRADE_FIGURES, _upgrade_figures),
         ("terminal_walk", "terminal_walk", _terminal_walk),
     ]
 
@@ -460,7 +453,10 @@ def _prefetch_child_tables(
         futures = [ex.submit(contextvars.copy_context().run, _run_stage, tk, ok, fn) for tk, ok, fn in parallel_stages]
         for fut in as_completed(futures):
             timing_key, out_key, data, rows, ms = fut.result()
-            out[out_key] = data
+            if out_key == _UPGRADE_FIGURES:
+                out.update(data)
+            else:
+                out[out_key] = data
             timings_ms[timing_key] = ms
             counts[timing_key] = rows
     parallel_wall_ms = int((time.monotonic() - parallel_wall_start) * 1000)
