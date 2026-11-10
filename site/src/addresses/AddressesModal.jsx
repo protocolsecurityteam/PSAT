@@ -12,6 +12,7 @@ import {
   splitMembership,
 } from "./addressFilter.js";
 import { proxyDisplayName } from "../shared/displayName.js";
+import { inventoryAnalysisChip } from "../vocab/analysisProvenance.js";
 import { Modal, ModalTitle } from "../shared/Modal.jsx";
 import { coalesceChain, entityKey } from "../surface/entityKey.js";
 
@@ -489,10 +490,15 @@ export default function AddressesModal({ companyName, onClose }) {
                         ) : (
                           <span className="tag tag-pill ps-addresses-modal-chip ok">matched</span>
                         )
-                      ) : r.analyzed ? (
-                        <span className="tag tag-pill ps-addresses-modal-chip ok">analyzed</span>
                       ) : (
-                        <span className="tag tag-pill ps-addresses-modal-chip pending">discovered</span>
+                        (() => {
+                          const chip = inventoryAnalysisChip(r);
+                          return (
+                            <span className={`tag tag-pill ps-addresses-modal-chip ${chip.tone}`} title={chip.title}>
+                              {chip.text}
+                            </span>
+                          );
+                        })()
                       )}
                     </td>
                     {isAdmin && (

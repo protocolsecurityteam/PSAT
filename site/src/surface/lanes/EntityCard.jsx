@@ -4,6 +4,7 @@ import { chainColor, chainLabel } from "../chainMeta.js";
 import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
 import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
 import { controllerValuesNote } from "../../vocab/controllerReads.js";
+import { analysisProvenanceLine } from "../../vocab/analysisProvenance.js";
 import { upgradeCountText } from "../../vocab/upgradeFacts.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
@@ -103,6 +104,7 @@ export function EntityCard({
     ...(valuesNote?.notDetermined ? [valuesNote.word] : []),
   ];
   const upgradeText = isMachine ? upgradeCountText(machine) : null;
+  const provenance = isMachine ? analysisProvenanceLine(machine) : null;
 
   const tabCounts = isMachine
     ? {
@@ -131,6 +133,9 @@ export function EntityCard({
           <div className="ps-machine-title-wrap">
             <div className="ps-machine-name">{name}</div>
             <div className="ps-machine-address">{fullAddress}</div>
+            {provenance && (
+              <div className="ps-machine-address" title={provenance.title}>{provenance.text}</div>
+            )}
           </div>
         </div>
         <div className="ps-machine-badges">

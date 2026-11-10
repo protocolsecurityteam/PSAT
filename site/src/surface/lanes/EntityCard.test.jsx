@@ -395,3 +395,49 @@ describe("EntityCard upgrade count", () => {
     expect(container.querySelector(".ps-machine-badges").textContent).not.toMatch(/upgrade/i);
   });
 });
+
+describe("EntityCard analysis provenance", () => {
+  const job = (over = {}) => ({
+    job_id: "abcdef12-0000-0000-0000-000000000000",
+    state: "current_analyzer",
+    static_analyzer_version: 12,
+    static_reused_from_job_id: null,
+    started_at: "2026-11-03T13:00:00+00:00",
+    last_pipeline_pass_at: "2026-11-03T14:02:00+00:00",
+    ...over,
+  });
+
+  it("shows one provenance line with the implementation job for a proxy", () => {
+    const { container } = render(
+      <EntityCard
+        machine={machine({
+          is_proxy: true,
+          analysis_provenance: { job: job(), impl_job: job({ job_id: "impl", state: "older_analyzer", static_analyzer_version: 11 }) },
+        })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const lines = container.querySelectorAll(".ps-machine-title-wrap .ps-machine-address");
+    expect(lines).toHaveLength(2);
+    expect(lines[1].textContent).toMatch(/^analyzer v12 · last pipeline pass .+ · impl older analyzer v11, /);
+    expect(lines[1].getAttribute("title")).toContain("implementation job impl");
+  });
+
+  it("keeps not determined provenance visible", () => {
+    const nd = "not_determined";
+    const { getByText } = render(
+      <EntityCard
+        machine={machine({
+          analysis_provenance: {
+            job: job({ state: nd, static_analyzer_version: nd, static_reused_from_job_id: nd, started_at: nd, last_pipeline_pass_at: nd }),
+            impl_job: null,
+          },
+        })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    expect(getByText("analysis provenance not determined")).toBeInTheDocument();
+  });
+});

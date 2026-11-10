@@ -91,6 +91,35 @@ describe("AddressesModal", () => {
     expectNoCrash();
   });
 
+  it("chips each member by its analysis_state, flagging an older analyzer", async () => {
+    const row = (address, name, over) => ({
+      address, chain: "ethereum", name, is_proxy: false, membership_state: "member",
+      membership_witnesses: [], membership_reason: null, ...over,
+    });
+    setFetchHandler(
+      (url) => /^\/api\/company\/[^/]+\/addresses$/.test(url.pathname),
+      () => ({
+        all_addresses: [
+          row("0x1111111111111111111111111111111111111111", "Current", { analyzed: true, analysis_state: "current_analyzer" }),
+          row("0x2222222222222222222222222222222222222222", "Older", {
+            analyzed: true, analysis_state: "older_analyzer", stale_analysis_version: 11,
+          }),
+          row("0x3333333333333333333333333333333333333333", "Failed", { analyzed: false, analysis_state: "analysis_failed" }),
+          row("0x4444444444444444444444444444444444444444", "Queued", { analyzed: false, analysis_state: "analysis_queued" }),
+        ],
+      }),
+    );
+    render(<AddressesModal companyName="etherfi" onClose={() => {}} />);
+    await waitFor(() => expect(screen.queryByText(/Loading…/)).not.toBeInTheDocument());
+    const chipFor = (name) => screen.getByText(name).closest("tr").querySelector(".ps-addresses-modal-chip");
+    expect(chipFor("Current")).toHaveTextContent(/^analyzed$/);
+    expect(chipFor("Older")).toHaveTextContent("analyzed · older analyzer");
+    expect(chipFor("Older")).toHaveAttribute("title", "static analyzer v11");
+    expect(chipFor("Failed")).toHaveTextContent("analysis failed");
+    expect(chipFor("Failed")).toHaveClass("err");
+    expect(chipFor("Queued")).toHaveTextContent("analysis_queued");
+  });
+
   it("shows a probed candidate's out-of-perimeter reads", async () => {
     const CANDIDATE = "0x4444444444444444444444444444444444444444";
     const OWNER = "0x5555555555555555555555555555555555555555";

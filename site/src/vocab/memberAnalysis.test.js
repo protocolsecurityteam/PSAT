@@ -20,7 +20,26 @@ describe("memberAnalysisNote", () => {
         { token: "analysis_failed", word: "analysis failed", count: 1 },
         { token: "analysis_not_completed", word: "analysis not completed", count: 1 },
       ],
+      olderAnalyzer: 0,
+      olderVersions: [],
     });
+  });
+
+  it("counts members analyzed by an older analyzer and names their versions", () => {
+    const note = memberAnalysisNote({
+      member_analysis: {
+        members: 4,
+        analyzed: 4,
+        not_determined: 0,
+        by_state: { analysis_failed: 0, analysis_not_completed: 0 },
+        analyzed_at_older_version: [
+          { address: "0x1", stale_analysis_version: 10 },
+          { address: "0x2", stale_analysis_version: 11 },
+          { address: "0x3", stale_analysis_version: 11 },
+        ],
+      },
+    });
+    expect(note).toEqual({ members: 4, notDetermined: 0, states: [], olderAnalyzer: 3, olderVersions: [11, 10] });
   });
 
   it("is null when every member is analyzed or the block is absent", () => {

@@ -289,6 +289,45 @@ describe("member analysis coverage", () => {
     );
   });
 
+  it("flags members analyzed by an older analyzer beside the unread ones", () => {
+    renderPanel({
+      companyData: companyData({
+        member_analysis: {
+          members: 5,
+          analyzed: 4,
+          not_determined: 1,
+          by_state: { analysis_failed: 1, analysis_not_completed: 0 },
+          not_analyzed: [],
+          analyzed_at_older_version: [{ address: A, stale_analysis_version: 11 }],
+        },
+      }),
+    });
+    expect(screen.getByRole("status", { name: "Member contracts not determined" })).toHaveTextContent(
+      "1 of 5 member contracts not determined · 1 analysis failed · 1 analyzed by an older analyzer (v11)",
+    );
+  });
+
+  it("flags older-analyzer members when every member counts as analyzed", () => {
+    renderPanel({
+      companyData: companyData({
+        member_analysis: {
+          members: 3,
+          analyzed: 3,
+          not_determined: 0,
+          by_state: { analysis_failed: 0, analysis_not_completed: 0 },
+          not_analyzed: [],
+          analyzed_at_older_version: [
+            { address: A, stale_analysis_version: 11 },
+            { address: B, stale_analysis_version: 10 },
+          ],
+        },
+      }),
+    });
+    expect(screen.getByRole("status", { name: "Member contracts analyzed by an older analyzer" })).toHaveTextContent(
+      "2 of 3 member contracts analyzed by an older analyzer (v11, v10)",
+    );
+  });
+
   it("shows nothing when every member is analyzed", () => {
     renderPanel({
       companyData: companyData({

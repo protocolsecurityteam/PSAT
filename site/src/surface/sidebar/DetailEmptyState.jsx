@@ -285,9 +285,24 @@ export function DetailEmptyState({
       </div>
 
       {unreadMembers && (
-        <div className="ps-glance-card" role="status" aria-label="Member contracts not determined">
-          {unreadMembers.notDetermined} of {unreadMembers.members} member contracts not determined
-          {unreadMembers.states.map((state) => ` · ${state.count} ${state.word}`).join("")}
+        <div
+          className="ps-glance-card"
+          role="status"
+          aria-label={
+            unreadMembers.notDetermined > 0
+              ? "Member contracts not determined"
+              : "Member contracts analyzed by an older analyzer"
+          }
+        >
+          {unreadMembers.notDetermined > 0
+            ? `${unreadMembers.notDetermined} of ${unreadMembers.members} member contracts not determined`
+              + unreadMembers.states.map((state) => ` · ${state.count} ${state.word}`).join("")
+            : `${unreadMembers.olderAnalyzer} of ${unreadMembers.members} member contracts`}
+          {unreadMembers.olderAnalyzer > 0
+            ? `${unreadMembers.notDetermined > 0 ? ` · ${unreadMembers.olderAnalyzer}` : ""} analyzed by an older analyzer${
+                unreadMembers.olderVersions.length ? ` (${unreadMembers.olderVersions.map((v) => `v${v}`).join(", ")})` : ""
+              }`
+            : ""}
         </div>
       )}
 
