@@ -14,7 +14,9 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         controlled.some((a) => a.toLowerCase() === m.address?.toLowerCase())
       );
       const totalValue = controlledMachines.reduce((sum, m) => sum + (m.total_usd || 0), 0);
-      const signers = p.details?.threshold || (p.details?.owners?.length) || 0;
+      // A missing threshold is not determined; the owner count never stands in.
+      const threshold = Number(p.details?.threshold);
+      const signers = Number.isFinite(threshold) && threshold > 0 ? threshold : null;
       const delay = p.details?.delay || 0;
       items.push({
         kind: "principal",
@@ -87,7 +89,7 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
   }
 
   if (sortKey === "value") items.sort((a, b) => b.value - a.value);
-  else if (sortKey === "signers") items.sort((a, b) => b.signers - a.signers);
+  else if (sortKey === "signers") items.sort((a, b) => (b.signers ?? -1) - (a.signers ?? -1));
   else if (sortKey === "functions") items.sort((a, b) => b.functions - a.functions);
   else if (sortKey === "name") items.sort((a, b) => a.name.localeCompare(b.name));
 

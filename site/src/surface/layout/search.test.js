@@ -60,3 +60,32 @@ describe("buildSearchResults — Timelocks filter", () => {
     expect(item.name).toBe("0x2aca..8adc");
   });
 });
+
+describe("buildSearchResults — Safe threshold", () => {
+  const safe = (details) => ({ address: "0xs", type: "safe", label: "s", controls: [], details });
+
+  it("never substitutes the owner count for a missing threshold", () => {
+    const [item] = buildSearchResults([], [safe({ owners: ["0xa", "0xb", "0xc"] })], "safe", "name", "");
+    expect(item.signers).toBeNull();
+    expect(item.ownersCount).toBe(3);
+  });
+
+  it("keeps a published threshold", () => {
+    const [item] = buildSearchResults([], [safe({ owners: ["0xa", "0xb", "0xc"], threshold: 2 })], "safe", "name", "");
+    expect(item.signers).toBe(2);
+  });
+
+  it("sorts a not-determined threshold after every published one", () => {
+    const items = buildSearchResults(
+      [],
+      [
+        { ...safe({ owners: ["0xa", "0xb"] }), address: "0xnd" },
+        { ...safe({ owners: ["0xa"], threshold: 1 }), address: "0xone" },
+      ],
+      "safe",
+      "signers",
+      "",
+    );
+    expect(items.map((i) => i.address)).toEqual(["0xone", "0xnd"]);
+  });
+});
