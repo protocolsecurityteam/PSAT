@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
+from db.deployment import deployment_scope
 from db.models import (
     CONTROLLER_OBSERVED_VIA_EVENT_LOG,
     CONTROLLER_OBSERVED_VIA_STORAGE_POLL,
@@ -1181,6 +1182,8 @@ def _update_controller_value_rows(
         session.execute(
             select(ControllerValue).where(
                 ControllerValue.contract_id == mc.contract_id,
+                # A shared impl row holds one set per proxy; a read at this address moves only its own.
+                deployment_scope(ControllerValue.deployment_address, mc.address),
                 ControllerValue.controller_id.in_(controller_ids),
             )
         )

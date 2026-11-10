@@ -45,6 +45,19 @@ function useCalloutCollisions(callouts) {
   return { hidden, register };
 }
 
+export function scoreComputedAt(iso) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 export default function GradeHeader({ doc, view, open, onToggle }) {
   const { lambda, ledger, callouts } = view;
   const { letter, tone, calibrated } = letterFor(doc.model_version, lambda);
@@ -59,6 +72,8 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
   // The fold refuses a λ over an unwitnessed raw, so λ can be absent outside
   // the withheld state; "0.0 kept" would be fabricated.
   const hasLambda = typeof lambda === "number" && Number.isFinite(lambda);
+  const modelVersion = doc.model_version || null;
+  const computedAt = scoreComputedAt(doc.computed_at);
 
   return (
     <>
@@ -72,8 +87,17 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
             <div className="sc-num sc-nd">not determined</div>
           )}
           <div className="sc-of">λ / 100</div>
+          <div className="sc-uncal">
+            {modelVersion ? `model ${modelVersion}` : "model version not determined"}
+            {" · "}
+            {computedAt ? `computed ${computedAt}` : "computed time not determined"}
+          </div>
           {!calibrated && (
-            <div className="sc-uncal">bands uncalibrated for this model version</div>
+            <div className="sc-uncal">
+              {modelVersion
+                ? `bands uncalibrated for model version ${modelVersion}`
+                : "bands uncalibrated: model version not determined"}
+            </div>
           )}
           {typeof confidence === "number" && confidence < 50 && (
             <div className="tag tag-md tag-pill tag-plain sc-badge">⚠ provisional · confidence {confidence.toFixed(1)}%</div>

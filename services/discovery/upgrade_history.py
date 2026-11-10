@@ -1392,12 +1392,17 @@ def _load_action_context(session, contract_ids):
             UpgradeEvent.block_number,
             UpgradeEvent.chain_id,
             Contract.chain,
+            UpgradeEvent.id,
+            UpgradeEvent.timestamp,
+            UpgradeEvent.source,
+            UpgradeEvent.old_impl,
+            UpgradeEvent.new_impl,
         )
         .join(Contract, Contract.id == UpgradeEvent.contract_id)
         .where(UpgradeEvent.contract_id.in_(ids))
     ).all()
 
-    keys = sorted({(int(cid), str(tx).lower()) for _c, _p, tx, _b, cid, _ch in events if cid is not None and tx})
+    keys = sorted({(int(e.chain_id), str(e.tx_hash).lower()) for e in events if e.chain_id is not None and e.tx_hash})
     tx_rows: dict[tuple[int, str], Any] = {}
     if keys:
         for row in session.execute(
@@ -1405,7 +1410,7 @@ def _load_action_context(session, contract_ids):
         ).scalars():
             tx_rows[(row.chain_id, row.tx_hash)] = row
 
-    addr_keys = sorted({(int(cid), (proxy or "").lower()) for _c, proxy, _t, _b, cid, _ch in events if cid is not None})
+    addr_keys = sorted({(int(e.chain_id), (e.proxy_address or "").lower()) for e in events if e.chain_id is not None})
     creation_rows: dict[tuple[int, str], Any] = {}
     if addr_keys:
         for row in session.execute(
@@ -1417,20 +1422,90 @@ def _load_action_context(session, contract_ids):
     return events, tx_rows, creation_rows
 
 
-def _fold_actions(session, contract_ids) -> dict[int, dict]:
-    """Fold each contract's events into its action set plus the counters every figure cites."""
+def _event_pair_counts(events) -> dict[tuple[int, str], int]:
+    pair_counts: dict[tuple[int, str], int] = {}
+    for e in events:
+        if e.tx_hash:
+            key = (int(e.contract_id), str(e.tx_hash).lower())
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+    return pair_counts
+
+
+def _is_proven_deployment(event, tx_row, creation_rows, pair_counts) -> bool:
+    """The one exclusion every upgrade figure applies: an event with a receipt fact proving it the deployment."""
+    if tx_row is None or event.chain_id is None:
+        return False
+    proxy = event.proxy_address or ""
+    return event_is_deployment(
+        tx_row,
+        creation_rows.get((int(event.chain_id), proxy.lower())),
+        proxy_address=proxy,
+        event_block=event.block_number,
+        pair_event_count=pair_counts.get((int(event.contract_id), str(event.tx_hash).lower()), 1),
+    )
+
+
+def _tx_row_for(event, tx_rows):
+    if not event.tx_hash or event.chain_id is None:
+        return None
+    return tx_rows.get((int(event.chain_id), str(event.tx_hash).lower()))
+
+
+def _witnessed_creation_txs(events, tx_rows, creation_rows) -> dict[int, str]:
+    """Contract id -> its witnessed creation tx hash: a receipt showing the tx created the proxy, or a creation witness
+    whose indexer hash and empty-code probe are both present.
+    """
+    out: dict[int, str] = {}
+    for event in events:
+        cid = int(event.contract_id)
+        proxy = (event.proxy_address or "").lower()
+        tx_row = _tx_row_for(event, tx_rows)
+        if (
+            tx_row is not None
+            and tx_row.tx_status == 1
+            and tx_row.is_contract_creation
+            and (tx_row.created_contract_address or "").lower() == proxy
+        ):
+            out[cid] = str(tx_row.tx_hash).lower()
+            continue
+        if cid in out or event.chain_id is None:
+            continue
+        witness = creation_rows.get((int(event.chain_id), proxy))
+        if witness is not None and witness.creation_tx_hash and witness.code_absent_at_probe is True:
+            out[cid] = str(witness.creation_tx_hash).lower()
+    return out
+
+
+def _deployment_decided(event, excluded: bool, creation_txs: dict[int, str]) -> bool:
+    """A counted-or-excluded event's deployment question is settled: proven the deployment, in a tx other than the
+    witnessed creation tx, or a poll detection whose recorded predecessor differs (the watcher writes one only on an
+    observed change, so the contract was already seen with another implementation). Anything else (no creation witness,
+    the creation tx itself, no tx hash, a poll row with no predecessor) is undecided.
+    """
+    from db.models import UPGRADE_SOURCE_POLL
+
+    if excluded:
+        return True
+    if event.source == UPGRADE_SOURCE_POLL and event.old_impl and event.new_impl:
+        if event.old_impl.lower() != event.new_impl.lower():
+            return True
+    creation_tx = creation_txs.get(int(event.contract_id))
+    return bool(creation_tx and event.tx_hash and str(event.tx_hash).lower() != creation_tx)
+
+
+def _fold_actions(context) -> dict[int, dict]:
+    """Fold each contract's events (a loaded ``_load_action_context``) into its action set plus the counters every
+    figure cites.
+    """
     from db.models import EXECUTOR_KIND_SAFE_DIRECT
 
-    events, tx_rows, creation_rows = _load_action_context(session, contract_ids)
-    pair_counts: dict[tuple[int, str], int] = {}
-    for cid, _proxy, tx, _blk, _chain, _name in events:
-        if tx:
-            key = (int(cid), str(tx).lower())
-            pair_counts[key] = pair_counts.get(key, 0) + 1
+    events, tx_rows, creation_rows = context
+    pair_counts = _event_pair_counts(events)
+    creation_txs = _witnessed_creation_txs(events, tx_rows, creation_rows)
 
     per_contract: dict[int, dict] = {}
-    for cid, proxy, tx, block, chain, chain_name in events:
-        cid = int(cid)
+    for event in events:
+        cid, tx, chain, chain_name = int(event.contract_id), event.tx_hash, event.chain_id, event.chain
         state = per_contract.setdefault(
             cid,
             {
@@ -1440,12 +1515,16 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
                 "tx_facts_present": 0,
                 "events_unlinked": 0,
                 "deployments_excluded": 0,
+                "events_deployment_undecided": 0,
                 "kinds": {},
                 "direct_blocks": [],
                 "chain_id": None,
             },
         )
         state["events_total"] += 1
+        excluded = _is_proven_deployment(event, _tx_row_for(event, tx_rows), creation_rows, pair_counts)
+        if not _deployment_decided(event, excluded, creation_txs):
+            state["events_deployment_undecided"] += 1
         # A written ``upgrade_events.chain_id`` wins; else the mainnet-coalesced chain name. Unknown names aren't
         # guessed.
         if state["chain_id"] is None:
@@ -1454,7 +1533,7 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
             state["events_without_tx_hash"] += 1
             continue
         tx_lc = str(tx).lower()
-        tx_row = tx_rows.get((int(chain), tx_lc)) if chain is not None else None
+        tx_row = _tx_row_for(event, tx_rows)
         if tx_row is None:
             # No receipt fact: stays counted.
             state["events_unlinked"] += 1
@@ -1464,22 +1543,58 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
         state["kinds"][tx_row.executor_kind] = state["kinds"].get(tx_row.executor_kind, 0) + 1
         if tx_row.executor_kind == EXECUTOR_KIND_SAFE_DIRECT:
             state["direct_blocks"].append(tx_row.block_number)
-        creation_row = creation_rows.get((int(chain), (proxy or "").lower()))
-        if event_is_deployment(
-            tx_row,
-            creation_row,
-            proxy_address=proxy or "",
-            event_block=block,
-            pair_event_count=pair_counts.get((cid, tx_lc), 1),
-        ):
+        if excluded:
             state["deployments_excluded"] += 1
             continue
         state["actions"].add(tx_lc)
     return per_contract
 
 
-def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
-    """Per contract: how many upgrade actions its rows support, plus the basis.
+UPGRADE_COUNT_EXACT = "exact"
+UPGRADE_COUNT_UPPER_BOUND = "upper_bound"
+
+
+def _recorded_count_relation(fetch_status: str | None, state: dict, published: int | None) -> str:
+    """How the published action count relates to the ERC-1967 upgrade actions in the fetched history.
+
+    Events with no receipt fact or no tx hash, and events not proven either way to be the deployment, are each
+    counted, so they can only over-count; a fetch that didn't complete leaves the history itself partial, so nothing is
+    proven either way. With no published count (a post-exclusion zero is never proven) there is nothing to relate.
+    """
+    if published is None or fetch_status != UPGRADE_FETCH_COMPLETE:
+        return NOT_DETERMINED
+    if state["events_unlinked"] + state["events_without_tx_hash"] + state["events_deployment_undecided"] > 0:
+        return UPGRADE_COUNT_UPPER_BOUND
+    return UPGRADE_COUNT_EXACT
+
+
+def _fetch_statuses(session, ids: list[int]) -> dict[int, str]:
+    from sqlalchemy import select
+
+    from db.models import Contract
+
+    if not ids:
+        return {}
+    return dict(
+        session.execute(
+            select(Contract.id, Contract.upgrade_history_status).where(
+                Contract.id.in_(ids), Contract.upgrade_history_status.is_not(None)
+            )
+        ).all()
+    )
+
+
+def upgrade_action_counts(session, contract_ids, *, with_completed_empty: bool = False) -> dict[int, dict]:
+    """Per contract: how many upgrade actions its rows support, plus the basis; see ``upgrade_figures``."""
+    return upgrade_figures(session, contract_ids, with_completed_empty=with_completed_empty)[0]
+
+
+def upgrade_figures(
+    session, contract_ids, *, with_completed_empty: bool = False
+) -> tuple[dict[int, dict], dict[int, dict]]:
+    """``(counts, last)`` per contract from one read of the upgrade rows.
+
+    Counts: how many upgrade actions the rows support, plus the basis.
 
     * The unit is the transaction, not the log (one tx carried 19 ``Upgraded`` logs).
     * Deployments are excluded (a proxy's creation emits ``Upgraded``).
@@ -1487,28 +1602,19 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
     rows, so "none recorded" isn't "none happened".
     * A proxy whose last history fetch errored publishes ``None`` whatever its rows say: they are the part that was
     read.
+    * An errored fetch publishes its basis even with no rows; so does a completed one with *with_completed_empty*.
 
-    Still an upper bound: events with no receipt fact stay counted.
+    ``recorded_count_relation`` states what the counters prove about the count; see ``_recorded_count_relation``.
+
+    Last: see ``_last_upgrades``.
     """
-    from sqlalchemy import select
-
-    from db.models import Contract
-
     ids = [int(cid) for cid in (contract_ids or [])]
-    fetch_status = (
-        dict(
-            session.execute(
-                select(Contract.id, Contract.upgrade_history_status).where(
-                    Contract.id.in_(ids), Contract.upgrade_history_status.is_not(None)
-                )
-            ).all()
-        )
-        if ids
-        else {}
-    )
-    folded = _fold_actions(session, ids)
+    fetch_status = _fetch_statuses(session, ids)
+    context = _load_action_context(session, ids)
+    folded = _fold_actions(context)
     for cid, status in fetch_status.items():
-        if status == UPGRADE_FETCH_ERROR and cid not in folded:
+        placeholder = status == UPGRADE_FETCH_ERROR or (with_completed_empty and status == UPGRADE_FETCH_COMPLETE)
+        if placeholder and cid not in folded:
             folded[cid] = {
                 "actions": set(),
                 "events_total": 0,
@@ -1516,6 +1622,7 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
                 "tx_facts_present": 0,
                 "events_unlinked": 0,
                 "deployments_excluded": 0,
+                "events_deployment_undecided": 0,
                 "kinds": {},
                 "direct_blocks": [],
                 "chain_id": None,
@@ -1525,15 +1632,18 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
         count = len(state["actions"]) + state["events_without_tx_hash"]
         direct = [b for b in state["direct_blocks"] if b is not None]
         fetch_errored = fetch_status.get(cid) == UPGRADE_FETCH_ERROR
+        published = count if count > 0 and not fetch_errored else None
         out[cid] = {
-            "count": count if count > 0 and not fetch_errored else None,
+            "count": published,
             "basis": {
                 "history_fetch_status": fetch_status.get(cid) or NOT_DETERMINED,
+                "recorded_count_relation": _recorded_count_relation(fetch_status.get(cid), state, published),
                 "events_total": state["events_total"],
                 "tx_facts_present": state["tx_facts_present"],
                 "events_unlinked": state["events_unlinked"],
                 "events_without_tx_hash": state["events_without_tx_hash"],
                 "deployments_excluded": state["deployments_excluded"],
+                "events_deployment_undecided": state["events_deployment_undecided"],
                 "executor_kinds": dict(sorted(state["kinds"].items())),
                 # Only ERC-1967 topics are folded, so no event doesn't prove no upgrade.
                 "recorded_event_coverage": NOT_DETERMINED,
@@ -1545,6 +1655,65 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
                 "direct_upgrade_witnessed_at_block": min(direct) if direct else None,
             },
         }
+    return out, _last_upgrades(context, fetch_status)
+
+
+LAST_UPGRADE_ESTABLISHED = "established"
+
+
+def _not_before(a, b) -> bool | None:
+    """``a`` is no earlier than ``b``; ``None`` when the rows carry no common ordering (block vs block, else time vs
+    time).
+    """
+    if a.block_number is not None and b.block_number is not None:
+        return a.block_number >= b.block_number
+    if a.timestamp is not None and b.timestamp is not None:
+        return a.timestamp >= b.timestamp
+    return None
+
+
+def _latest_event(events):
+    """The event provably no earlier than every other, or ``None`` when no such event exists."""
+    blocks = [e.block_number for e in events if e.block_number is not None]
+    times = [e.timestamp for e in events if e.timestamp is not None]
+    # A dominating event holds the max block if it has one, else the max time.
+    candidates = [e for e in events if blocks and e.block_number == max(blocks)]
+    candidates += [e for e in events if e.block_number is None and times and e.timestamp == max(times)]
+    dominating = [m for m in candidates if all(e is m or _not_before(m, e) for e in events)]
+    if not dominating:
+        return None
+    return max(dominating, key=lambda e: (e.timestamp is not None, e.id))
+
+
+def _last_upgrades(context, fetch_status: dict[int, str]) -> dict[int, dict]:
+    """Per contract with a recorded non-deployment upgrade: the latest one's block and timestamp, from one row.
+
+    ``state`` is ``established`` only when the history fetch completed (the rule the count follows: a partial or
+    unknown read may miss the latest), one row is provably no earlier than all others, and that row is proven not to be
+    the deployment. Otherwise, including rows with no common ordering, it is ``not_determined`` with no pair; an errored
+    fetch with no rows says so too.
+    """
+    events, tx_rows, creation_rows = context
+    pair_counts = _event_pair_counts(events)
+    creation_txs = _witnessed_creation_txs(events, tx_rows, creation_rows)
+    by_contract: dict[int, list[Any]] = {}
+    for event in events:
+        if _is_proven_deployment(event, _tx_row_for(event, tx_rows), creation_rows, pair_counts):
+            continue
+        by_contract.setdefault(int(event.contract_id), []).append(event)
+    undetermined = {"block": None, "timestamp": None, "state": NOT_DETERMINED}
+    out: dict[int, dict] = {
+        cid: dict(undetermined) for cid, status in fetch_status.items() if status == UPGRADE_FETCH_ERROR
+    }
+    for cid, rows in by_contract.items():
+        latest = _latest_event(rows) if fetch_status.get(cid) == UPGRADE_FETCH_COMPLETE else None
+        if latest is not None and not _deployment_decided(latest, False, creation_txs):
+            latest = None
+        out[cid] = (
+            {"block": latest.block_number, "timestamp": latest.timestamp, "state": LAST_UPGRADE_ESTABLISHED}
+            if latest is not None
+            else dict(undetermined)
+        )
     return out
 
 
@@ -1557,7 +1726,7 @@ def governance_actions_for(session, contract_ids) -> set[tuple[int, str]]:
     ``upgrade_action_counts``.
     """
     actions: set[tuple[int, str]] = set()
-    for state in _fold_actions(session, contract_ids).values():
+    for state in _fold_actions(_load_action_context(session, contract_ids)).values():
         chain_id = state["chain_id"]
         if chain_id is None:
             continue

@@ -43,18 +43,31 @@ describe("ContractNode — proxy indicator", () => {
     expect(text).not.toMatch(/upgrades/);
   });
 
-  it("omits the count when upgrade_count is null or zero", () => {
-    const cNull = renderNode({ address: "0x3", name: "Beacon", role: "utility", is_proxy: true, proxy_type: "eip1967", upgrade_count: null });
+  it("omits the count when the entry makes no upgrade claim, and never renders a zero", () => {
+    const cNull = renderNode({ address: "0x3", name: "Beacon", role: "utility", is_proxy: true, proxy_type: "eip1967", upgrade_count: null, upgrade_count_basis: null });
     const elNull = cNull.querySelector(".ps-node-proxy");
     expect(elNull.textContent).toMatch(/PROXY/);
     expect(elNull.textContent).not.toMatch(/upgrade/i);
 
+    // The backend never publishes a zero; a stray one is not a proven count.
     const cZero = renderNode({ address: "0x4", name: "Beacon0", role: "utility", is_proxy: true, proxy_type: "eip1967", upgrade_count: 0 });
     expect(cZero.querySelector(".ps-node-proxy").textContent).not.toMatch(/upgrade/i);
   });
 
+  it("carries the count's relation to the recorded upgrades", () => {
+    const basis = (relation) => ({ history_fetch_status: "complete", recorded_count_relation: relation });
+    const text = (over) =>
+      renderNode({ address: "0x8", name: "P", role: "utility", is_proxy: true, proxy_type: "eip1967", ...over })
+        .querySelector(".ps-node-proxy").textContent;
+    expect(text({ upgrade_count: 3, upgrade_count_basis: basis("exact") })).toContain("3 recorded upgrades");
+    expect(text({ upgrade_count: 3, upgrade_count_basis: basis("upper_bound") })).toContain("up to 3 upgrades");
+    expect(text({ upgrade_count: 3, upgrade_count_basis: basis("not_determined") })).toContain("3 upgrades · bound not determined");
+    // A basis without a count is a count not determined, never zero.
+    expect(text({ upgrade_count: null, upgrade_count_basis: basis("not_determined") })).toContain("upgrades not determined");
+  });
+
   it("labels a gnosis_safe proxy as SAFE PROXY", () => {
-    const c = renderNode({ address: "0x5", name: "SafeProxy", role: "utility", is_proxy: true, proxy_type: "gnosis_safe", upgrade_count: 0 });
+    const c = renderNode({ address: "0x5", name: "SafeProxy", role: "utility", is_proxy: true, proxy_type: "gnosis_safe", upgrade_count: null });
     expect(c.querySelector(".ps-node-proxy").textContent).toMatch(/SAFE PROXY/);
   });
 
@@ -127,5 +140,23 @@ describe("ContractNode — reach chip", () => {
     const c = renderWith({ reachNdChip: "reach unconfirmed" });
     expect(c.querySelector(".ps-node-chip--reach-nd")).toBeNull();
     expect(c.querySelector(".ps-node").className).not.toContain("ps-node-reach-nd");
+  });
+});
+
+describe("ContractNode — USD lower bound", () => {
+  it("marks a balance over unvalued holdings as a lower bound", () => {
+    const c = renderNode({ address: "0x9", name: "V", role: "value_handler", total_usd: 3_000_000, holdings_coverage: { unvalued_rows: 1 } });
+    expect(c.querySelector(".ps-node-balance").textContent).toBe("≥ $3.0M");
+    const exact = renderNode({ address: "0x9", name: "V", role: "value_handler", total_usd: 3_000_000, holdings_coverage: { unvalued_rows: 0 } });
+    expect(exact.querySelector(".ps-node-balance").textContent).toBe("$3.0M");
+  });
+});
+
+describe("ContractNode — role evidence", () => {
+  it("does not show a role reached through not-determined inputs as a fact", () => {
+    const c = renderNode({ address: "0xa", name: "X", role: "utility", role_evidence: "not_determined" });
+    expect(c.querySelector(".ps-node-role").textContent).toBe("Role not determined");
+    const w = renderNode({ address: "0xa", name: "X", role: "utility", role_evidence: "witnessed" });
+    expect(w.querySelector(".ps-node-role").textContent).toBe("Utility");
   });
 });

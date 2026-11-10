@@ -222,6 +222,31 @@ describe("BalanceTable — retired classifications and partial observations", ()
     expect(screen.getByText(/not added to the retained total/i)).toBeInTheDocument();
     expect(screen.getByText("$1.2K observed")).toBeInTheDocument();
   });
+  it("renders the observed total as a lower bound when rows have no USD value", () => {
+    render(<BalanceTable machine={machine([row(), row({ token_symbol: "UNK", usd_value: null, usd_value_state: "not_determined" })], {
+      total_usd: 1234,
+      holdings_coverage: { rows: 2, page_cap: 100, state: "not_determined", unvalued_rows: 1 },
+    })} />);
+    expect(screen.getByText("≥ $1.2K observed")).toBeInTheDocument();
+  });
+  it("names the price observation time beside the balance observation time", () => {
+    render(<BalanceTable machine={machine([row({
+      token_symbol: "BIG", usd_value: 5000, observed_at: "2026-11-01T10:00:00+00:00", price_observed_at: "2026-11-01T09:55:00+00:00",
+    })])} />);
+    expect(screen.getByText("BIG").closest(".ps-balance-row").querySelector(".ps-balance-values")).toHaveAttribute(
+      "title",
+      "Observed 2026-11-01T10:00:00+00:00 · Price observed 2026-11-01T09:55:00+00:00",
+    );
+  });
+  it("keeps a priced row's missing price time visible as not determined, and an unpriced row's out", () => {
+    render(<BalanceTable machine={machine([
+      row({ token_symbol: "BIG", usd_value: 5000, observed_at: "2026-11-01T10:00:00+00:00" }),
+      row({ token_symbol: "UNK", usd_value: null, usd_value_state: "not_determined", observed_at: "2026-11-01T10:00:00+00:00" }),
+    ])} />);
+    const title = (sym) => screen.getByText(sym).closest(".ps-balance-row").querySelector(".ps-balance-values").getAttribute("title");
+    expect(title("BIG")).toBe("Observed 2026-11-01T10:00:00+00:00 · Price observation time not determined");
+    expect(title("UNK")).toBe("Observed 2026-11-01T10:00:00+00:00");
+  });
   it("does not size tokens from assumed decimals", () => {
     render(<BalanceTable machine={machine([row({ decimals_known: false })])} />);
     expect(screen.getByText("quantity scale unknown")).toBeInTheDocument();

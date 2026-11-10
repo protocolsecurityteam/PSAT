@@ -230,3 +230,33 @@ describe("InspectorCard principal terminal + signer notes", () => {
     expect(container.textContent).toContain("signers all also sign");
   });
 });
+
+describe("InspectorCard principal controller read", () => {
+  const SAFE = "0xaaaa000000000000000000000000000000000aaa";
+  const principal = (controllerRead) => ({
+    address: SAFE,
+    resolvedType: "safe",
+    details: { owners: ["0xa", "0xb"], threshold: 2 },
+    origins: ["direct owner"],
+    label: null,
+    controllerRead,
+  });
+  const origin = (p) =>
+    render(<InspectorCard selected={selectedWithClaims([], [p])} />).container.querySelector(".ps-principal-origin").textContent;
+
+  it("appends the matching read's block and source to the origin line", () => {
+    expect(origin(principal({ value: SAFE, block_number: 21000000, block_basis: "head_before_read", observed_via: "eth_call" }))).toBe(
+      "direct owner · read at latest, head ≈ block 21000000 · via eth_call",
+    );
+    expect(origin(principal({ value: SAFE, block_number: 123, block_basis: "log_block", observed_via: "event_log" }))).toBe(
+      "direct owner · set at block 123 · from event log",
+    );
+    expect(origin(principal({ value: SAFE, block_number: null, block_basis: "not_determined", observed_via: "storage_poll" }))).toBe(
+      "direct owner · read block not determined · from storage poll",
+    );
+  });
+
+  it("leaves the origin line alone with no matching read", () => {
+    expect(origin(principal(null))).toBe("direct owner");
+  });
+});

@@ -29,6 +29,7 @@ const FIXTURE = {
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
+      upgrade_count_basis: { history_fetch_status: "complete", events_total: 3, events_unlinked: 0, events_without_tx_hash: 0, deployments_excluded: 1, recorded_count_relation: "exact" },
       job_id: "vault-job",
       functions: [
         {
@@ -51,7 +52,8 @@ const FIXTURE = {
       display_name: "LiquidityPool",
       role: "value_handler",
       is_proxy: false,
-      upgrade_count: 0,
+      upgrade_count: null,
+      upgrade_count_basis: null,
       job_id: "pool-job",
       functions: [
         {

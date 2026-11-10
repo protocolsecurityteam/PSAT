@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { chainColor, chainLabel } from "../chainMeta.js";
-import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
+import { formatDelay, principalLabel, shortAddr } from "../format.js";
+import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
+import { controllerValuesNote } from "../../vocab/controllerReads.js";
+import { analysisProvenanceLine } from "../../vocab/analysisProvenance.js";
+import { roleLabel } from "../../vocab/role.js";
+import { upgradeCountText } from "../../vocab/upgradeFacts.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
 import { dedupeAndTagRows } from "../layout/governancePath.js";
@@ -55,6 +60,7 @@ export function EntityCard({
         name: row.contractName,
         is_proxy: Boolean(m?.is_proxy),
         total_usd: m?.total_usd || 0,
+        usdLowerBound: usdIsLowerBound(m),
         functions: row.functions,
       };
     });
@@ -68,7 +74,13 @@ export function EntityCard({
     for (const addr of reachDistances ? reachDistances.keys() : []) {
       const m = machineByAddr.get(addr);
       if (!m) continue;
-      rows.push({ address: m.address, name: m.name, is_proxy: Boolean(m.is_proxy), total_usd: m.total_usd || 0 });
+      rows.push({
+        address: m.address,
+        name: m.name,
+        is_proxy: Boolean(m.is_proxy),
+        total_usd: m.total_usd || 0,
+        usdLowerBound: usdIsLowerBound(m),
+      });
     }
     return dedupeAndTagRows(rows);
   }, [reachDistances, machineByAddr]);
@@ -92,8 +104,16 @@ export function EntityCard({
   const name = machine?.name || (principal ? principalLabel(principal.label, principal.type, principal.address) : shortAddr(address));
   const fullAddress = machine?.address || principal?.address || address;
 
-  const usdLabel = isMachine ? formatUsd(machine.total_usd) : null;
+  const usdLabel = isMachine ? formatUsdTotal(machine.total_usd, usdIsLowerBound(machine)) : null;
   const enumerationNote = controllerEnumerationNote(machine) || controllerEnumerationNote(principal);
+  const valuesNote = isMachine ? controllerValuesNote(machine) : null;
+  // One badge for every route to an unread controller set; the title names each.
+  const controllersUnread = [
+    ...(enumerationNote ? enumerationNote.statuses.map((s) => s.word) : []),
+    ...(valuesNote?.notDetermined ? [valuesNote.word] : []),
+  ];
+  const upgradeText = isMachine ? upgradeCountText(machine) : null;
+  const provenance = isMachine ? analysisProvenanceLine(machine) : null;
 
   const tabCounts = isMachine
     ? {
@@ -122,6 +142,9 @@ export function EntityCard({
           <div className="ps-machine-title-wrap">
             <div className="ps-machine-name">{name}</div>
             <div className="ps-machine-address">{fullAddress}</div>
+            {provenance && (
+              <div className="ps-machine-address" title={provenance.title}>{provenance.text}</div>
+            )}
           </div>
         </div>
         <div className="ps-machine-badges">
@@ -133,7 +156,7 @@ export function EntityCard({
           )}
           {isMachine && (
             <>
-              <span className="tag tag-md ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>
+              <span className="tag tag-md ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{roleLabel(machine)}</span>
               {/*
                 Gated on total_usd>0 so a pull-then-forward router isn't
                 mislabeled.
@@ -142,7 +165,7 @@ export function EntityCard({
                 <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#22c55e" }}>Deposit destination</span>
               ) : null}
               {machine.is_proxy ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{machine.proxy_type || "proxy"}</span> : null}
-              {machine.upgrade_count != null ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
+              {upgradeText ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{upgradeText}</span> : null}
               <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
               {usdLabel && <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
               {/*
@@ -160,14 +183,17 @@ export function EntityCard({
               ) : null}
             </>
           )}
-          {enumerationNote && (
+          {(enumerationNote || valuesNote?.notDetermined) && (
             <span
               className="tag tag-md ps-badge ps-badge-not-determined"
               style={{ "--badge-accent": "#b45309" }}
-              title={enumerationNote.statuses.map((s) => s.word).join("; ")}
+              title={controllersUnread.join("; ")}
             >
               Controllers not determined
             </span>
+          )}
+          {valuesNote && !valuesNote.notDetermined && (
+            <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#b45309" }}>{valuesNote.word}</span>
           )}
           {principal && (
             <>

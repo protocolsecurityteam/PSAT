@@ -3,6 +3,7 @@ import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
 import { claimWitnessFacts } from "../../vocab/witnessFacts.js";
 import { sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../vocab/principalNotes.js";
+import { controllerReadText } from "../../vocab/controllerReads.js";
 import { clickable } from "../../shared/clickable.js";
 
 // A contract principal is a way-point, never a settled key;
@@ -138,7 +139,7 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
       <div className="ps-principal-origin">
         {indirect
           ? `via ${principal.path.slice(0, -1).map((p) => shortAddr(p.address)).join(" → ")}`
-          : principal.origins.join(" · ")}
+          : [...principal.origins, controllerReadText(principal.controllerRead)].filter(Boolean).join(" · ")}
       </div>
     </div>
   );

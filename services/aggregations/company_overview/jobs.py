@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from db.models import Contract, Job, JobStatus, Protocol, derive_job_chain_id
 from services.company_page_dependencies import track
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
+from utils.scoring_status import NOT_DETERMINED
 
 from .entity_keys import _entity_key
 
@@ -308,8 +309,15 @@ class MemberAnalysisRead(NamedTuple):
     stale_analyzed: list[dict[str, Any]]
 
 
-def members_without_analysis(session: Session, protocol_id: int) -> MemberAnalysisRead:
-    """The protocol's members by analysis state.
+# Per-contract analysis states beside the two ``MEMBER_ANALYSIS_*`` failure tokens.
+ANALYSIS_CURRENT = "current_analyzer"
+ANALYSIS_OLDER = "older_analyzer"
+
+
+def contract_analysis_states(
+    session: Session, contracts: list[tuple[int, str, str | None]]
+) -> dict[int, dict[str, Any]]:
+    """``(contract_id, address, chain)`` -> analysis state, by one rule for every reader.
 
     A completed job of the current analyzer, or an older one with no failed attempt after it, counts as analysed. An
     older analysis followed by a failed attempt doesn't: the re-analysis failed, so the page would be showing a
@@ -317,14 +325,9 @@ def members_without_analysis(session: Session, protocol_id: int) -> MemberAnalys
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
-    members = session.execute(
-        select(Contract.id, Contract.address, Contract.chain, Contract.contract_name)
-        .where(Contract.protocol_id == protocol_id, Contract.address.is_not(None))
-        .order_by(Contract.id)
-    ).all()
-    if not members:
-        return MemberAnalysisRead(0, [], [])
-    addresses = sorted({address.lower() for _, address, _, _ in members})
+    if not contracts:
+        return {}
+    addresses = sorted({address.lower() for _, address, _ in contracts})
     track(session, "address", addresses)
     rows = session.execute(
         select(
@@ -356,49 +359,126 @@ def members_without_analysis(session: Session, protocol_id: int) -> MemberAnalys
             _MemberJob(job_id, status, recency, eras.get(job_id))
         )
 
-    out: list[dict[str, Any]] = []
-    stale_analyzed: list[dict[str, Any]] = []
-    for contract_id, address, chain, name in members:
+    out: dict[int, dict[str, Any]] = {}
+    for contract_id, address, chain in contracts:
         jobs = jobs_by_entity.get(_entity_key(_canonical_chain_name(chain), address), [])
         completed = [job for job in jobs if job.status == JobStatus.completed]
         if any(job.era == ANALYSIS_SCHEMA_VERSION for job in completed):
+            out[contract_id] = {"analysis_state": ANALYSIS_CURRENT}
             continue
         stale = max(completed, key=lambda job: (job.recency, str(job.id))) if completed else None
         # Only finished attempts are named: a queued or running job changes nothing the page republishes on.
         failed = [
             job for job in jobs if job.status in _FAILED_STATUSES and (stale is None or job.recency > stale.recency)
         ]
+        stale_fields = {
+            "stale_analysis_job_id": str(stale.id) if stale else None,
+            "stale_analysis_version": stale.era if stale else None,
+        }
         if stale is not None and not failed:
+            out[contract_id] = {"analysis_state": ANALYSIS_OLDER, **stale_fields}
+            continue
+        last_failed = max(failed, key=lambda job: (job.recency, str(job.id))) if failed else None
+        out[contract_id] = {
+            "analysis_state": MEMBER_ANALYSIS_FAILED if failed else MEMBER_ANALYSIS_NOT_COMPLETED,
+            "last_failed_job_id": str(last_failed.id) if last_failed else None,
+            "last_failed_job_status": last_failed.status.value if last_failed else None,
+            **stale_fields,
+        }
+    return out
+
+
+def members_without_analysis(session: Session, protocol_id: int) -> MemberAnalysisRead:
+    """The protocol's members by analysis state; see ``contract_analysis_states``."""
+    members = session.execute(
+        select(Contract.id, Contract.address, Contract.chain, Contract.contract_name)
+        .where(Contract.protocol_id == protocol_id, Contract.address.is_not(None))
+        .order_by(Contract.id)
+    ).all()
+    if not members:
+        return MemberAnalysisRead(0, [], [])
+    states = contract_analysis_states(session, [(cid, address, chain) for cid, address, chain, _ in members])
+
+    out: list[dict[str, Any]] = []
+    stale_analyzed: list[dict[str, Any]] = []
+    for contract_id, address, chain, name in members:
+        state = states[contract_id]
+        if state["analysis_state"] == ANALYSIS_CURRENT:
+            continue
+        identity = {"contract_id": contract_id, "address": address.lower(), "chain": chain, "name": name}
+        if state["analysis_state"] == ANALYSIS_OLDER:
             stale_analyzed.append(
                 {
-                    "contract_id": contract_id,
-                    "address": address.lower(),
-                    "chain": chain,
-                    "name": name,
-                    "stale_analysis_job_id": str(stale.id),
-                    "stale_analysis_version": stale.era,
+                    **identity,
+                    "stale_analysis_job_id": state["stale_analysis_job_id"],
+                    "stale_analysis_version": state["stale_analysis_version"],
                 }
             )
             continue
-        last_failed = max(failed, key=lambda job: (job.recency, str(job.id))) if failed else None
-        out.append(
-            {
-                "contract_id": contract_id,
-                "address": address.lower(),
-                "chain": chain,
-                "name": name,
-                "analysis_state": MEMBER_ANALYSIS_FAILED if failed else MEMBER_ANALYSIS_NOT_COMPLETED,
-                "last_failed_job_id": str(last_failed.id) if last_failed else None,
-                "last_failed_job_status": last_failed.status.value if last_failed else None,
-                "stale_analysis_job_id": str(stale.id) if stale else None,
-                "stale_analysis_version": stale.era if stale else None,
-            }
-        )
+        out.append({**identity, **state})
     return MemberAnalysisRead(
         len(members),
         sorted(out, key=lambda m: (m["analysis_state"], m["chain"] or "", m["address"])),
         sorted(stale_analyzed, key=lambda m: (m["chain"] or "", m["address"])),
     )
+
+
+def _static_donor(job: Job) -> str | None:
+    request = job.request if isinstance(job.request, dict) else {}
+    donor = request.get("cache_source_job_id") or request.get("cross_chain_cache_source_job_id")
+    return str(donor) if donor else None
+
+
+def analysis_provenance(session: Session, jobs: list[Job], contracts_by_job_id: dict[Any, Contract]) -> dict[str, dict]:
+    """Rendered job id -> where its analysis came from, with one era lookup for all of them.
+
+    The version is the static stage's era (a reused stage carries its donor's); the times are this job's own start and
+    last pipeline pass. While the contract row points at another job (a re-analysis in flight), the page can mix both
+    jobs' rows, so every field is ``not_determined``.
+    """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    unique = {job.id: job for job in jobs}
+    eras = _completed_job_eras(
+        session,
+        [
+            (
+                job.id,
+                job.analysis_schema_version,
+                job.request.get("cache_source_job_id") if isinstance(job.request, dict) else None,
+            )
+            for job in unique.values()
+        ],
+    )
+    out: dict[str, dict] = {}
+    for job_id, job in unique.items():
+        contract = contracts_by_job_id.get(job_id)
+        if contract is None or contract.job_id != job_id:
+            out[str(job_id)] = {
+                "job_id": str(job_id),
+                "state": NOT_DETERMINED,
+                "static_analyzer_version": NOT_DETERMINED,
+                "static_reused_from_job_id": NOT_DETERMINED,
+                "started_at": NOT_DETERMINED,
+                "last_pipeline_pass_at": NOT_DETERMINED,
+            }
+            continue
+        era = eras.get(job_id)
+        if era == ANALYSIS_SCHEMA_VERSION:
+            state = ANALYSIS_CURRENT
+        elif isinstance(era, int) and era < ANALYSIS_SCHEMA_VERSION:
+            state = ANALYSIS_OLDER
+        else:
+            state = NOT_DETERMINED
+        out[str(job_id)] = {
+            "job_id": str(job_id),
+            "state": state,
+            "static_analyzer_version": era if isinstance(era, int) else NOT_DETERMINED,
+            "static_reused_from_job_id": _static_donor(job),
+            "started_at": job.created_at.isoformat() if job.created_at else NOT_DETERMINED,
+            "last_pipeline_pass_at": job.updated_at.isoformat() if job.updated_at else NOT_DETERMINED,
+        }
+    return out
 
 
 def _canonical_chain_name(contract_chain: str | None) -> str:

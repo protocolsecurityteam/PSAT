@@ -16,7 +16,6 @@ export const ANALYSIS_LIST = [
     company: "etherfi",
     address: "0x2222222222222222222222222222222222222222",
     contract_name: "LiquidityPool",
-    upgrade_count: 0,
   },
   {
     job_id: "c",
@@ -34,6 +33,7 @@ export const ETHERFI_COMPANY = {
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
+      upgrade_count_basis: { history_fetch_status: "complete", events_total: 3, events_unlinked: 0, events_without_tx_hash: 0, deployments_excluded: 1, recorded_count_relation: "exact" },
       control_model: "timelock",
       controllers: { owner: "0xMultiSig" },
       functions: [],
@@ -41,7 +41,8 @@ export const ETHERFI_COMPANY = {
     {
       address: "0x2222222222222222222222222222222222222222",
       name: "LiquidityPool",
-      upgrade_count: 0,
+      upgrade_count: null,
+      upgrade_count_basis: null,
       controllers: {},
       functions: [],
     },
@@ -112,14 +113,27 @@ function fn(name, effectLabels, principals = [], extra = {}) {
   };
 }
 
-function principal(address, resolvedType, details = {}, label = null) {
+function principal(address, resolvedType, details = {}, label = null, sourceControllerId = null) {
   return {
     address,
     resolved_type: resolvedType,
     label,
     details,
     source_contract: null,
-    source_controller_id: null,
+    source_controller_id: sourceControllerId,
+  };
+}
+
+// Overview `analysis_provenance.job` as build_company_overview publishes it.
+function provenanceJob(jobId, over = {}) {
+  return {
+    job_id: jobId,
+    state: "current_analyzer",
+    static_analyzer_version: 12,
+    static_reused_from_job_id: null,
+    started_at: "2026-07-12T08:00:00+00:00",
+    last_pipeline_pass_at: "2026-07-12T09:30:00+00:00",
+    ...over,
   };
 }
 
@@ -135,13 +149,28 @@ export const ETHERFI_COMPANY_RICH = {
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
+      upgrade_count_basis: { history_fetch_status: "complete", events_total: 3, events_unlinked: 0, events_without_tx_hash: 0, deployments_excluded: 1, recorded_count_relation: "exact" },
       control_model: "timelock",
       controllers: { owner: SAFE_ADDR },
+      controller_reads: {
+        owner: { value: SAFE_ADDR, block_number: 21000000, block_basis: "head_before_read", observed_via: "eth_call" },
+      },
+      controller_values_state: null,
+      last_upgrade_block: 20990000,
+      last_upgrade_timestamp: "2026-07-10T16:20:00+00:00",
+      last_upgrade_state: "established",
+      role: "utility",
+      role_evidence: "witnessed",
       job_id: "vault-job",
+      impl_job_id: "vault-impl-job",
+      analysis_provenance: {
+        job: provenanceJob("vault-job"),
+        impl_job: provenanceJob("vault-impl-job", { static_reused_from_job_id: "donor-job-0001" }),
+      },
       functions: [
         fn("upgrade", ["upgrade"], [principal(TIMELOCK_ADDR, "timelock", { delay: 86400 })]),
-        fn("pause", ["pause"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
-        fn("unpause", ["unpause"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
+        fn("pause", ["pause"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 }, null, "owner")]),
+        fn("unpause", ["unpause"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 }, null, "owner")]),
         fn("deposit", ["asset_pull"], [], { public: true }),
         fn("withdraw", ["asset_send"], [principal(EOA_ADDR, "eoa")]),
         fn("setFee", ["config"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
@@ -151,9 +180,22 @@ export const ETHERFI_COMPANY_RICH = {
       address: POOL_ADDR,
       name: "LiquidityPool",
       is_proxy: false,
-      upgrade_count: 0,
+      upgrade_count: null,
+      upgrade_count_basis: null,
       controllers: {},
+      controller_reads: {},
+      controller_values_state: null,
+      last_upgrade_block: null,
+      last_upgrade_timestamp: null,
+      last_upgrade_state: null,
+      // The fall-through role with every input unread.
+      role: "utility",
+      role_evidence: "not_determined",
       job_id: "pool-job",
+      analysis_provenance: {
+        job: provenanceJob("pool-job", { state: "older_analyzer", static_analyzer_version: 11 }),
+        impl_job: null,
+      },
       functions: [
         fn("rebalance", ["asset_send"], [principal(VAULT_ADDR, "contract", {}, "Vault")]),
         fn("setOracle", ["config"], [], {}), // no principals → unknown guard
@@ -173,6 +215,23 @@ export const ETHERFI_COMPANY_RICH = {
     },
   ],
   all_addresses_count: 5,
+  member_analysis: {
+    members: 2,
+    analyzed: 2,
+    not_determined: 0,
+    by_state: { analysis_failed: 0, analysis_not_completed: 0 },
+    not_analyzed: [],
+    analyzed_at_older_version: [
+      {
+        contract_id: 2,
+        address: POOL_ADDR,
+        chain: "ethereum",
+        name: "LiquidityPool",
+        stale_analysis_job_id: "pool-job",
+        stale_analysis_version: 11,
+      },
+    ],
+  },
   // Top-level governance principals — the exact shape /api/company emits
   // (services/aggregations/company_overview/governance_view.py builds
   // `principals` with type/label/details/controls

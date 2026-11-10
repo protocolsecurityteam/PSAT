@@ -253,12 +253,15 @@ describe("CompanyOverview — prepared provenance", () => {
     expect(screen.getAllByText(/^Updating — data as of/)).toHaveLength(1);
   });
 
-  it("shows no banner when every section is fresh", async () => {
+  it("shows a quiet as-of, never the updating banner, when every section is fresh", async () => {
     const served = installPrepared("prepared");
     render(<CompanyOverview companyName="twinco" />);
     await screen.findByText("Covered");
     await waitFor(() => expect(served.summary).toBe(1));
     await act(async () => {});
     expect(screen.queryByText(/^Updating — data as of/)).toBeNull();
+    expect(
+      await screen.findByText(`Data as of ${new Date("2026-09-29T09:00:00Z").toLocaleString()}`),
+    ).toBeInTheDocument();
   });
 });

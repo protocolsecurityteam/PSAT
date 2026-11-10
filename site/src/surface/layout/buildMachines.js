@@ -29,7 +29,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
 
       for (const fn of rawFunctions) {
         const lane = laneForFunction(fn);
-        const direct = collectDirectCallers(fn);
+        const direct = collectDirectCallers(fn, contract);
         const indirect = collectIndirectCallers(direct, indirectCtx);
         lanes[lane].push({
           key: `${contract.address}:${fn.selector || fn.function}`,

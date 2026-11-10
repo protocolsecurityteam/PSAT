@@ -1,5 +1,5 @@
 {
-  "payload_schema": 3,
+  "payload_schema": 4,
   "skeleton": {
     "all_addresses_count": "int",
     "company": "str",
@@ -7,6 +7,17 @@
     "contracts": [
       {
         "address": "str",
+        "analysis_provenance": {
+          "impl_job": "NoneType",
+          "job": {
+            "job_id": "str",
+            "last_pipeline_pass_at": "str",
+            "started_at": "str",
+            "state": "str",
+            "static_analyzer_version": "int",
+            "static_reused_from_job_id": "NoneType"
+          }
+        },
         "balances": [],
         "capabilities": [],
         "chain": "str",
@@ -16,6 +27,8 @@
           "nodes": []
         },
         "control_model": "NoneType",
+        "controller_reads": {},
+        "controller_values_state": "NoneType",
         "controllers": {},
         "deployer": "NoneType",
         "has_timelock": "NoneType",
@@ -33,6 +46,7 @@
         "is_proxy": "bool",
         "job_id": "str",
         "last_upgrade_block": "NoneType",
+        "last_upgrade_state": "NoneType",
         "last_upgrade_timestamp": "NoneType",
         "name": "str",
         "other_callers": [],

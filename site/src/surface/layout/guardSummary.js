@@ -3,6 +3,7 @@ import { TYPE_META } from "../meta.js";
 import { formatDelay, shortAddr } from "../format.js";
 import { collectDirectCallers } from "./controlGraph.js";
 import { oneShotState } from "./oneShot.js";
+import { safeDetailsSignersText } from "../../vocab/safeThreshold.js";
 
 // Maps implementation and secondary-impl addresses to the collapsed canvas name
 // too.
@@ -31,16 +32,12 @@ function contractDisplayNames(companyData) {
 function describeCaller(principal, companyData) {
   const kind = principal.resolvedType === "unknown" ? "address" : (principal.resolvedType || "address");
   const meta = TYPE_META[kind] || TYPE_META.unknown;
-  const owners = Array.isArray(principal.details?.owners) ? principal.details.owners.length : 0;
-  const threshold = Number(principal.details?.threshold);
   const delay = formatDelay(principal.details?.delay);
   let name;
   let sub = null;
   if (kind === "safe") {
     name = "Safe";
-    sub = owners
-      ? (Number.isFinite(threshold) && threshold > 0 ? `${threshold}/${owners}` : `${owners} sig`)
-      : shortAddr(principal.address);
+    sub = safeDetailsSignersText(principal.details) || shortAddr(principal.address);
   } else if (kind === "timelock") {
     name = "Timelock";
     sub = delay || shortAddr(principal.address);
@@ -138,12 +135,11 @@ export function guardSummary(fn, companyData) {
   const principalKind = principal.resolvedType === "unknown" ? "address" : principal.resolvedType;
   const type = TYPE_META[principalKind] || TYPE_META.unknown;
   const safeOwners = Array.isArray(principal.details?.owners) ? principal.details.owners.length : 0;
-  const threshold = Number(principal.details?.threshold);
   const delay = formatDelay(principal.details?.delay);
 
   let sublabel = shortAddr(principal.address);
   if (principal.resolvedType === "safe" && safeOwners) {
-    sublabel = Number.isFinite(threshold) && threshold > 0 ? `${threshold}/${safeOwners}` : `${safeOwners} sig`;
+    sublabel = safeDetailsSignersText(principal.details);
   } else if (principal.resolvedType === "timelock" && delay) {
     sublabel = delay;
   } else if (principal.resolvedType === "contract") {

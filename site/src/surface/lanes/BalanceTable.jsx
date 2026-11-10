@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { formatUsd } from "../format.js";
+import { usdIsLowerBound } from "../../vocab/usdBound.js";
 
 // `usd_value: 0` is priced (under half a cent); `null` is unpriced (most rows).
 // Both are falsy in JS and used to print the same dash; `formatUsd` also
@@ -11,9 +12,9 @@ function usdCell(row) {
     // Pre-fix payloads have no state key; `usd_value` null already means
     // unpriced.
     : row?.usd_value != null;
-  if (!determined) return { text: "not priced", className: "ps-balance-usd unpriced" };
+  if (!determined) return { text: "not priced", className: "ps-balance-usd unpriced", priced: false };
   const formatted = formatUsd(row.usd_value);
-  return { text: formatted || "$0.00", className: "ps-balance-usd" };
+  return { text: formatted || "$0.00", className: "ps-balance-usd", priced: true };
 }
 
 // `holdings_coverage.state` can only say truncation isn't ruled out
@@ -22,6 +23,16 @@ function coverageNote(machine) {
   const cov = machine?.holdings_coverage;
   if (cov?.state !== "may_be_incomplete") return null;
   return `Holdings may be incomplete: the provider read was interrupted or capped. Retained observations may be older; omitted assets are unknown.`;
+}
+
+// The balance and its USD price are observed separately; a priced row names
+// both times.
+function rowTimes(row, priced) {
+  const parts = [row.observed_at ? `Observed ${row.observed_at}` : "Observation time unknown"];
+  if (priced) {
+    parts.push(row.price_observed_at ? `Price observed ${row.price_observed_at}` : "Price observation time not determined");
+  }
+  return parts.join(" · ");
 }
 
 function BalanceRow({ row }) {
@@ -41,7 +52,7 @@ function BalanceRow({ row }) {
         <span className="ps-balance-symbol">{row.token_symbol}</span>
         <span className="ps-balance-name">{row.token_name}</span>
       </div>
-      <div className="ps-balance-values" title={row.observed_at ? `Observed ${row.observed_at}` : "Observation time unknown"}>
+      <div className="ps-balance-values" title={rowTimes(row, usd.priced)}>
         <span className="ps-balance-amount">{amount}</span>
         <span className={usd.className}>{usd.text}</span>
       </div>
@@ -74,7 +85,12 @@ export function BalanceTable({ machine }) {
     <section className="ps-balance-section">
       <div className="ps-balance-header">
         <span>Balances</span>
-        {machine.total_usd != null ? <span className="ps-balance-total">{formatUsd(machine.total_usd) || "$0.00"} observed</span> : null}
+        {machine.total_usd != null ? (
+          <span className="ps-balance-total">
+            {usdIsLowerBound(machine) ? "≥ " : ""}
+            {formatUsd(machine.total_usd) || "$0.00"} observed
+          </span>
+        ) : null}
       </div>
       {note ? <div className="ps-balance-coverage" role="note">{note}</div> : null}
       <button

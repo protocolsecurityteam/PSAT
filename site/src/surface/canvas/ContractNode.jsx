@@ -1,7 +1,10 @@
 import { Handle, Position } from "@xyflow/react";
 
-import { formatDelay, formatUsd, shortAddr } from "../format.js";
+import { formatDelay, shortAddr } from "../format.js";
+import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 import { ROLE_META } from "../meta.js";
+import { upgradeCountText } from "../../vocab/upgradeFacts.js";
+import { roleLabel as roleWord } from "../../vocab/role.js";
 
 export function ContractNode({ data }) {
   const m = data.machine;
@@ -10,11 +13,10 @@ export function ContractNode({ data }) {
   // only; ownership is unchanged.
   const TIMELOCK_COLOR = "#9a8a6e";
   const accent = m.isTimelock ? TIMELOCK_COLOR : roleColor;
-  const roleLabel = m.isTimelock
-    ? "Timelock"
-    : (ROLE_META[m.role] || ROLE_META.utility).singular;
+  const roleLabel = m.isTimelock ? "Timelock" : roleWord(m);
   const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
+  const upgradeText = upgradeCountText(m);
   // Stacks a row higher when the out/browse chip occupies the slot.
   const reachStacked = Boolean(data.browseChip || chip?.out);
   return (
@@ -82,9 +84,7 @@ export function ContractNode({ data }) {
       {m.is_proxy && (
         <div
           className="ps-node-proxy"
-          title={`${m.proxy_type ? `${m.proxy_type} ` : ""}proxy${
-            m.upgrade_count != null ? ` · ${m.upgrade_count} upgrade${m.upgrade_count === 1 ? "" : "s"}` : ""
-          }`}
+          title={`${m.proxy_type ? `${m.proxy_type} ` : ""}proxy${upgradeText ? ` · ${upgradeText}` : ""}`}
         >
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
             <rect x="3.4" y="0.9" width="7.6" height="7.6" rx="1.3" stroke="#9a8a6e" strokeWidth="1.1" />
@@ -92,14 +92,12 @@ export function ContractNode({ data }) {
           </svg>
           <span>
             {m.proxy_type === "gnosis_safe" ? "SAFE PROXY" : "PROXY"}
-            {m.upgrade_count != null && m.upgrade_count > 0
-              ? ` · ${m.upgrade_count} upgrade${m.upgrade_count === 1 ? "" : "s"}`
-              : ""}
+            {upgradeText ? ` · ${upgradeText}` : ""}
           </span>
         </div>
       )}
       <div className="ps-node-role" style={{ color: accent }}>{roleLabel}</div>
-      {m.total_usd ? <div className="ps-node-balance">{formatUsd(m.total_usd)}</div> : null}
+      {m.total_usd ? <div className="ps-node-balance">{formatUsdTotal(m.total_usd, usdIsLowerBound(m))}</div> : null}
     </div>
   );
 }

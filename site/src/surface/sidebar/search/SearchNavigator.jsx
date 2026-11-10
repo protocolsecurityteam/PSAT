@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { formatDelay, formatUsd, shortAddr } from "../../format.js";
+import { formatDelay, shortAddr } from "../../format.js";
+import { formatUsdTotal } from "../../../vocab/usdBound.js";
+import { safeSignersText } from "../../../vocab/safeThreshold.js";
 import { buildSearchResults } from "../../layout/search.js";
 import { SORT_OPTIONS } from "../../meta.js";
 
@@ -82,9 +84,12 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
             {current.name !== shortAddr(current.address) && (
               <span className="ps-search-preview-addr">{shortAddr(current.address)}</span>
             )}
-            {current.value > 0 && <span className="ps-search-preview-value">{formatUsd(current.value)}</span>}
+            {current.value > 0 && <span className="ps-search-preview-value">{formatUsdTotal(current.value, current.valueLowerBound)}</span>}
             {current.kind === "principal" && current.type === "safe" && current.signers > 0 && (
               <span className="ps-search-preview-meta">{current.signers}/{current.ownersCount || "?"} signers</span>
+            )}
+            {current.kind === "principal" && current.type === "safe" && current.signers == null && current.ownersCount > 0 && (
+              <span className="ps-search-preview-meta">{safeSignersText(null, current.ownersCount)}</span>
             )}
             {current.kind === "principal" && current.type === "timelock" && current.delay > 0 && (
               <span className="ps-search-preview-meta">{formatDelay(current.delay)} delay</span>

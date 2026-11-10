@@ -39,28 +39,57 @@ const B = "0x" + "b2".repeat(20);
 const C = "0x" + "c3".repeat(20);
 
 describe("lastUpgradeBatch", () => {
+  const est = (name, ts) => ({ name, last_upgrade_state: "established", last_upgrade_timestamp: ts });
+
   it("collapses a batch sharing the newest timestamp into a count, naming no favourite", () => {
     const batch = lastUpgradeBatch([
-      { name: "A", last_upgrade_timestamp: "2026-07-14T20:36:23+00:00" },
-      { name: "B", last_upgrade_timestamp: "2026-07-14T20:36:23+00:00" },
-      { name: "C", last_upgrade_timestamp: "2026-06-01T00:00:00+00:00" },
+      est("A", "2026-07-14T20:36:23+00:00"),
+      est("B", "2026-07-14T20:36:23+00:00"),
+      est("C", "2026-06-01T00:00:00+00:00"),
     ]);
     expect(batch.count).toBe(2);
     expect(batch.name).toBeNull();
+    expect(batch.undetermined).toEqual([]);
   });
 
   it("names the contract when exactly one carries the newest timestamp", () => {
     const batch = lastUpgradeBatch([
-      { name: "OnlyOne", last_upgrade_timestamp: "2026-07-14T20:36:23+00:00" },
-      { name: "Older", last_upgrade_timestamp: "2026-06-01T00:00:00+00:00" },
+      est("OnlyOne", "2026-07-14T20:36:23+00:00"),
+      est("Older", "2026-06-01T00:00:00+00:00"),
     ]);
     expect(batch.count).toBe(1);
     expect(batch.name).toBe("OnlyOne");
   });
 
   it("is null when no upgrade was ever witnessed", () => {
-    expect(lastUpgradeBatch([{ name: "A" }])).toBeNull();
+    expect(lastUpgradeBatch([{ name: "A", last_upgrade_state: null }])).toBeNull();
     expect(lastUpgradeBatch([])).toBeNull();
+  });
+
+  it("orders only established rows and counts every other state by token", () => {
+    const batch = lastUpgradeBatch([
+      est("A", "2026-07-14T20:36:23+00:00"),
+      // Never ordered: a not_determined row carries no pair, and a timestamp
+      // here would not be a witness.
+      { name: "B", last_upgrade_state: "not_determined", last_upgrade_timestamp: "2026-09-01T00:00:00+00:00" },
+      // Established by block only: no time to order it against the others.
+      { name: "C", last_upgrade_state: "established", last_upgrade_block: 100, last_upgrade_timestamp: null },
+      { name: "D", last_upgrade_state: "partially_read" },
+    ]);
+    expect(batch.name).toBe("A");
+    expect(batch.undetermined).toEqual([
+      { token: "not_determined", word: "not determined", count: 2 },
+      { token: "partially_read", word: "partially_read", count: 1 },
+    ]);
+  });
+
+  it("keeps a not_determined last upgrade as a state of its own, never as none", () => {
+    expect(lastUpgradeBatch([{ name: "A", last_upgrade_state: "not_determined" }])).toEqual({
+      at: null,
+      count: 0,
+      name: null,
+      undetermined: [{ token: "not_determined", word: "not determined", count: 1 }],
+    });
   });
 });
 
@@ -168,7 +197,30 @@ describe("DetailEmptyState — freshness and value", () => {
     await waitFor(() => expect(screen.getByText(/2 contracts/)).toBeInTheDocument());
     expect(screen.getByText(/last event Aug 1/)).toBeInTheDocument();
     // No witnessed upgrade in this payload → the earned-nothing wording.
-    expect(screen.getByText(/none witnessed/)).toBeInTheDocument();
+    expect(screen.getByText(/none recorded/)).toBeInTheDocument();
+  });
+
+  it("shows the last upgrade with how many contracts' last upgrades are not determined", async () => {
+    renderPanel({
+      companyData: companyData({
+        contracts: [
+          { address: A, name: "Vault", last_upgrade_state: "established", last_upgrade_timestamp: "2026-07-14T20:36:23+00:00" },
+          { address: B, name: "Pool", last_upgrade_state: "not_determined" },
+        ],
+      }),
+    });
+    const row = (await screen.findByText("Last upgrade")).nextSibling;
+    expect(row).toHaveTextContent("Vault");
+    expect(row).toHaveTextContent("1 not determined");
+  });
+
+  it("renders the last upgrade as not determined, not none, when no contract's is established", async () => {
+    renderPanel({
+      companyData: companyData({ contracts: [{ address: B, name: "Pool", last_upgrade_state: "not_determined" }] }),
+    });
+    const row = (await screen.findByText("Last upgrade")).nextSibling;
+    expect(row).toHaveTextContent("1 not determined");
+    expect(row).not.toHaveTextContent(/none recorded/);
   });
 
   it("renders the monitoring row as not determined when the plane is unreadable", async () => {
@@ -195,6 +247,15 @@ describe("DetailEmptyState — freshness and value", () => {
     // Balances are custodial figures, labelled as such beside the TVL head.
     expect(screen.getByText(/Largest tracked balances/i)).toBeInTheDocument();
     expect(screen.getByText("$3.2B")).toBeInTheDocument();
+  });
+
+  it("marks a largest-balance row as a lower bound when the contract holds unvalued rows", async () => {
+    renderPanel({
+      companyData: companyData({
+        contracts: [{ address: A, name: "WeETH", total_usd: 3498555472, holdings_coverage: { unvalued_rows: 3 } }],
+      }),
+    });
+    expect(await screen.findByText("≥ $3.5B")).toBeInTheDocument();
   });
 });
 
@@ -237,6 +298,45 @@ describe("member analysis coverage", () => {
     );
   });
 
+  it("flags members analyzed by an older analyzer beside the unread ones", () => {
+    renderPanel({
+      companyData: companyData({
+        member_analysis: {
+          members: 5,
+          analyzed: 4,
+          not_determined: 1,
+          by_state: { analysis_failed: 1, analysis_not_completed: 0 },
+          not_analyzed: [],
+          analyzed_at_older_version: [{ address: A, stale_analysis_version: 11 }],
+        },
+      }),
+    });
+    expect(screen.getByRole("status", { name: "Member contracts not determined" })).toHaveTextContent(
+      "1 of 5 member contracts not determined · 1 analysis failed · 1 analyzed by an older analyzer (v11)",
+    );
+  });
+
+  it("flags older-analyzer members when every member counts as analyzed", () => {
+    renderPanel({
+      companyData: companyData({
+        member_analysis: {
+          members: 3,
+          analyzed: 3,
+          not_determined: 0,
+          by_state: { analysis_failed: 0, analysis_not_completed: 0 },
+          not_analyzed: [],
+          analyzed_at_older_version: [
+            { address: A, stale_analysis_version: 11 },
+            { address: B, stale_analysis_version: 10 },
+          ],
+        },
+      }),
+    });
+    expect(screen.getByRole("status", { name: "Member contracts analyzed by an older analyzer" })).toHaveTextContent(
+      "2 of 3 member contracts analyzed by an older analyzer (v11, v10)",
+    );
+  });
+
   it("shows nothing when every member is analyzed", () => {
     renderPanel({
       companyData: companyData({
@@ -250,5 +350,18 @@ describe("member analysis coverage", () => {
       }),
     });
     expect(screen.queryByRole("status", { name: "Member contracts not determined" })).toBeNull();
+  });
+});
+
+describe("DetailEmptyState — data as of", () => {
+  it("names a fresh as-of in the glance meta and leaves a stale one to the banner", () => {
+    const fresh = renderPanel({ asOf: { stale: false, at: "9/29/2026, 9:00:00 AM" } });
+    expect(fresh.container.querySelector(".ps-glance-meta")).toHaveTextContent("data as of 9/29/2026, 9:00:00 AM");
+    fresh.unmount();
+    const nd = renderPanel({ asOf: { stale: false, at: null } });
+    expect(nd.container.querySelector(".ps-glance-meta")).toHaveTextContent("data as of not determined");
+    nd.unmount();
+    const stale = renderPanel({ asOf: { stale: true, at: "9/29/2026, 9:00:00 AM" } });
+    expect(stale.container.querySelector(".ps-glance-meta")).not.toHaveTextContent(/as of/);
   });
 });

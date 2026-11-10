@@ -1,6 +1,7 @@
 
 import { principalLabel } from "../format.js";
-import { ROLE_META } from "../meta.js";
+import { roleLabel } from "../../vocab/role.js";
+import { usdIsLowerBound } from "../../vocab/usdBound.js";
 
 export function buildSearchResults(machines, principals, mode, sortKey, query) {
   let items = [];
@@ -14,7 +15,11 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         controlled.some((a) => a.toLowerCase() === m.address?.toLowerCase())
       );
       const totalValue = controlledMachines.reduce((sum, m) => sum + (m.total_usd || 0), 0);
-      const signers = p.details?.threshold || (p.details?.owners?.length) || 0;
+      // A sum over any lower bound is a lower bound.
+      const valueLowerBound = controlledMachines.some(usdIsLowerBound);
+      // A missing threshold is not determined; the owner count never stands in.
+      const threshold = Number(p.details?.threshold);
+      const signers = Number.isFinite(threshold) && threshold > 0 ? threshold : null;
       const delay = p.details?.delay || 0;
       items.push({
         kind: "principal",
@@ -22,6 +27,7 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         name: principalLabel(p.label, p.type, p.address),
         type: p.type,
         value: totalValue,
+        valueLowerBound,
         signers,
         ownersCount: p.details?.owners?.length || 0,
         delay,
@@ -43,6 +49,7 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
           name: m.name || "",
           type: "timelock",
           value: m.total_usd || 0,
+          valueLowerBound: usdIsLowerBound(m),
           signers: 0,
           ownersCount: 0,
           delay: m.timelockDelay || 0,
@@ -58,8 +65,9 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         kind: "contract",
         address: m.address,
         name: m.name || "",
-        type: (ROLE_META[m.role] || ROLE_META.utility).singular,
+        type: roleLabel(m),
         value: m.total_usd || 0,
+        valueLowerBound: usdIsLowerBound(m),
         signers: 0,
         ownersCount: 0,
         delay: 0,
@@ -87,7 +95,7 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
   }
 
   if (sortKey === "value") items.sort((a, b) => b.value - a.value);
-  else if (sortKey === "signers") items.sort((a, b) => b.signers - a.signers);
+  else if (sortKey === "signers") items.sort((a, b) => (b.signers ?? -1) - (a.signers ?? -1));
   else if (sortKey === "functions") items.sort((a, b) => b.functions - a.functions);
   else if (sortKey === "name") items.sort((a, b) => a.name.localeCompare(b.name));
 

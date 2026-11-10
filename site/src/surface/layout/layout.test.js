@@ -61,6 +61,45 @@ describe("collectDirectCallers", () => {
     expect(direct[0].resolvedType).toBe("safe");
   });
 
+  it("dates a caller from its entry's controller read only when the read's value is the caller", () => {
+    const SAFE = "0xaaaa000000000000000000000000000000000aaa";
+    const fn = {
+      direct_owner: { address: SAFE, resolved_type: "safe", source_controller_id: "owner", details: {} },
+      authority_roles: [],
+      controllers: [],
+    };
+    const ownerRead = { value: SAFE, block_number: 7, block_basis: "log_block", observed_via: "event_log" };
+    expect(collectDirectCallers(fn, { controller_reads: { owner: ownerRead } })[0].controllerRead).toBe(ownerRead);
+    const rotated = { ...ownerRead, value: "0xbbbb000000000000000000000000000000000bbb" };
+    expect(collectDirectCallers(fn, { controller_reads: { owner: rotated } })[0].controllerRead).toBeNull();
+    expect(collectDirectCallers(fn)[0].controllerRead).toBeNull();
+  });
+
+  it("threads the contract entry through buildMachines", () => {
+    const SAFE = "0xaaaa000000000000000000000000000000000aaa";
+    const VAULT = ETHERFI_COMPANY_RICH.contracts[0].address;
+    const ownerRead = { value: SAFE, block_number: 9, block_basis: "head_before_read", observed_via: "eth_call" };
+    const company = {
+      ...ETHERFI_COMPANY_RICH,
+      contracts: [{ ...ETHERFI_COMPANY_RICH.contracts[0], controller_reads: { owner: ownerRead } }],
+    };
+    const fns = {
+      [entityKey(undefined, VAULT)]: [
+        {
+          function: "pause()",
+          selector: "0x8456cb59",
+          effect_labels: ["pause"],
+          direct_owner: { address: SAFE, resolved_type: "safe", source_controller_id: "owner", details: {} },
+          authority_roles: [],
+          controllers: [],
+        },
+      ],
+    };
+    const [vault] = buildMachines(company, fns);
+    const all = [...vault.lanes.top, ...vault.lanes.ops, ...vault.lanes.left, ...vault.lanes.right];
+    expect(all[0].principals[0].controllerRead).toBe(ownerRead);
+  });
+
   it("returns no direct caller for a public-authority function", () => {
     const fn = ETHERFI_COMPANY_RICH.contracts[0].functions.find((f) => f.function === "deposit");
     const direct = collectDirectCallers(fn);
@@ -74,6 +113,17 @@ describe("guardSummary", () => {
     const guard = guardSummary(fn, ETHERFI_COMPANY_RICH);
     expect(guard.kind).toBe("safe");
     expect(guard.sublabel).toBe("2/3");
+  });
+
+  it("keeps a Safe's unread threshold not determined, never N required signatures", () => {
+    const fn = {
+      direct_owner: { address: "0xaaaa000000000000000000000000000000000aaa", resolved_type: "safe", details: { owners: ["0xa", "0xb", "0xc"] } },
+      authority_roles: [],
+      controllers: [],
+    };
+    const guard = guardSummary(fn, {});
+    expect(guard.sublabel).toBe("3 signers · threshold not determined");
+    expect(guard.principals[0].display.sub).toBe("3 signers · threshold not determined");
   });
 
   it("classifies a Timelock-guarded function with a delay sublabel", () => {
@@ -160,6 +210,26 @@ describe("buildGraphLayout", () => {
     // principal-source filter and becomes an aggregated cross-group
     // edge from the Safe group to the ungrouped Pool.
     expect(edges.some((e) => e.id.startsWith("agg-"))).toBe(true);
+  });
+
+  it("marks a group's USD sum as a lower bound when any child's total is one", () => {
+    const valued = machines.map((m, i) => ({
+      ...m,
+      total_usd: 1000,
+      holdings_coverage: { unvalued_rows: i === 0 ? 1 : 0 },
+    }));
+    const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
+      address: p.address,
+      type: p.resolved_type,
+      label: p.display_name,
+      details: p.details,
+      controls: [valued[0].address],
+      primary_for: p.resolved_type === "safe" ? [valued[0].address] : [],
+    }));
+    const group = buildGraphLayout(valued, [], principals).nodes.find((n) => n.type === "group");
+    expect(group.data.totalUsdLowerBound).toBe(true);
+    const exact = valued.map((m) => ({ ...m, holdings_coverage: { unvalued_rows: 0 } }));
+    expect(buildGraphLayout(exact, [], principals).nodes.find((n) => n.type === "group").data.totalUsdLowerBound).toBe(false);
   });
 
   it("collapses every principal→child edge into containment", () => {

@@ -325,6 +325,40 @@ describe("EntityCard controller enumeration", () => {
     expect(getByText("Controllers not determined")).toHaveAttribute("title", "enumeration timed out");
   });
 
+  it("badges an entry whose controller values were never read for this deployment", () => {
+    const { getByText } = render(
+      <EntityCard machine={machine({ controller_values_state: "not_determined" })} onSelectGuard={vi.fn()} governsIndex={new Map()} />,
+    );
+    expect(getByText("Controllers not determined")).toHaveAttribute(
+      "title",
+      "controller values not determined for this deployment",
+    );
+  });
+
+  it("names both routes in one badge when the replay and the values are both unread", () => {
+    const { getAllByText } = render(
+      <EntityCard
+        machine={machine({
+          controller_values_state: "not_determined",
+          controller_enumeration: { state: "not_determined", status: "error" },
+        })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const badges = getAllByText("Controllers not determined");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveAttribute("title", "enumeration errored; controller values not determined for this deployment");
+  });
+
+  it("renders an unknown controller_values_state token raw", () => {
+    const { getByText, queryByText } = render(
+      <EntityCard machine={machine({ controller_values_state: "partial" })} onSelectGuard={vi.fn()} governsIndex={new Map()} />,
+    );
+    expect(getByText("partial")).toBeInTheDocument();
+    expect(queryByText("Controllers not determined")).toBeNull();
+  });
+
   it("shows nothing extra for a complete member set", () => {
     const { queryByText } = render(
       <EntityCard
@@ -334,5 +368,115 @@ describe("EntityCard controller enumeration", () => {
       />,
     );
     expect(queryByText("Controllers not determined")).toBeNull();
+  });
+});
+
+describe("EntityCard upgrade count", () => {
+  const card = (over) =>
+    render(<EntityCard machine={machine({ is_proxy: true, ...over })} onSelectGuard={vi.fn()} governsIndex={new Map()} />);
+  const basis = (relation) => ({ history_fetch_status: "complete", recorded_count_relation: relation });
+
+  it("badges the count with its relation to the recorded upgrades", () => {
+    expect(card({ upgrade_count: 2, upgrade_count_basis: basis("exact") }).getByText("2 recorded upgrades")).toBeInTheDocument();
+    expect(card({ upgrade_count: 5, upgrade_count_basis: basis("upper_bound") }).getByText("up to 5 upgrades")).toBeInTheDocument();
+    expect(
+      card({ upgrade_count: 5, upgrade_count_basis: basis("not_determined") }).getByText("5 upgrades · bound not determined"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a published basis with no count visible as not determined", () => {
+    const { getByText, queryByText } = card({ upgrade_count: null, upgrade_count_basis: basis("not_determined") });
+    expect(getByText("upgrades not determined")).toBeInTheDocument();
+    expect(queryByText(/0 upgrades/)).toBeNull();
+  });
+
+  it("shows no badge when the entry makes no upgrade claim", () => {
+    const { container } = card({ upgrade_count: null, upgrade_count_basis: null });
+    expect(container.querySelector(".ps-machine-badges").textContent).not.toMatch(/upgrade/i);
+  });
+});
+
+describe("EntityCard analysis provenance", () => {
+  const job = (over = {}) => ({
+    job_id: "abcdef12-0000-0000-0000-000000000000",
+    state: "current_analyzer",
+    static_analyzer_version: 12,
+    static_reused_from_job_id: null,
+    started_at: "2026-11-03T13:00:00+00:00",
+    last_pipeline_pass_at: "2026-11-03T14:02:00+00:00",
+    ...over,
+  });
+
+  it("shows one provenance line with the implementation job for a proxy", () => {
+    const { container } = render(
+      <EntityCard
+        machine={machine({
+          is_proxy: true,
+          analysis_provenance: { job: job(), impl_job: job({ job_id: "impl", state: "older_analyzer", static_analyzer_version: 11 }) },
+        })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const lines = container.querySelectorAll(".ps-machine-title-wrap .ps-machine-address");
+    expect(lines).toHaveLength(2);
+    expect(lines[1].textContent).toMatch(/^analyzer v12 · last pipeline pass .+ · impl: older analyzer v11 · last pass /);
+    expect(lines[1].getAttribute("title")).toContain("implementation job impl");
+  });
+
+  it("keeps not determined provenance visible", () => {
+    const nd = "not_determined";
+    const { getByText } = render(
+      <EntityCard
+        machine={machine({
+          analysis_provenance: {
+            job: job({ state: nd, static_analyzer_version: nd, static_reused_from_job_id: nd, started_at: nd, last_pipeline_pass_at: nd }),
+            impl_job: null,
+          },
+        })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    expect(getByText("analysis provenance not determined")).toBeInTheDocument();
+  });
+});
+
+describe("EntityCard USD lower bound", () => {
+  it("badges a total over unvalued holdings as a lower bound", () => {
+    const { getByText } = render(
+      <EntityCard
+        machine={machine({ total_usd: 5_000_000, holdings_coverage: { unvalued_rows: 2 } })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    expect(getByText("≥ $5.0M")).toBeInTheDocument();
+  });
+
+  it("carries the bound onto Governs rows", () => {
+    const pool = { address: POOL, name: "LiquidityPool", total_usd: 2_000_000, holdings_coverage: { unvalued_rows: 1 } };
+    const { getByText } = render(
+      <EntityCard
+        machine={machine()}
+        machines={[pool]}
+        onSelectGuard={vi.fn()}
+        onPreview={vi.fn()}
+        governsIndex={governsWith([{ contractAddress: POOL, contractName: "LiquidityPool", functions: ["pause"] }])}
+      />,
+    );
+    fireEvent.click(getByText("Governs").closest("button"));
+    expect(getByText("≥ $2.0M")).toBeInTheDocument();
+  });
+});
+
+describe("EntityCard role evidence", () => {
+  it("badges a not-determined role as not determined, never as the fall-through role", () => {
+    const { container } = render(
+      <EntityCard machine={machine({ role: "utility", role_evidence: "not_determined" })} onSelectGuard={vi.fn()} governsIndex={new Map()} />,
+    );
+    const badges = container.querySelector(".ps-machine-badges");
+    expect(within(badges).getByText("Role not determined")).toBeInTheDocument();
+    expect(within(badges).queryByText("Utility")).toBeNull();
   });
 });

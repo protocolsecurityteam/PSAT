@@ -22,7 +22,7 @@ import { useChainScope } from "./hooks/useChainScope.js";
 import { useAuditCoverage } from "./hooks/useAuditCoverage.js";
 import { useSurfaceModel } from "./hooks/useSurfaceModel.js";
 import { useReachOverlay } from "./hooks/useReachOverlay.js";
-import StaleBanner from "../shared/StaleBanner.jsx";
+import StaleBanner, { preparedAsOf } from "../shared/StaleBanner.jsx";
 
 // Re-exported for existing importers.
 export { auditHighlightSet } from "./hooks/useAuditCoverage.js";
@@ -502,7 +502,7 @@ function ProtocolSurface({
         Floats like the selection toast so the fullscreen layout keeps its
         height.
       */}
-      <StaleBanner metas={sectionMetas} className="company-select-toast" />
+      <StaleBanner metas={sectionMetas} className="company-select-toast" showFresh={false} />
       <SurfaceFilterPanel
         machines={allMachines}
         principals={visiblePrincipals}
@@ -596,6 +596,7 @@ function ProtocolSurface({
               machines={allMachines}
               principals={visiblePrincipals}
               onSelectAddress={select}
+              asOf={preparedAsOf(sectionMetas)}
             />
           )}
           {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && (

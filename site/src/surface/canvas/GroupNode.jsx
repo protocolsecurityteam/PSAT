@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef } from "react";
 import { Handle, Position } from "@xyflow/react";
 
-import { formatUsd, principalBadge, shortAddr } from "../format.js";
+import { principalBadge, shortAddr } from "../format.js";
+import { formatUsdTotal } from "../../vocab/usdBound.js";
 import { PRINCIPAL_COLORS } from "../meta.js";
 
 // The primary row uses the group's own colour so a timelock-owned group reads
@@ -47,7 +48,7 @@ export function GroupNode({ data }) {
   const p = data.principal;
   const color = PRINCIPAL_COLORS[p.type] || "#64748b";
   const badge = principalBadge(p);
-  const tvl = data.totalUsd > 0 ? formatUsd(data.totalUsd) : null;
+  const tvl = data.totalUsd > 0 ? formatUsdTotal(data.totalUsd, data.totalUsdLowerBound) : null;
   const chip = data.selectionChip;
   const controllers = Array.isArray(data.controllers) ? data.controllers : [];
 

@@ -69,4 +69,23 @@ describe("ProtocolSurface", () => {
     await screen.findByText(`Updating — data as of ${new Date("2026-09-29T08:00:00Z").toLocaleString()}`);
     expectNoCrash();
   });
+
+  it("names a fresh payload's as-of in the detail glance, not as a toast", async () => {
+    setFetchHandler((url) => url.pathname === "/api/company/etherfi", () => new Response(
+      JSON.stringify(ETHERFI_COMPANY),
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-PSAT-Response-Source": "prepared",
+          "X-PSAT-Prepared-At": "2026-09-29T08:00:00Z",
+          "X-PSAT-Payload-Schema": String(SUPPORTED_PAYLOAD_SCHEMA.overview),
+        },
+      },
+    ));
+    render(<ProtocolSurface companyName="etherfi" />);
+    const at = new Date("2026-09-29T08:00:00Z").toLocaleString();
+    await screen.findByText((content) => content.includes(`data as of ${at}`));
+    expect(document.querySelector(".company-select-toast")).toBeNull();
+    expectNoCrash();
+  });
 });

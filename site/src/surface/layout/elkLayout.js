@@ -2,6 +2,7 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 
 import { assignGroups, buildGroupControllers } from "./groupAssignment.js";
+import { usdIsLowerBound } from "../../vocab/usdBound.js";
 import { aggregateEdges, assignEdgeLanes } from "./edgeAggregation.js";
 import {
   CHILD_H,
@@ -185,11 +186,13 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
   const contractPositions = new Map();
 
   const groupTotalUsd = new Map();
+  const groupUsdLowerBound = new Set();
   for (const [principalAddr, kids] of groupChildren) {
     let total = 0;
     for (const kid of kids) {
       const m = sorted.find((x) => x.address?.toLowerCase() === kid);
       if (m && m.total_usd) total += m.total_usd;
+      if (usdIsLowerBound(m)) groupUsdLowerBound.add(principalAddr);
     }
     if (total > 0) groupTotalUsd.set(principalAddr, total);
   }
@@ -217,6 +220,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
         principal: p,
         childCount: kids.length,
         totalUsd: groupTotalUsd.get(principalAddr) || 0,
+        totalUsdLowerBound: groupUsdLowerBound.has(principalAddr),
         controllers,
         headerHeight,
       },

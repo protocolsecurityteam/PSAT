@@ -18,6 +18,7 @@ from db.models import (
     JobStatus,
     PrincipalLabel,
     UpgradeEvent,
+    UpgradeTransaction,
 )
 from services.aggregations.company_overview import (
     _build_principal_lookup,
@@ -107,6 +108,58 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
     assert native_row["source"] == "pinned_native_read"
 
     assert {b.fetch_id for b in children["balances"][contract.id]} == {historical.id, native.id}
+
+
+def test_partial_balance_observations_carry_the_price_observation_time(db_session):
+    p = _add_protocol(db_session, f"partial-price-{uuid.uuid4().hex[:8]}")
+    addr = _addr("partial-price")
+    job = _add_job(db_session, address=addr, protocol_id=p.id)
+    contract = _add_contract(db_session, address=addr, job=job, protocol_id=p.id)
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def fetch(index, assets):
+        row = ContractBalanceFetch(
+            contract_id=contract.id,
+            chain_id=1,
+            observed_address=addr,
+            native_status="fetch_failed",
+            asset_set_status=assets,
+            writer=BALANCE_WRITER_TVL,
+            fetched_at=start + timedelta(minutes=index),
+        )
+        db_session.add(row)
+        db_session.flush()
+        return row
+
+    accepted = fetch(0, ASSET_SET_STATUS_RETURNED_ASSETS)
+    partial = fetch(1, ASSET_SET_STATUS_AT_PAGE_CAP)
+    new_token, unpriced_token = _addr("new"), _addr("unpriced")
+    observed = start + timedelta(minutes=1)
+    priced = start + timedelta(minutes=2)
+    db_session.add_all(
+        [
+            ContractBalance(contract_id=contract.id, fetch_id=accepted.id, token_address=_addr("old"), raw_balance="1"),
+            ContractBalance(
+                contract_id=contract.id,
+                fetch_id=partial.id,
+                token_address=new_token,
+                raw_balance="2",
+                usd_value=5,
+                observed_at=observed,
+                price_observed_at=priced,
+            ),
+            ContractBalance(
+                contract_id=contract.id, fetch_id=partial.id, token_address=unpriced_token, raw_balance="3"
+            ),
+        ]
+    )
+    db_session.commit()
+
+    entry = next(e for e in build_company_overview(db_session, p.name)["contracts"] if e["address"] == addr)
+    rows = {r["token_address"]: r for r in entry["partial_balance_observations"]}
+    assert rows[new_token]["observed_at"] == observed.isoformat()
+    assert rows[new_token]["price_observed_at"] == priced.isoformat()
+    assert rows[unpriced_token]["price_observed_at"] is None
 
 
 def test_resolve_company_jobs_protocol_path(db_session):
@@ -687,6 +740,7 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     job_a = _add_job(db_session, address=addr_a, protocol_id=p.id, name="ContractA")
     job_b = _add_job(db_session, address=addr_b, protocol_id=p.id, name="ContractB")
     contract_a = _add_contract(db_session, address=addr_a, job=job_a, protocol_id=p.id, contract_name="ContractA")
+    contract_a.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
     contract_b = _add_contract(db_session, address=addr_b, job=job_b, protocol_id=p.id, contract_name="ContractB")
 
     safe_addr = _addr("psafe").lower()
@@ -853,7 +907,8 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     # Two events with no receipt facts are two unwitnessed actions.
     assert norm["upgrade_events_count"][contract_a.id]["count"] == 2
     assert norm["upgrade_events_count"][contract_a.id]["basis"]["events_without_tx_hash"] == 2
-    assert norm["upgrade_events_last"][contract_a.id]["block"] == 22345
+    # Hashless rows can't be told apart from the deployment, so the latest isn't established.
+    assert norm["upgrade_events_last"][contract_a.id]["state"] == "not_determined"
 
 
 def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
@@ -2251,13 +2306,15 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
     addr = _addr("upgl")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+    c.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
 
+    first_impl = _addr("j1")
     db_session.add_all(
         [
             UpgradeEvent(
                 contract_id=c.id,
                 proxy_address=addr,
-                new_impl=_addr("j1"),
+                new_impl=first_impl,
                 block_number=500,
                 timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
                 tx_hash="0x" + "c" * 64,
@@ -2266,6 +2323,7 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
             UpgradeEvent(
                 contract_id=c.id,
                 proxy_address=addr,
+                old_impl=first_impl,
                 new_impl=_addr("j2"),
                 block_number=None,
                 timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
@@ -2286,11 +2344,46 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
     )
 
 
+def _creation_receipt(session, contract, block: int) -> None:
+    """The proxy's deployment, witnessed by its creation receipt, as a backfill from genesis records it."""
+    tx_hash = "0x" + uuid.uuid4().hex * 2
+    session.add(
+        UpgradeTransaction(
+            chain_id=1,
+            tx_hash=tx_hash,
+            block_number=block,
+            block_hash="0x" + "b" * 64,
+            tx_status=1,
+            receipt_from=_addr("deployer"),
+            receipt_to=None,
+            created_contract_address=contract.address.lower(),
+            is_contract_creation=True,
+            executor_kind="not_determined",
+            receipt_log_set_complete_for_tx=True,
+            receipt_upgraded_counts={contract.address.lower(): 1},
+        )
+    )
+    session.flush()
+    session.add(
+        UpgradeEvent(
+            contract_id=contract.id,
+            proxy_address=contract.address,
+            new_impl=_addr("i0"),
+            block_number=block,
+            tx_hash=tx_hash,
+            chain_id=1,
+            source="backfill",
+        )
+    )
+
+
 def test_last_upgrade_pair_block_carrying_control(db_session):
     p = _add_protocol(db_session, f"upgctl-{uuid.uuid4().hex[:8]}")
     addr = _addr("upgx")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+    c.upgrade_history_status = "complete"  # the last upgrade is only established on a full read
+    _creation_receipt(db_session, c, 10)
 
     db_session.add_all(
         [
