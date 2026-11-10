@@ -352,3 +352,16 @@ describe("member analysis coverage", () => {
     expect(screen.queryByRole("status", { name: "Member contracts not determined" })).toBeNull();
   });
 });
+
+describe("DetailEmptyState — data as of", () => {
+  it("names a fresh as-of in the glance meta and leaves a stale one to the banner", () => {
+    const fresh = renderPanel({ asOf: { stale: false, at: "9/29/2026, 9:00:00 AM" } });
+    expect(fresh.container.querySelector(".ps-glance-meta")).toHaveTextContent("data as of 9/29/2026, 9:00:00 AM");
+    fresh.unmount();
+    const nd = renderPanel({ asOf: { stale: false, at: null } });
+    expect(nd.container.querySelector(".ps-glance-meta")).toHaveTextContent("data as of not determined");
+    nd.unmount();
+    const stale = renderPanel({ asOf: { stale: true, at: "9/29/2026, 9:00:00 AM" } });
+    expect(stale.container.querySelector(".ps-glance-meta")).not.toHaveTextContent(/as of/);
+  });
+});

@@ -194,6 +194,7 @@ export function DetailEmptyState({
   principals = [],
   onSelectAddress = null,
   initialScore = undefined,
+  asOf = null,
 }) {
   const [scoreDoc, setScoreDoc] = useState(null);
   const [scoreState, setScoreState] = useState("loading");
@@ -279,6 +280,8 @@ export function DetailEmptyState({
           {[
             companyData.contract_count != null && `${companyData.contract_count} contracts`,
             companyData.all_addresses_count != null && `${companyData.all_addresses_count} addresses`,
+            // A stale as-of is the surface's toast; this names the fresh one.
+            asOf && !asOf.stale && `data as of ${asOf.at || "not determined"}`,
           ]
             .filter(Boolean)
             .join(" · ")}
