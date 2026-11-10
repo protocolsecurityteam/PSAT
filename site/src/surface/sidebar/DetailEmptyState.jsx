@@ -10,6 +10,7 @@ import { useResource } from "../../shared/useResource.js";
 import { formatUsd } from "../format.js";
 import { buildSearchResults } from "../layout/search.js";
 import { memberAnalysisNote } from "../../vocab/memberAnalysis.js";
+import { lastUpgradeStateWord } from "../../vocab/upgradeFacts.js";
 
 // Promises cached per company so remounts and concurrent mounts share one
 // request.
@@ -68,19 +69,37 @@ function daysAgo(iso) {
 }
 
 // Batch upgrades land in one tx across many proxies; naming one would be an
-// arbitrary pick.
+// arbitrary pick. Only an `established` last upgrade with a time is ordered;
+// every other published state is counted by token so a protocol's last
+// upgrade never reads as settled while some contract's is not. An established
+// row with no timestamp can't be ordered against the others, so it counts as
+// not determined. Null when no contract publishes a last-upgrade state.
 export function lastUpgradeBatch(contracts) {
   let newest = null;
+  const undetermined = new Map();
   for (const c of contracts || []) {
-    const ts = c?.last_upgrade_timestamp;
-    if (ts && (!newest || ts > newest)) newest = ts;
+    const state = c?.last_upgrade_state;
+    if (state == null) continue;
+    const ts = c.last_upgrade_timestamp;
+    if (state === "established" && ts) {
+      if (!newest || ts > newest) newest = ts;
+      continue;
+    }
+    const token = state === "established" ? "not_determined" : state;
+    undetermined.set(token, (undetermined.get(token) || 0) + 1);
   }
-  if (!newest) return null;
-  const batch = (contracts || []).filter((c) => c?.last_upgrade_timestamp === newest);
+  const states = [...undetermined.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([token, count]) => ({ token, word: lastUpgradeStateWord(token), count }));
+  if (!newest) return states.length ? { at: null, count: 0, name: null, undetermined: states } : null;
+  const batch = (contracts || []).filter(
+    (c) => c?.last_upgrade_state === "established" && c.last_upgrade_timestamp === newest,
+  );
   return {
     at: newest,
     count: batch.length,
     name: batch.length === 1 ? batch[0].name || batch[0].address : null,
+    undetermined: states,
   };
 }
 
@@ -311,12 +330,22 @@ export function DetailEmptyState({
         <div className="ps-glance-rows">
           <div className="ps-glance-row">
             <span className="ps-glance-row-l">Last upgrade</span>
-            {upgrade ? (
+            {upgrade?.at ? (
               <span className="ps-glance-row-r">
                 {upgrade.name || `${upgrade.count} contracts`}
                 <span className="ps-glance-row-dim">
-                  {[shortDate(upgrade.at), daysAgo(upgrade.at)].filter(Boolean).join(" · ")}
+                  {[
+                    shortDate(upgrade.at),
+                    daysAgo(upgrade.at),
+                    ...upgrade.undetermined.map((u) => `${u.count} ${u.word}`),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </span>
+              </span>
+            ) : upgrade ? (
+              <span className="ps-glance-row-r ps-glance-dim">
+                {upgrade.undetermined.map((u) => `${u.count} ${u.word}`).join(" · ")}
               </span>
             ) : (
               <span className="ps-glance-row-r ps-glance-dim">none witnessed</span>

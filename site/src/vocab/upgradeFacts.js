@@ -21,3 +21,13 @@ export function upgradeCountText(entry) {
   const word = COUNT_RELATION[relation];
   return word ? word(count) : `${count} upgrade${count === 1 ? "" : "s"} · ${relation}`;
 }
+
+// Overview `last_upgrade_state` tokens other than `established`. An unlisted
+// token renders raw.
+const LAST_UPGRADE_STATE_WORD = {
+  not_determined: "not determined",
+};
+
+export function lastUpgradeStateWord(token) {
+  return LAST_UPGRADE_STATE_WORD[token] || token;
+}

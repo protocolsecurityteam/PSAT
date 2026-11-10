@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { upgradeCountText } from "./upgradeFacts.js";
+import { lastUpgradeStateWord, upgradeCountText } from "./upgradeFacts.js";
 
 const basis = (recorded_count_relation, over = {}) => ({ history_fetch_status: "complete", recorded_count_relation, ...over });
 
@@ -32,5 +32,12 @@ describe("upgradeCountText", () => {
 
   it("adds no qualifier the backend didn't send", () => {
     expect(upgradeCountText({ upgrade_count: 3 })).toBe("3 upgrades");
+  });
+});
+
+describe("lastUpgradeStateWord", () => {
+  it("words not_determined and keeps an unknown token raw", () => {
+    expect(lastUpgradeStateWord("not_determined")).toBe("not determined");
+    expect(lastUpgradeStateWord("partially_read")).toBe("partially_read");
   });
 });
