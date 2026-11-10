@@ -109,6 +109,58 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
     assert {b.fetch_id for b in children["balances"][contract.id]} == {historical.id, native.id}
 
 
+def test_partial_balance_observations_carry_the_price_observation_time(db_session):
+    p = _add_protocol(db_session, f"partial-price-{uuid.uuid4().hex[:8]}")
+    addr = _addr("partial-price")
+    job = _add_job(db_session, address=addr, protocol_id=p.id)
+    contract = _add_contract(db_session, address=addr, job=job, protocol_id=p.id)
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def fetch(index, assets):
+        row = ContractBalanceFetch(
+            contract_id=contract.id,
+            chain_id=1,
+            observed_address=addr,
+            native_status="fetch_failed",
+            asset_set_status=assets,
+            writer=BALANCE_WRITER_TVL,
+            fetched_at=start + timedelta(minutes=index),
+        )
+        db_session.add(row)
+        db_session.flush()
+        return row
+
+    accepted = fetch(0, ASSET_SET_STATUS_RETURNED_ASSETS)
+    partial = fetch(1, ASSET_SET_STATUS_AT_PAGE_CAP)
+    new_token, unpriced_token = _addr("new"), _addr("unpriced")
+    observed = start + timedelta(minutes=1)
+    priced = start + timedelta(minutes=2)
+    db_session.add_all(
+        [
+            ContractBalance(contract_id=contract.id, fetch_id=accepted.id, token_address=_addr("old"), raw_balance="1"),
+            ContractBalance(
+                contract_id=contract.id,
+                fetch_id=partial.id,
+                token_address=new_token,
+                raw_balance="2",
+                usd_value=5,
+                observed_at=observed,
+                price_observed_at=priced,
+            ),
+            ContractBalance(
+                contract_id=contract.id, fetch_id=partial.id, token_address=unpriced_token, raw_balance="3"
+            ),
+        ]
+    )
+    db_session.commit()
+
+    entry = next(e for e in build_company_overview(db_session, p.name)["contracts"] if e["address"] == addr)
+    rows = {r["token_address"]: r for r in entry["partial_balance_observations"]}
+    assert rows[new_token]["observed_at"] == observed.isoformat()
+    assert rows[new_token]["price_observed_at"] == priced.isoformat()
+    assert rows[unpriced_token]["price_observed_at"] is None
+
+
 def test_resolve_company_jobs_protocol_path(db_session):
     """``Job.protocol_id`` alone is insufficient: dependency-expansion jobs inherit it without proving membership."""
     p = _add_protocol(db_session, f"alpha-{uuid.uuid4().hex[:8]}")
