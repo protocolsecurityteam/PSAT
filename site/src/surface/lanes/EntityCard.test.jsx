@@ -336,3 +336,28 @@ describe("EntityCard controller enumeration", () => {
     expect(queryByText("Controllers not determined")).toBeNull();
   });
 });
+
+describe("EntityCard upgrade count", () => {
+  const card = (over) =>
+    render(<EntityCard machine={machine({ is_proxy: true, ...over })} onSelectGuard={vi.fn()} governsIndex={new Map()} />);
+  const basis = (relation) => ({ history_fetch_status: "complete", recorded_count_relation: relation });
+
+  it("badges the count with its relation to the recorded upgrades", () => {
+    expect(card({ upgrade_count: 2, upgrade_count_basis: basis("exact") }).getByText("2 recorded upgrades")).toBeInTheDocument();
+    expect(card({ upgrade_count: 5, upgrade_count_basis: basis("upper_bound") }).getByText("up to 5 upgrades")).toBeInTheDocument();
+    expect(
+      card({ upgrade_count: 5, upgrade_count_basis: basis("not_determined") }).getByText("5 upgrades · bound not determined"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a published basis with no count visible as not determined", () => {
+    const { getByText, queryByText } = card({ upgrade_count: null, upgrade_count_basis: basis("not_determined") });
+    expect(getByText("upgrades not determined")).toBeInTheDocument();
+    expect(queryByText(/0 upgrades/)).toBeNull();
+  });
+
+  it("shows no badge when the entry makes no upgrade claim", () => {
+    const { container } = card({ upgrade_count: null, upgrade_count_basis: null });
+    expect(container.querySelector(".ps-machine-badges").textContent).not.toMatch(/upgrade/i);
+  });
+});

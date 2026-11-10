@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { chainColor, chainLabel } from "../chainMeta.js";
 import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
 import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
+import { upgradeCountText } from "../../vocab/upgradeFacts.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
 import { dedupeAndTagRows } from "../layout/governancePath.js";
@@ -94,6 +95,7 @@ export function EntityCard({
 
   const usdLabel = isMachine ? formatUsd(machine.total_usd) : null;
   const enumerationNote = controllerEnumerationNote(machine) || controllerEnumerationNote(principal);
+  const upgradeText = isMachine ? upgradeCountText(machine) : null;
 
   const tabCounts = isMachine
     ? {
@@ -142,7 +144,7 @@ export function EntityCard({
                 <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#22c55e" }}>Deposit destination</span>
               ) : null}
               {machine.is_proxy ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{machine.proxy_type || "proxy"}</span> : null}
-              {machine.upgrade_count != null ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
+              {upgradeText ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{upgradeText}</span> : null}
               <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
               {usdLabel && <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
               {/*

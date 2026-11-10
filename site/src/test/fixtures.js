@@ -16,7 +16,6 @@ export const ANALYSIS_LIST = [
     company: "etherfi",
     address: "0x2222222222222222222222222222222222222222",
     contract_name: "LiquidityPool",
-    upgrade_count: 0,
   },
   {
     job_id: "c",
@@ -34,6 +33,7 @@ export const ETHERFI_COMPANY = {
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
+      upgrade_count_basis: { history_fetch_status: "complete", events_total: 3, events_unlinked: 0, events_without_tx_hash: 0, deployments_excluded: 1, recorded_count_relation: "exact" },
       control_model: "timelock",
       controllers: { owner: "0xMultiSig" },
       functions: [],
@@ -41,7 +41,8 @@ export const ETHERFI_COMPANY = {
     {
       address: "0x2222222222222222222222222222222222222222",
       name: "LiquidityPool",
-      upgrade_count: 0,
+      upgrade_count: null,
+      upgrade_count_basis: null,
       controllers: {},
       functions: [],
     },
@@ -135,6 +136,7 @@ export const ETHERFI_COMPANY_RICH = {
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
+      upgrade_count_basis: { history_fetch_status: "complete", events_total: 3, events_unlinked: 0, events_without_tx_hash: 0, deployments_excluded: 1, recorded_count_relation: "exact" },
       control_model: "timelock",
       controllers: { owner: SAFE_ADDR },
       job_id: "vault-job",
@@ -151,7 +153,8 @@ export const ETHERFI_COMPANY_RICH = {
       address: POOL_ADDR,
       name: "LiquidityPool",
       is_proxy: false,
-      upgrade_count: 0,
+      upgrade_count: null,
+      upgrade_count_basis: null,
       controllers: {},
       job_id: "pool-job",
       functions: [
