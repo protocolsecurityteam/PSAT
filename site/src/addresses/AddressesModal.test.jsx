@@ -106,6 +106,7 @@ describe("AddressesModal", () => {
           }),
           row("0x3333333333333333333333333333333333333333", "Failed", { analyzed: false, analysis_state: "analysis_failed" }),
           row("0x4444444444444444444444444444444444444444", "Queued", { analyzed: false, analysis_state: "analysis_queued" }),
+          row("0x5555555555555555555555555555555555555555", "Unread", { analyzed: false, analysis_state: "analysis_not_completed" }),
         ],
       }),
     );
@@ -118,6 +119,8 @@ describe("AddressesModal", () => {
     expect(chipFor("Failed")).toHaveTextContent("analysis failed");
     expect(chipFor("Failed")).toHaveClass("err");
     expect(chipFor("Queued")).toHaveTextContent("analysis_queued");
+    expect(chipFor("Unread")).toHaveTextContent("analysis not completed");
+    expect(chipFor("Unread")).toHaveClass("pending");
   });
 
   it("shows a probed candidate's out-of-perimeter reads", async () => {

@@ -98,7 +98,7 @@ const INVENTORY_CHIP = {
   current_analyzer: { text: "analyzed", tone: "ok" },
   older_analyzer: { text: "analyzed · older analyzer", tone: "ok" },
   analysis_failed: { text: "analysis failed", tone: "err" },
-  analysis_not_completed: { text: "discovered", tone: "pending" },
+  analysis_not_completed: { text: "analysis not completed", tone: "pending" },
 };
 
 // The /addresses row's analysis chip. Shape: {text, tone, title}.

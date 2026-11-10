@@ -80,7 +80,7 @@ describe("inventoryAnalysisChip", () => {
       title: "static analyzer v11",
     });
     expect(inventoryAnalysisChip({ analysis_state: "analysis_failed" })).toMatchObject({ text: "analysis failed", tone: "err" });
-    expect(inventoryAnalysisChip({ analysis_state: "analysis_not_completed" })).toMatchObject({ text: "discovered", tone: "pending" });
+    expect(inventoryAnalysisChip({ analysis_state: "analysis_not_completed" })).toMatchObject({ text: "analysis not completed", tone: "pending" });
   });
 
   it("renders an unknown token raw", () => {
@@ -89,6 +89,6 @@ describe("inventoryAnalysisChip", () => {
 
   it("falls back to the analyzed flag on a row with no state", () => {
     expect(inventoryAnalysisChip({ analyzed: true }).text).toBe("analyzed");
-    expect(inventoryAnalysisChip({ analyzed: false }).text).toBe("discovered");
+    expect(inventoryAnalysisChip({ analyzed: false }).text).toBe("analysis not completed");
   });
 });
