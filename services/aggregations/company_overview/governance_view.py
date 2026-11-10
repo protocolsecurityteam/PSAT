@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from db.deployment import resolved_against
 from db.models import (
     CONTROL_EDGE_RELATIONS,
+    CONTROLLER_OBSERVED_VIA_EVENT_LOG,
     Contract,
     ControlGraphEdge,
     ControlGraphNode,
@@ -28,6 +29,7 @@ from services.scoring.planes import MAPPING_ENUMERATION_STATUS, controllers_not_
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
 )
+from utils.scoring_status import NOT_DETERMINED
 
 from .entity_keys import _coalesce_chain, _entity_addr, _entity_chain, _entity_key, _entity_prefix
 from .jobs import GovernanceView, _secondary_impl_contracts
@@ -311,6 +313,7 @@ def build_governance_view(
             "deployer": contract_row.deployer if contract_row else None,
             "owner": owner,
             "controllers": controllers,
+            "controller_reads": _controller_reads(entry_cvs),
             "control_model": control_model,
             "source_verified": summary_row.source_verified if summary_row else None,
             "chain": contract_row.chain if contract_row else None,
@@ -975,6 +978,35 @@ def _build_flows_and_principals(
     for pr in principals_out:
         pr["chains"] = sorted(pr["chains"])
     return fund_flows, principals_out
+
+
+# Resolution reads run at ``latest`` after the head is fetched, so the stored block is a floor, not the read block.
+CONTROLLER_READ_HEAD_BEFORE_READ = "head_before_read"
+CONTROLLER_READ_LOG_BLOCK = "log_block"
+_RESOLUTION_READ_VIA = frozenset({"eth_call", "eth_call_impl_fallback", "eth_call_error", "beacon_owner"})
+
+
+def _controller_read_block_basis(observed_via: str | None, block_number: int | None) -> str:
+    if block_number is None:
+        return NOT_DETERMINED
+    if observed_via in _RESOLUTION_READ_VIA:
+        return CONTROLLER_READ_HEAD_BEFORE_READ
+    if observed_via == CONTROLLER_OBSERVED_VIA_EVENT_LOG:
+        return CONTROLLER_READ_LOG_BLOCK
+    return NOT_DETERMINED
+
+
+def _controller_reads(rows: list[ControllerValue]) -> dict[str, dict[str, Any]]:
+    """Per controller id, the published value with how and at which block it was read."""
+    return {
+        cv.controller_id: {
+            "value": cv.value,
+            "block_number": cv.block_number,
+            "block_basis": _controller_read_block_basis(cv.observed_via, cv.block_number),
+            "observed_via": cv.observed_via,
+        }
+        for cv in rows
+    }
 
 
 def _entry_controller_values(
