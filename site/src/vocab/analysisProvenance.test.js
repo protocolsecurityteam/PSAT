@@ -83,6 +83,14 @@ describe("inventoryAnalysisChip", () => {
     expect(inventoryAnalysisChip({ analysis_state: "analysis_not_completed" })).toMatchObject({ text: "analysis not completed", tone: "pending" });
   });
 
+  it("never words an unversioned older analysis as an older analyzer", () => {
+    expect(inventoryAnalysisChip({ analysis_state: "older_analyzer", stale_analysis_version: null })).toEqual({
+      text: "analyzed · analyzer version not determined",
+      tone: "ok",
+      title: undefined,
+    });
+  });
+
   it("renders an unknown token raw", () => {
     expect(inventoryAnalysisChip({ analysis_state: "analysis_queued" })).toMatchObject({ text: "analysis_queued", tone: "pending" });
   });

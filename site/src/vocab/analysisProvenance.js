@@ -106,7 +106,9 @@ export function inventoryAnalysisChip(row) {
   const token = row?.analysis_state;
   if (token == null) return row?.analyzed ? INVENTORY_CHIP.current_analyzer : INVENTORY_CHIP.analysis_not_completed;
   const chip = INVENTORY_CHIP[token] || { text: token, tone: "pending" };
+  if (token !== "older_analyzer") return { ...chip, title: undefined };
   const version = row.stale_analysis_version;
-  const title = token === "older_analyzer" && typeof version === "number" ? `static analyzer v${version}` : undefined;
-  return { ...chip, title };
+  // The backend files an analysis it can't prove current as older; without a version that is all it knows.
+  if (typeof version !== "number") return { text: "analyzed · analyzer version not determined", tone: "ok", title: undefined };
+  return { ...chip, title: `static analyzer v${version}` };
 }
