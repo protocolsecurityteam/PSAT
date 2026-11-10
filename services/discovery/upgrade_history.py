@@ -1392,12 +1392,14 @@ def _load_action_context(session, contract_ids):
             UpgradeEvent.block_number,
             UpgradeEvent.chain_id,
             Contract.chain,
+            UpgradeEvent.id,
+            UpgradeEvent.timestamp,
         )
         .join(Contract, Contract.id == UpgradeEvent.contract_id)
         .where(UpgradeEvent.contract_id.in_(ids))
     ).all()
 
-    keys = sorted({(int(cid), str(tx).lower()) for _c, _p, tx, _b, cid, _ch in events if cid is not None and tx})
+    keys = sorted({(int(e.chain_id), str(e.tx_hash).lower()) for e in events if e.chain_id is not None and e.tx_hash})
     tx_rows: dict[tuple[int, str], Any] = {}
     if keys:
         for row in session.execute(
@@ -1405,7 +1407,7 @@ def _load_action_context(session, contract_ids):
         ).scalars():
             tx_rows[(row.chain_id, row.tx_hash)] = row
 
-    addr_keys = sorted({(int(cid), (proxy or "").lower()) for _c, proxy, _t, _b, cid, _ch in events if cid is not None})
+    addr_keys = sorted({(int(e.chain_id), (e.proxy_address or "").lower()) for e in events if e.chain_id is not None})
     creation_rows: dict[tuple[int, str], Any] = {}
     if addr_keys:
         for row in session.execute(
@@ -1417,20 +1419,45 @@ def _load_action_context(session, contract_ids):
     return events, tx_rows, creation_rows
 
 
+def _event_pair_counts(events) -> dict[tuple[int, str], int]:
+    pair_counts: dict[tuple[int, str], int] = {}
+    for e in events:
+        if e.tx_hash:
+            key = (int(e.contract_id), str(e.tx_hash).lower())
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+    return pair_counts
+
+
+def _is_proven_deployment(event, tx_row, creation_rows, pair_counts) -> bool:
+    """The one exclusion every upgrade figure applies: an event with a receipt fact proving it the deployment."""
+    if tx_row is None or event.chain_id is None:
+        return False
+    proxy = event.proxy_address or ""
+    return event_is_deployment(
+        tx_row,
+        creation_rows.get((int(event.chain_id), proxy.lower())),
+        proxy_address=proxy,
+        event_block=event.block_number,
+        pair_event_count=pair_counts.get((int(event.contract_id), str(event.tx_hash).lower()), 1),
+    )
+
+
+def _tx_row_for(event, tx_rows):
+    if not event.tx_hash or event.chain_id is None:
+        return None
+    return tx_rows.get((int(event.chain_id), str(event.tx_hash).lower()))
+
+
 def _fold_actions(session, contract_ids) -> dict[int, dict]:
     """Fold each contract's events into its action set plus the counters every figure cites."""
     from db.models import EXECUTOR_KIND_SAFE_DIRECT
 
     events, tx_rows, creation_rows = _load_action_context(session, contract_ids)
-    pair_counts: dict[tuple[int, str], int] = {}
-    for cid, _proxy, tx, _blk, _chain, _name in events:
-        if tx:
-            key = (int(cid), str(tx).lower())
-            pair_counts[key] = pair_counts.get(key, 0) + 1
+    pair_counts = _event_pair_counts(events)
 
     per_contract: dict[int, dict] = {}
-    for cid, proxy, tx, block, chain, chain_name in events:
-        cid = int(cid)
+    for event in events:
+        cid, tx, chain, chain_name = int(event.contract_id), event.tx_hash, event.chain_id, event.chain
         state = per_contract.setdefault(
             cid,
             {
@@ -1454,7 +1481,7 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
             state["events_without_tx_hash"] += 1
             continue
         tx_lc = str(tx).lower()
-        tx_row = tx_rows.get((int(chain), tx_lc)) if chain is not None else None
+        tx_row = _tx_row_for(event, tx_rows)
         if tx_row is None:
             # No receipt fact: stays counted.
             state["events_unlinked"] += 1
@@ -1464,14 +1491,7 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
         state["kinds"][tx_row.executor_kind] = state["kinds"].get(tx_row.executor_kind, 0) + 1
         if tx_row.executor_kind == EXECUTOR_KIND_SAFE_DIRECT:
             state["direct_blocks"].append(tx_row.block_number)
-        creation_row = creation_rows.get((int(chain), (proxy or "").lower()))
-        if event_is_deployment(
-            tx_row,
-            creation_row,
-            proxy_address=proxy or "",
-            event_block=block,
-            pair_event_count=pair_counts.get((cid, tx_lc), 1),
-        ):
+        if _is_proven_deployment(event, tx_row, creation_rows, pair_counts):
             state["deployments_excluded"] += 1
             continue
         state["actions"].add(tx_lc)
@@ -1545,6 +1565,59 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
                 "direct_upgrade_witnessed_at_block": min(direct) if direct else None,
             },
         }
+    return out
+
+
+LAST_UPGRADE_ESTABLISHED = "established"
+
+
+def _not_before(a, b) -> bool | None:
+    """``a`` is no earlier than ``b``; ``None`` when the rows carry no common ordering (block vs block, else time vs
+    time).
+    """
+    if a.block_number is not None and b.block_number is not None:
+        return a.block_number >= b.block_number
+    if a.timestamp is not None and b.timestamp is not None:
+        return a.timestamp >= b.timestamp
+    return None
+
+
+def _latest_event(events):
+    """The event provably no earlier than every other, or ``None`` when no such event exists."""
+    blocks = [e.block_number for e in events if e.block_number is not None]
+    times = [e.timestamp for e in events if e.timestamp is not None]
+    # A dominating event holds the max block if it has one, else the max time.
+    candidates = [e for e in events if blocks and e.block_number == max(blocks)]
+    candidates += [e for e in events if e.block_number is None and times and e.timestamp == max(times)]
+    if len(events) == 1:
+        candidates = list(events)
+    dominating = [m for m in candidates if all(e is m or _not_before(m, e) for e in events)]
+    if not dominating:
+        return None
+    return max(dominating, key=lambda e: (e.timestamp is not None, e.id))
+
+
+def last_upgrade_actions(session, contract_ids) -> dict[int, dict]:
+    """Per contract with a recorded non-deployment upgrade: the latest one's block and timestamp, from one row.
+
+    ``state`` is ``established`` only when one row is provably no earlier than all others; rows with no common
+    ordering (a block-only scan row beside a time-only poll row) publish ``not_determined`` with no pair.
+    """
+    events, tx_rows, creation_rows = _load_action_context(session, contract_ids)
+    pair_counts = _event_pair_counts(events)
+    by_contract: dict[int, list[Any]] = {}
+    for event in events:
+        if _is_proven_deployment(event, _tx_row_for(event, tx_rows), creation_rows, pair_counts):
+            continue
+        by_contract.setdefault(int(event.contract_id), []).append(event)
+    out: dict[int, dict] = {}
+    for cid, rows in by_contract.items():
+        latest = _latest_event(rows)
+        out[cid] = (
+            {"block": latest.block_number, "timestamp": latest.timestamp, "state": LAST_UPGRADE_ESTABLISHED}
+            if latest is not None
+            else {"block": None, "timestamp": None, "state": NOT_DETERMINED}
+        )
     return out
 
 

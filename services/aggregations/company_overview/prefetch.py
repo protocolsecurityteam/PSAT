@@ -21,7 +21,6 @@ from db.models import (
     EffectiveFunction,
     FunctionPrincipal,
     PrincipalLabel,
-    UpgradeEvent,
 )
 from services.scoring.planes import MAPPING_ENUMERATION_STATUS
 
@@ -336,27 +335,10 @@ def _prefetch_child_tables(
         return local, len(local)
 
     def _upgrade_last(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
-        """Block and timestamp from the same last row (two MAXes can name different events).
+        """Block and timestamp from the same last row, with proven deployments excluded as the count excludes them."""
+        from services.discovery.upgrade_history import last_upgrade_actions
 
-        Order mirrors services/chat/data.py: timestamp, block NULLS FIRST, id.
-        """
-        local: dict[int, dict[str, Any]] = {}
-        for cid, last_block, last_ts in s.execute(
-            select(
-                UpgradeEvent.contract_id,
-                UpgradeEvent.block_number,
-                UpgradeEvent.timestamp,
-            )
-            .where(UpgradeEvent.contract_id.in_(id_list))
-            .order_by(
-                UpgradeEvent.contract_id,
-                UpgradeEvent.timestamp.desc().nullslast(),
-                UpgradeEvent.block_number.desc().nullsfirst(),
-                UpgradeEvent.id.desc(),
-            )
-            .distinct(UpgradeEvent.contract_id)
-        ).all():
-            local[cid] = {"block": last_block, "timestamp": last_ts}
+        local: dict[int, dict[str, Any]] = last_upgrade_actions(s, id_list)
         return local, len(local)
 
     def _balances(s: Session) -> tuple[dict[int, list[Any]], int]:

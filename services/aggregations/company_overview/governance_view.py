@@ -155,6 +155,7 @@ def build_governance_view(
         upgrade_count_basis = upgrade_entry.get("basis")
         last_upgrade_entry = (last_upgrade_by_cid.get(contract_row.id) if contract_row else None) or {}
         last_upgrade_block = last_upgrade_entry.get("block")
+        last_upgrade_state = last_upgrade_entry.get("state")
         last_ts = last_upgrade_entry.get("timestamp")
         last_upgrade_timestamp = last_ts.isoformat() if last_ts is not None else None
 
@@ -318,6 +319,8 @@ def build_governance_view(
             "upgrade_count_basis": upgrade_count_basis,
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
+            # ``established`` or ``not_determined`` (rows with no common ordering); null with no recorded upgrade.
+            "last_upgrade_state": last_upgrade_state,
             "role": role,
             "role_evidence": role_evidence,
             "standards": standards,
