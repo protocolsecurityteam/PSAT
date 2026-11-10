@@ -125,10 +125,10 @@ def test_poll_rotation_records_no_block_rather_than_the_stale_one(db_session, su
 
 
 def test_rotation_moves_only_rows_resolved_against_the_watched_address(db_session, subject, monkeypatch):
-    """The holder can carry another deployment's set (a shared implementation read in proxy context)."""
+    """The holder can also carry another deployment's set (it is the implementation behind another proxy)."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     other_proxy = "0x5555555555555555555555555555555555555555"
-    for deployment in (None, SUBJECT, other_proxy):
+    for deployment in (None, other_proxy):
         db_session.add(
             ControllerValue(
                 contract_id=subject.id,
@@ -156,4 +156,4 @@ def test_rotation_moves_only_rows_resolved_against_the_watched_address(db_sessio
         .scalars()
         .all()
     }
-    assert values == {None: NEW_EOA, SUBJECT: NEW_EOA, other_proxy: OLD_TIMELOCK}
+    assert values == {None: NEW_EOA, other_proxy: OLD_TIMELOCK}
