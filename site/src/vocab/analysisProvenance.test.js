@@ -60,9 +60,9 @@ describe("analysisProvenanceLine", () => {
 
   it("appends the implementation's job compactly for a proxy", () => {
     const out = line(job(), job({ job_id: "impl-job", static_analyzer_version: 11, state: "older_analyzer" }));
-    expect(out.text).toBe(`analyzer v12 · last pipeline pass ${date} · impl older analyzer v11, ${date}`);
+    expect(out.text).toBe(`analyzer v12 · last pipeline pass ${date} · impl: older analyzer v11 · last pass ${date}`);
     expect(out.title).toContain("implementation job impl-job");
-    expect(line(job(), ND_JOB).text).toBe(`analyzer v12 · last pipeline pass ${date} · impl not determined`);
+    expect(line(job(), ND_JOB).text).toBe(`analyzer v12 · last pipeline pass ${date} · impl: not determined`);
   });
 
   it("is null without provenance", () => {

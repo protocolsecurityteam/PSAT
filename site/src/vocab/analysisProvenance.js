@@ -28,12 +28,12 @@ function analyzerWord(job) {
   return [head, stateWord].filter(Boolean).join(" · ");
 }
 
-function passWord(job) {
+function passWord(job, label = "last pipeline pass") {
   const at = job.last_pipeline_pass_at;
   if (at == null) return null;
-  if (at === ND) return "last pipeline pass not determined";
+  if (at === ND) return `${label} not determined`;
   const date = provenanceDate(at);
-  return date ? `last pipeline pass ${date}` : at;
+  return date ? `${label} ${date}` : at;
 }
 
 function reuseWord(job) {
@@ -87,10 +87,8 @@ export function analysisProvenanceLine(entry) {
   if (impl) {
     const implText = allNotDetermined(impl)
       ? "not determined"
-      : [analyzerWord(impl), reuseWord(impl), provenanceDate(impl.last_pipeline_pass_at) || passWord(impl)]
-          .filter(Boolean)
-          .join(", ");
-    parts.push(`impl ${implText}`);
+      : [analyzerWord(impl), reuseWord(impl), passWord(impl, "last pass")].filter(Boolean).join(" · ");
+    parts.push(`impl: ${implText}`);
     titles.push(jobTitle(impl, "implementation "));
   }
   return { text: parts.join(" · "), title: titles.join("\n") };

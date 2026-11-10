@@ -26,10 +26,11 @@ const COMPANY = {
           ...c,
           total_usd: 1234567.89,
           balances: [
-            { token_symbol: "WETH", token_name: "Wrapped Ether", token_address: "0x8888888888888888888888888888888888888888", balance: "1200.5", usd_value: 4200000, usd_value_state: "measured" },
-            { token_symbol: "DUST", token_name: "Dust Token", token_address: "0x9999999999999999999999999999999999999999", balance: "3", usd_value: null, usd_value_state: "not_determined" },
+            { token_symbol: "WETH", token_name: "Wrapped Ether", token_address: "0x8888888888888888888888888888888888888888", balance: "1200.5", usd_value: 4200000, usd_value_state: "measured", observed_at: "2026-07-14T11:00:00+00:00", price_observed_at: "2026-07-14T10:55:00+00:00" },
+            { token_symbol: "DUST", token_name: "Dust Token", token_address: "0x9999999999999999999999999999999999999999", balance: "3", usd_value: null, usd_value_state: "not_determined", observed_at: "2026-07-14T11:00:00+00:00", price_observed_at: null },
           ],
-          holdings_coverage: { state: "not_determined" },
+          // DUST has no USD value, so total_usd is a lower bound.
+          holdings_coverage: { rows: 2, page_cap: 100, state: "not_determined", unvalued_rows: 1 },
         }
       : c,
   ),
@@ -74,9 +75,9 @@ const HISTORY = {
 
 const ADDRESSES = {
   all_addresses: [
-    { address: VAULT, chain: "ethereum", name: "Vault", is_proxy: true, implementation_name: "VaultImpl", analyzed: true, rank_score: 0.91, membership_state: "member" },
-    { address: POOL, chain: "ethereum", name: "LiquidityPool", analyzed: true, rank_score: 0.72, membership_state: "member" },
-    { address: EOA, chain: "ethereum", name: null, analyzed: false, rank_score: 0.1, membership_state: "candidate", candidate_reason: { kind: "no_probe_attempt" } },
+    { address: VAULT, chain: "ethereum", name: "Vault", is_proxy: true, implementation_name: "VaultImpl", analyzed: true, analysis_state: "current_analyzer", rank_score: 0.91, membership_state: "member" },
+    { address: POOL, chain: "ethereum", name: "LiquidityPool", analyzed: true, analysis_state: "older_analyzer", stale_analysis_version: 11, rank_score: 0.72, membership_state: "member" },
+    { address: EOA, chain: "ethereum", name: null, analyzed: false, analysis_state: "analysis_not_completed", rank_score: 0.1, membership_state: "candidate", candidate_reason: { kind: "no_probe_attempt" } },
   ],
 };
 

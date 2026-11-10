@@ -420,7 +420,7 @@ describe("EntityCard analysis provenance", () => {
     );
     const lines = container.querySelectorAll(".ps-machine-title-wrap .ps-machine-address");
     expect(lines).toHaveLength(2);
-    expect(lines[1].textContent).toMatch(/^analyzer v12 · last pipeline pass .+ · impl older analyzer v11, /);
+    expect(lines[1].textContent).toMatch(/^analyzer v12 · last pipeline pass .+ · impl: older analyzer v11 · last pass /);
     expect(lines[1].getAttribute("title")).toContain("implementation job impl");
   });
 
