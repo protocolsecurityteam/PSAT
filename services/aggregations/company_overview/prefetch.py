@@ -331,7 +331,7 @@ def _prefetch_child_tables(
         """
         from services.discovery.upgrade_history import upgrade_action_counts
 
-        local: dict[int, dict[str, Any]] = upgrade_action_counts(s, id_list)
+        local: dict[int, dict[str, Any]] = upgrade_action_counts(s, id_list, with_completed_empty=True)
         return local, len(local)
 
     def _upgrade_last(s: Session) -> tuple[dict[int, dict[str, Any]], int]:

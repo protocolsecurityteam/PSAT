@@ -1498,7 +1498,24 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
     return per_contract
 
 
-def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
+UPGRADE_COUNT_EXACT = "exact"
+UPGRADE_COUNT_UPPER_BOUND = "upper_bound"
+
+
+def _recorded_count_relation(fetch_status: str | None, state: dict) -> str:
+    """How the action count relates to the ERC-1967 upgrade actions in the fetched history.
+
+    Events with no receipt fact or no tx hash are each counted, so they can only over-count; a fetch that didn't
+    complete leaves the history itself partial, so nothing is proven either way.
+    """
+    if fetch_status != UPGRADE_FETCH_COMPLETE:
+        return NOT_DETERMINED
+    if state["events_unlinked"] + state["events_without_tx_hash"] > 0:
+        return UPGRADE_COUNT_UPPER_BOUND
+    return UPGRADE_COUNT_EXACT
+
+
+def upgrade_action_counts(session, contract_ids, *, with_completed_empty: bool = False) -> dict[int, dict]:
     """Per contract: how many upgrade actions its rows support, plus the basis.
 
     * The unit is the transaction, not the log (one tx carried 19 ``Upgraded`` logs).
@@ -1507,8 +1524,9 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
     rows, so "none recorded" isn't "none happened".
     * A proxy whose last history fetch errored publishes ``None`` whatever its rows say: they are the part that was
     read.
+    * An errored fetch publishes its basis even with no rows; so does a completed one with *with_completed_empty*.
 
-    Still an upper bound: events with no receipt fact stay counted.
+    ``recorded_count_relation`` states what the counters prove about the count; see ``_recorded_count_relation``.
     """
     from sqlalchemy import select
 
@@ -1528,7 +1546,8 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
     )
     folded = _fold_actions(session, ids)
     for cid, status in fetch_status.items():
-        if status == UPGRADE_FETCH_ERROR and cid not in folded:
+        placeholder = status == UPGRADE_FETCH_ERROR or (with_completed_empty and status == UPGRADE_FETCH_COMPLETE)
+        if placeholder and cid not in folded:
             folded[cid] = {
                 "actions": set(),
                 "events_total": 0,
@@ -1549,6 +1568,7 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
             "count": count if count > 0 and not fetch_errored else None,
             "basis": {
                 "history_fetch_status": fetch_status.get(cid) or NOT_DETERMINED,
+                "recorded_count_relation": _recorded_count_relation(fetch_status.get(cid), state),
                 "events_total": state["events_total"],
                 "tx_facts_present": state["tx_facts_present"],
                 "events_unlinked": state["events_unlinked"],
