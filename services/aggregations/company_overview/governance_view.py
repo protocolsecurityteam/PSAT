@@ -289,6 +289,7 @@ def build_governance_view(
                 "usd_value": float(b.usd_value) if b.usd_value is not None else None,
                 "usd_value_state": "measured" if b.usd_value is not None else "not_determined",
                 "observed_at": b.observed_at.isoformat() if getattr(b, "observed_at", None) else None,
+                "price_observed_at": b.price_observed_at.isoformat() if getattr(b, "price_observed_at", None) else None,
             }
             for b in partial_rows
         ]
