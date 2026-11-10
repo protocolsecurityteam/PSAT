@@ -28,6 +28,7 @@
         },
         "control_model": "NoneType",
         "controller_reads": {},
+        "controller_values_state": "NoneType",
         "controllers": {},
         "deployer": "NoneType",
         "has_timelock": "NoneType",

@@ -139,7 +139,30 @@ def test_a_proxy_without_its_own_impl_rows_falls_back_to_its_own_storage_reads(d
     payload = build_company_overview(s, p.name)
     assert _entry(payload, proxy_a)["controllers"] == {"admin": own_admin}
     assert _entry(payload, proxy_a)["owner"] is None
+    # The logic contract's set was never read for this proxy, so its own reads are not the whole set.
+    assert _entry(payload, proxy_a)["controller_values_state"] == "not_determined"
     assert _entry(payload, proxy_b)["controllers"] == {"owner": owner_b}
+    assert _entry(payload, proxy_b)["controller_values_state"] is None
+
+
+def test_unattributable_logic_rows_are_not_published_as_no_controllers(db_session):
+    s = db_session
+    p, impl_c, (proxy_a, proxy_b) = _shared_impl_protocol(s)
+    _cv(s, impl_c, "owner", _addr("legacy"))
+    s.commit()
+
+    payload = build_company_overview(s, p.name)
+    for proxy in (proxy_a, proxy_b):
+        entry = _entry(payload, proxy)
+        assert (entry["controllers"], entry["controller_reads"]) == ({}, {})
+        assert entry["controller_values_state"] == "not_determined"
+
+
+def test_a_contract_with_no_rows_makes_no_claim(db_session):
+    s = db_session
+    p, _impl_c, (proxy_a, _proxy_b) = _shared_impl_protocol(s)
+    entry = _entry(build_company_overview(s, p.name), proxy_a)
+    assert (entry["controllers"], entry["controller_values_state"]) == ({}, None)
 
 
 def test_secondary_impl_rows_join_only_when_resolved_against_the_proxy(db_session):
@@ -176,6 +199,20 @@ def test_a_standalone_contract_publishes_its_own_untagged_rows_only(db_session):
     entry = _entry(build_company_overview(s, p.name), addr)
     assert entry["controllers"] == {"owner": own_owner.lower()}
     assert entry["owner"] == own_owner.lower()
+    assert entry["controller_values_state"] is None
+
+
+def test_a_standalone_contract_holding_only_other_deployments_rows_is_not_determined(db_session):
+    s = db_session
+    p = _add_protocol(s, f"standalone-other-{uuid.uuid4().hex[:8]}")
+    addr = _addr("solo")
+    job = _add_job(s, address=addr, protocol_id=p.id, name="Solo")
+    solo = _add_contract(s, address=addr, job=job, protocol_id=p.id, contract_name="Solo")
+    _cv(s, solo, "owner", _addr("else"), deployment=_addr("other"))
+    s.commit()
+
+    entry = _entry(build_company_overview(s, p.name), addr)
+    assert (entry["controllers"], entry["controller_values_state"]) == ({}, "not_determined")
 
 
 def test_resolved_against_rule():

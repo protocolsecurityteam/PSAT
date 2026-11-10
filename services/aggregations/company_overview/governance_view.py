@@ -136,7 +136,7 @@ def build_governance_view(
         if not summary_row and contract_row:
             summary_row = contract_row.summary
 
-        lookup_contract, entry_cvs = _entry_controller_values(
+        lookup_contract, entry_cvs, controller_values_state = _entry_controller_values(
             job.address,
             contract_row,
             [impl_contract, *secondary_impl_contracts] if is_proxy else [],
@@ -314,6 +314,8 @@ def build_governance_view(
             "owner": owner,
             "controllers": controllers,
             "controller_reads": _controller_reads(entry_cvs),
+            # ``not_determined``: rows exist but none were resolved against this deployment; null makes no claim.
+            "controller_values_state": controller_values_state,
             "control_model": control_model,
             "source_verified": summary_row.source_verified if summary_row else None,
             "chain": contract_row.chain if contract_row else None,
@@ -1014,11 +1016,14 @@ def _entry_controller_values(
     own_contract: Contract | None,
     logic_contracts: list[Contract | None],
     controller_values_by_cid: dict[int, list[ControllerValue]],
-) -> tuple[Contract | None, list[ControllerValue]]:
-    """The contract an entry's controller snapshot is read from, and the rows resolved against the entry's address.
+) -> tuple[Contract | None, list[ControllerValue], str | None]:
+    """The contract an entry's controller snapshot is read from, the rows resolved against the entry's address, and
+    the set's state.
 
     The logic contracts' rows (read against the proxy's storage) win over the proxy's own; a shared implementation holds
-    one set per proxy, so only this deployment's rows are taken.
+    one set per proxy, so only this deployment's rows are taken. When the snapshot holders have rows but none resolved
+    against this deployment, the set was never read for it: ``not_determined``, not an empty set. ``None`` makes no
+    claim.
     """
 
     def _selected(holder: Contract) -> list[ControllerValue]:
@@ -1031,18 +1036,23 @@ def _entry_controller_values(
 
     seen: set[int] = set()
     logic_rows: list[ControllerValue] = []
+    logic_holds_rows = False
     first_with_rows: Contract | None = None
     for holder in logic_contracts:
         if holder is None or holder.id in seen:
             continue
         seen.add(holder.id)
+        logic_holds_rows = logic_holds_rows or bool(controller_values_by_cid.get(holder.id))
         rows = _selected(holder)
         if rows and first_with_rows is None:
             first_with_rows = holder
         logic_rows.extend(rows)
     if logic_rows:
-        return (logic_contracts[0] or first_with_rows), logic_rows
-    return own_contract, (_selected(own_contract) if own_contract else [])
+        return (logic_contracts[0] or first_with_rows), logic_rows, None
+    own_rows = _selected(own_contract) if own_contract else []
+    own_holds_rows = bool(own_contract and controller_values_by_cid.get(own_contract.id))
+    unattributed = logic_holds_rows or (own_holds_rows and not own_rows)
+    return own_contract, own_rows, (NOT_DETERMINED if unattributed else None)
 
 
 def _contract_order(entry: dict[str, Any]) -> tuple[str, str]:
