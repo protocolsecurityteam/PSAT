@@ -14,8 +14,6 @@ from db.models import (
     ContractCreationWitness,
     ContractMembershipWitness,
     ContractProbeAttempt,
-    Job,
-    JobStatus,
     PendingEffectsWork,
     Protocol,
     TvlSnapshot,
@@ -30,11 +28,15 @@ from services.scoring.reach import REACH_MODEL, load_protocol_reach, merge_reach
 from .entity_keys import _coalesce_chain, _entity_key
 from .governance_view import build_governance_view
 from .jobs import (
+    ANALYSIS_CURRENT,
+    ANALYSIS_OLDER,
     MEMBER_ANALYSIS_FAILED,
     MEMBER_ANALYSIS_NOT_COMPLETED,
     CompanyNotFound,
     GovernanceView,
     _time_phase,
+    analysis_provenance,
+    contract_analysis_states,
     members_without_analysis,
     prefetch_contracts,
     resolve_company_jobs,
@@ -43,6 +45,8 @@ from .jobs import (
 from .principals import _MONITORED_TYPE_LOOKUP
 
 logger = logging.getLogger("services.aggregations.company_overview")
+
+_ANALYZED_STATES = frozenset({ANALYSIS_CURRENT, ANALYSIS_OLDER})
 
 
 def _protocol_inventory_filter(protocol_id: int):
@@ -182,14 +186,10 @@ def all_addresses_for_protocol(session: Session, protocol_row: Protocol) -> list
     impl_name_by_entity = {
         _entity_key(c.chain, c.address): c.contract_name for c in all_contract_rows if c.address and c.contract_name
     }
-    job_ids = {cr.job_id for cr in all_contract_rows if cr.job_id is not None}
-    completed_job_ids: set = set()
-    if job_ids:
-        completed_job_ids = set(
-            session.execute(select(Job.id).where(Job.id.in_(job_ids), Job.status == JobStatus.completed))
-            .scalars()
-            .all()
-        )
+    # The same rule as ``member_analysis``: an older analyzer's standing analysis counts, flagged by its state.
+    analysis = contract_analysis_states(
+        session, [(cr.id, cr.address, cr.chain) for cr in all_contract_rows if cr.address]
+    )
     membership = _membership_fields(session, list(all_contract_rows))
 
     return sorted(
@@ -200,7 +200,9 @@ def all_addresses_for_protocol(session: Session, protocol_row: Protocol) -> list
                 **membership[cr.id],
                 "source_verified": cr.source_verified,
                 "is_proxy": cr.is_proxy,
-                "analyzed": cr.job_id is not None and cr.job_id in completed_job_ids,
+                "analyzed": (analysis.get(cr.id) or {}).get("analysis_state") in _ANALYZED_STATES,
+                "analysis_state": (analysis.get(cr.id) or {}).get("analysis_state", MEMBER_ANALYSIS_NOT_COMPLETED),
+                "stale_analysis_version": (analysis.get(cr.id) or {}).get("stale_analysis_version"),
                 "discovery_sources": list(cr.discovery_sources or []),
                 "discovery_url": cr.discovery_url,
                 "chain": cr.chain,
@@ -326,6 +328,14 @@ def build_company_overview(session: Session, name: str, *, include_summary: bool
         impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     with _time_phase(timings_ms, "build_governance_view"):
         governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
+    with _time_phase(timings_ms, "analysis_provenance"):
+        provenance = analysis_provenance(session, [*jobs, *impl_job_by_entity.values()], contracts_by_job_id)
+        for entry in governance.contracts:
+            impl_job_id = entry.get("impl_job_id")
+            entry["analysis_provenance"] = {
+                "job": provenance.get(entry["job_id"]),
+                "impl_job": provenance.get(impl_job_id) if impl_job_id else None,
+            }
     with _time_phase(timings_ms, "compute_reach"):
         reach = _company_reach(session, contracts_by_job_id)
     with _time_phase(timings_ms, "assemble_payload"):
