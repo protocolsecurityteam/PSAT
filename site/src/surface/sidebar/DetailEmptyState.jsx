@@ -367,7 +367,7 @@ export function DetailEmptyState({
                 {upgrade.undetermined.map((u) => `${u.count} ${u.word}`).join(" · ")}
               </span>
             ) : (
-              <span className="ps-glance-row-r ps-glance-dim">none witnessed</span>
+              <span className="ps-glance-row-r ps-glance-dim">none recorded</span>
             )}
           </div>
           <div className="ps-glance-row">

@@ -197,7 +197,7 @@ describe("DetailEmptyState — freshness and value", () => {
     await waitFor(() => expect(screen.getByText(/2 contracts/)).toBeInTheDocument());
     expect(screen.getByText(/last event Aug 1/)).toBeInTheDocument();
     // No witnessed upgrade in this payload → the earned-nothing wording.
-    expect(screen.getByText(/none witnessed/)).toBeInTheDocument();
+    expect(screen.getByText(/none recorded/)).toBeInTheDocument();
   });
 
   it("shows the last upgrade with how many contracts' last upgrades are not determined", async () => {
@@ -220,7 +220,7 @@ describe("DetailEmptyState — freshness and value", () => {
     });
     const row = (await screen.findByText("Last upgrade")).nextSibling;
     expect(row).toHaveTextContent("1 not determined");
-    expect(row).not.toHaveTextContent(/none witnessed/);
+    expect(row).not.toHaveTextContent(/none recorded/);
   });
 
   it("renders the monitoring row as not determined when the plane is unreadable", async () => {
