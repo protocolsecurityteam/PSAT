@@ -106,3 +106,10 @@ describe("buildSearchResults — USD lower bounds", () => {
     expect(clean).toMatchObject({ address: "0xs2", value: 50, valueLowerBound: false });
   });
 });
+
+describe("buildSearchResults — role evidence", () => {
+  it("types a contract whose role is not determined as such", () => {
+    const m = { address: "0xr", name: "R", role: "utility", role_evidence: "not_determined", total_usd: 0, totalFunctions: 1 };
+    expect(buildSearchResults([m], [], "contracts", "name", "")[0].type).toBe("Role not determined");
+  });
+});

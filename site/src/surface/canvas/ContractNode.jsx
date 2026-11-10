@@ -4,6 +4,7 @@ import { formatDelay, shortAddr } from "../format.js";
 import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 import { ROLE_META } from "../meta.js";
 import { upgradeCountText } from "../../vocab/upgradeFacts.js";
+import { roleLabel as roleWord } from "../../vocab/role.js";
 
 export function ContractNode({ data }) {
   const m = data.machine;
@@ -12,9 +13,7 @@ export function ContractNode({ data }) {
   // only; ownership is unchanged.
   const TIMELOCK_COLOR = "#9a8a6e";
   const accent = m.isTimelock ? TIMELOCK_COLOR : roleColor;
-  const roleLabel = m.isTimelock
-    ? "Timelock"
-    : (ROLE_META[m.role] || ROLE_META.utility).singular;
+  const roleLabel = m.isTimelock ? "Timelock" : roleWord(m);
   const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
   const upgradeText = upgradeCountText(m);

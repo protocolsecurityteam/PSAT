@@ -469,3 +469,14 @@ describe("EntityCard USD lower bound", () => {
     expect(getByText("≥ $2.0M")).toBeInTheDocument();
   });
 });
+
+describe("EntityCard role evidence", () => {
+  it("badges a not-determined role as not determined, never as the fall-through role", () => {
+    const { container } = render(
+      <EntityCard machine={machine({ role: "utility", role_evidence: "not_determined" })} onSelectGuard={vi.fn()} governsIndex={new Map()} />,
+    );
+    const badges = container.querySelector(".ps-machine-badges");
+    expect(within(badges).getByText("Role not determined")).toBeInTheDocument();
+    expect(within(badges).queryByText("Utility")).toBeNull();
+  });
+});

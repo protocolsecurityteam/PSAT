@@ -1,6 +1,6 @@
 
 import { principalLabel } from "../format.js";
-import { ROLE_META } from "../meta.js";
+import { roleLabel } from "../../vocab/role.js";
 import { usdIsLowerBound } from "../../vocab/usdBound.js";
 
 export function buildSearchResults(machines, principals, mode, sortKey, query) {
@@ -65,7 +65,7 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         kind: "contract",
         address: m.address,
         name: m.name || "",
-        type: (ROLE_META[m.role] || ROLE_META.utility).singular,
+        type: roleLabel(m),
         value: m.total_usd || 0,
         valueLowerBound: usdIsLowerBound(m),
         signers: 0,

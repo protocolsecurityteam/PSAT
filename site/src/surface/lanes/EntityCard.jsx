@@ -6,6 +6,7 @@ import { formatUsdTotal, usdIsLowerBound } from "../../vocab/usdBound.js";
 import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
 import { controllerValuesNote } from "../../vocab/controllerReads.js";
 import { analysisProvenanceLine } from "../../vocab/analysisProvenance.js";
+import { roleLabel } from "../../vocab/role.js";
 import { upgradeCountText } from "../../vocab/upgradeFacts.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
@@ -155,7 +156,7 @@ export function EntityCard({
           )}
           {isMachine && (
             <>
-              <span className="tag tag-md ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>
+              <span className="tag tag-md ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{roleLabel(machine)}</span>
               {/*
                 Gated on total_usd>0 so a pull-then-forward router isn't
                 mislabeled.

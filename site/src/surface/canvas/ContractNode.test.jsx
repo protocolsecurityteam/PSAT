@@ -151,3 +151,12 @@ describe("ContractNode — USD lower bound", () => {
     expect(exact.querySelector(".ps-node-balance").textContent).toBe("$3.0M");
   });
 });
+
+describe("ContractNode — role evidence", () => {
+  it("does not show a role reached through not-determined inputs as a fact", () => {
+    const c = renderNode({ address: "0xa", name: "X", role: "utility", role_evidence: "not_determined" });
+    expect(c.querySelector(".ps-node-role").textContent).toBe("Role not determined");
+    const w = renderNode({ address: "0xa", name: "X", role: "utility", role_evidence: "witnessed" });
+    expect(w.querySelector(".ps-node-role").textContent).toBe("Utility");
+  });
+});
